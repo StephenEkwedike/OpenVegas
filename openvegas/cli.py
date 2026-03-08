@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from decimal import Decimal
 
 import click
 from rich.console import Console
@@ -216,8 +217,9 @@ def mint(amount: float, provider: str, mode: str):
             console.print(Panel(
                 f"[bold]Mint Mode:[/bold] {mode.title()} Mint ({rates_display[mode]})\n"
                 f"[bold]Provider:[/bold] {provider} ({challenge.get('model', '')})\n"
-                f"[bold]Estimated cost:[/bold] ~${amount:.2f} on your account\n"
-                f"[bold]Max $V credit:[/bold] {challenge.get('max_credit_v', '')} $V\n"
+                f"[bold]Target burn ceiling:[/bold] up to ~${amount:.2f} on your account\n"
+                f"[bold]Max $V credit cap:[/bold] {challenge.get('max_credit_v', '')} $V\n"
+                f"[bold]Note:[/bold] actual burn depends on generated token usage and may be lower.\n"
                 f"[bold]Your task:[/bold] {challenge.get('task_prompt', '')[:80]}...",
                 title="OpenVegas Mint",
                 border_style="green",
@@ -240,7 +242,7 @@ def mint(amount: float, provider: str, mode: str):
 
             console.print(
                 f"[bold green]Minted {result['v_credited']} $V[/bold green] "
-                f"(burned ~${float(result['cost_usd']):.4f} on {provider})"
+                f"(actual burn ~${float(result['cost_usd']):.4f} on {provider})"
             )
 
         except APIError as e:
@@ -309,15 +311,18 @@ def play(game: str, stake: float, horse: int, bet_type: str):
         try:
             client = OpenVegasClient()
             result = await client.play_game(game, bet)
+            net = Decimal(str(result.get("net", "0")))
+            payout = Decimal(str(result.get("payout", "0")))
+            bet_amount = Decimal(str(result.get("bet_amount", stake)))
 
             # Display result
-            if result.get("net", 0) > 0:
+            if net > 0:
                 console.print(
-                    f"[bold green]Won {result['payout']} $V! "
-                    f"(+{result['net']} net)[/bold green]"
+                    f"[bold green]Won {payout} $V! "
+                    f"(+{net} net)[/bold green]"
                 )
             else:
-                console.print(f"[red]Lost {result['bet_amount']} $V.[/red]")
+                console.print(f"[red]Lost {bet_amount} $V.[/red]")
 
             if result.get("provably_fair"):
                 console.print(
