@@ -42,4 +42,3 @@ Render:
 ```bash
 npx remotion render OpenVegasHorseRace out/openvegas-horse.mp4
 ```
-

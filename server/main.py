@@ -8,6 +8,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.responses import FileResponse
+from dotenv import load_dotenv
 
 from server.routes import mint as mint_routes
 from server.routes import games as game_routes
@@ -26,6 +27,10 @@ from server.services.dependencies import (
     get_db,
     init_runtime_deps,
 )
+
+ROOT_DIR = Path(__file__).resolve().parents[1]
+# Allow `uvicorn server.main:app --reload` to work without manually sourcing env vars.
+load_dotenv(ROOT_DIR / ".env", override=False)
 
 
 @asynccontextmanager
