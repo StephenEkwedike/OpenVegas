@@ -81,38 +81,64 @@ class WalletService:
         )
         await self._execute(entry, tx=tx)
 
-    async def place_bet(self, account_id: str, amount: Decimal, game_id: str, *, tx=None):
+    async def place_bet(
+        self,
+        account_id: str,
+        amount: Decimal,
+        game_id: str,
+        *,
+        tx=None,
+        entry_type: str = "bet",
+        reference_id: str | None = None,
+    ):
         """Move $V from account to escrow for a game/round.
         account_id: full prefixed ID (e.g., 'user:abc' or 'agent:xyz')."""
         entry = LedgerEntry(
             debit_account=account_id,
             credit_account=f"escrow:{game_id}",
             amount=self._money(amount),
-            entry_type="bet",
-            reference_id=game_id,
+            entry_type=entry_type,
+            reference_id=reference_id or game_id,
         )
         await self._execute(entry, tx=tx)
 
-    async def settle_win(self, account_id: str, payout: Decimal, game_id: str, *, tx=None):
+    async def settle_win(
+        self,
+        account_id: str,
+        payout: Decimal,
+        game_id: str,
+        *,
+        tx=None,
+        entry_type: str = "win",
+        reference_id: str | None = None,
+    ):
         """Pay out winnings from escrow to account.
         account_id: full prefixed ID (e.g., 'user:abc' or 'agent:xyz')."""
         entry = LedgerEntry(
             debit_account=f"escrow:{game_id}",
             credit_account=account_id,
             amount=self._money(payout),
-            entry_type="win",
-            reference_id=game_id,
+            entry_type=entry_type,
+            reference_id=reference_id or game_id,
         )
         await self._execute(entry, tx=tx)
 
-    async def settle_loss(self, game_id: str, amount: Decimal, *, tx=None):
+    async def settle_loss(
+        self,
+        game_id: str,
+        amount: Decimal,
+        *,
+        tx=None,
+        entry_type: str = "loss",
+        reference_id: str | None = None,
+    ):
         """Move lost bet from escrow to house."""
         entry = LedgerEntry(
             debit_account=f"escrow:{game_id}",
             credit_account="house",
             amount=self._money(amount),
-            entry_type="loss",
-            reference_id=game_id,
+            entry_type=entry_type,
+            reference_id=reference_id or game_id,
         )
         await self._execute(entry, tx=tx)
 
@@ -137,6 +163,20 @@ class WalletService:
             credit_account="store",
             amount=self._money(amount),
             entry_type="redeem",
+            reference_id=reference_id,
+        )
+        await self._execute(entry, tx=tx)
+
+    async def fund_from_card(self, account_id: str, amount_v: Decimal, reference_id: str, *, tx=None):
+        """Credit wallet from card purchase settlement.
+
+        Uses the fiat_reserve system account as balancing source.
+        """
+        entry = LedgerEntry(
+            debit_account="fiat_reserve",
+            credit_account=account_id,
+            amount=self._money(amount_v),
+            entry_type="fiat_topup",
             reference_id=reference_id,
         )
         await self._execute(entry, tx=tx)

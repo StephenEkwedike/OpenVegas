@@ -27,3 +27,19 @@ def test_startup_schema_requires_security_migrations():
     deps = _read("server/services/dependencies.py")
     assert 'require_migration_min(db, "011_agent_balance_hardening")' in deps
     assert 'require_migration_min(db, "012_rls_hardening")' in deps
+    assert 'require_migration_min(db, "013_stripe_billing")' in deps
+    assert 'require_migration_min(db, "014_demo_mode_isolation")' in deps
+
+
+def test_billing_migration_exists_and_hardens_dedupe_and_projection():
+    sql = _read("supabase/migrations/013_stripe_billing.sql")
+    assert "CREATE TABLE IF NOT EXISTS fiat_topups" in sql
+    assert "CREATE TABLE IF NOT EXISTS stripe_webhook_events" in sql
+    assert "uq_org_sponsorships_stripe_customer_id" in sql
+    assert "ck_org_sponsorships_stripe_status" in sql
+
+
+def test_demo_isolation_migration_exists_and_adds_game_history_flag():
+    sql = _read("supabase/migrations/014_demo_mode_isolation.sql")
+    assert "ADD COLUMN IF NOT EXISTS is_demo BOOLEAN NOT NULL DEFAULT FALSE" in sql
+    assert "idx_game_history_is_demo_created" in sql

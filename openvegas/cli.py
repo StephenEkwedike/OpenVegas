@@ -12,6 +12,7 @@ from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
 from openvegas import __version__
+from openvegas.tui.confetti import render_confetti
 
 console = Console()
 
@@ -173,11 +174,51 @@ def history():
 
 
 @cli.command()
-@click.argument("amount", type=float)
-def deposit(amount: float):
-    """Buy $V with cash (opens Stripe checkout)."""
-    console.print(f"[yellow]Stripe checkout for ${amount:.2f} — coming soon.[/yellow]")
-    console.print("[dim]For now, use 'openvegas mint' to mint $V with your API keys.[/dim]")
+@click.argument("amount")
+def deposit(amount: str):
+    """Buy $V with cash (returns Stripe checkout URL)."""
+    async def _deposit():
+        from openvegas.client import OpenVegasClient, APIError
+        try:
+            amt = Decimal(amount)
+        except Exception:
+            console.print("[red]Invalid amount. Example: openvegas deposit 10[/red]")
+            return
+
+        try:
+            client = OpenVegasClient()
+            data = await client.create_topup_checkout(amt)
+            console.print(f"[green]Top-up ID:[/green] {data.get('topup_id')}")
+            console.print(f"[green]Status:[/green] {data.get('status')}")
+            if data.get("checkout_url"):
+                console.print(f"[bold cyan]Checkout URL:[/bold cyan] {data['checkout_url']}")
+            else:
+                console.print("[yellow]No checkout URL returned. Try again or check deposit status.[/yellow]")
+        except APIError as e:
+            console.print(f"[red]{e.detail}[/red]")
+
+    run_async(_deposit())
+
+
+@cli.command("deposit-status")
+@click.argument("topup_id")
+def deposit_status(topup_id: str):
+    """Check status of a Stripe top-up."""
+    async def _status():
+        from openvegas.client import OpenVegasClient, APIError
+        try:
+            client = OpenVegasClient()
+            data = await client.get_topup_status(topup_id)
+            console.print(
+                f"[bold]Status:[/bold] {data.get('status')} | "
+                f"[bold]Credit:[/bold] {data.get('v_credit', '0')} $V"
+            )
+            if data.get("checkout_url"):
+                console.print(f"[dim]Checkout URL: {data['checkout_url']}[/dim]")
+        except APIError as e:
+            console.print(f"[red]{e.detail}[/red]")
+
+    run_async(_status())
 
 
 # ---------------------------------------------------------------------------
@@ -296,7 +337,19 @@ def keys_list():
     type=click.Choice(["win", "place", "show"]), default="win",
 )
 @click.option("--render/--no-render", default=True, help="Render terminal animation/reveal when available")
-def play(game: str, stake: float, horse: int, bet_type: str, render: bool):
+@click.option(
+    "--demo-force-win/--no-demo-force-win",
+    default=False,
+    help="Use admin-only demo win endpoint (non-canonical).",
+)
+def play(
+    game: str,
+    stake: float,
+    horse: int,
+    bet_type: str,
+    render: bool,
+    demo_force_win: bool,
+):
     """Play a game and wager $V."""
     async def _play():
         from openvegas.client import OpenVegasClient, APIError
@@ -314,7 +367,10 @@ def play(game: str, stake: float, horse: int, bet_type: str, render: bool):
 
         try:
             client = OpenVegasClient()
-            result = await client.play_game(game, bet)
+            if demo_force_win:
+                result = await client.play_game_demo(game, bet)
+            else:
+                result = await client.play_game(game, bet)
             net = Decimal(str(result.get("net", "0")))
             payout = Decimal(str(result.get("payout", "0")))
             bet_amount = Decimal(str(result.get("bet_amount", stake)))
@@ -353,9 +409,21 @@ def play(game: str, stake: float, horse: int, bet_type: str, render: bool):
                 else:
                     console.print(f"[red]Lost {bet_amount} $V.[/red]")
 
+            if net > 0:
+                from openvegas.config import load_config
+                if load_config().get("animation", True):
+                    render_confetti(console)
+
+            if result.get("demo_mode"):
+                console.print("[bold yellow]DEMO MODE RESULT[/bold yellow] [dim](canonical: false)[/dim]")
+
             if result.get("provably_fair"):
                 console.print(
                     f"[dim]Verify: openvegas verify {game_id}[/dim]"
+                )
+            elif result.get("demo_mode"):
+                console.print(
+                    f"[dim]Verify (demo): openvegas verify {game_id} --demo[/dim]"
                 )
 
         except APIError as e:
@@ -552,12 +620,20 @@ def store_grants():
 
 @cli.command()
 @click.argument("game_id")
-def verify(game_id: str):
+@click.option("--demo", is_flag=True, help="Verify against demo verification endpoint (non-canonical).")
+def verify(game_id: str, demo: bool):
     """Verify a provably fair game outcome."""
     async def _verify():
         from openvegas.client import OpenVegasClient, APIError
         try:
             client = OpenVegasClient()
+            if demo:
+                data = await client.verify_demo_game(game_id)
+                console.print("[bold yellow]DEMO VERIFY[/bold yellow] [dim](canonical: false)[/dim]")
+                console.print(f"  Server seed hash: {data.get('server_seed_hash', '')[:16]}...")
+                console.print(f"  Nonce:            {data.get('nonce', '')}")
+                return
+
             data = await client.verify_game(game_id)
             from openvegas.rng.provably_fair import ProvablyFairRNG
 
@@ -578,6 +654,17 @@ def verify(game_id: str):
             console.print(f"[red]{e.detail}[/red]")
 
     run_async(_verify())
+
+
+@cli.command("ui")
+def interactive_ui():
+    """Open interactive radio-select terminal UI."""
+    try:
+        from openvegas.tui.wizard import run_wizard
+    except Exception as e:  # pragma: no cover - runtime-only import fallback
+        console.print(f"[red]Unable to load UI mode: {e}[/red]")
+        return
+    run_wizard()
 
 
 # ---------------------------------------------------------------------------

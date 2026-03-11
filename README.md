@@ -13,6 +13,9 @@ Fill `.env` with real values:
 - `SUPABASE_JWT_SECRET`
 - `DATABASE_URL` (replace `[YOUR-PASSWORD]`)
 - `REDIS_URL` (optional)
+- `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` (required for billing routes)
+- `STRIPE_ORG_PRICE_ID` (required for org subscription checkout)
+- `OPENVEGAS_DEMO_ALWAYS_WIN_ENABLED` / `OPENVEGAS_DEMO_ADMIN_USER_IDS` (optional, admin demo mode)
 
 Install and run:
 
@@ -27,7 +30,7 @@ Open:
 
 ## Supabase Schema
 
-Apply SQL files in `/supabase/migrations` in order (`001` -> `012`), then apply `/supabase/seed.sql`.
+Apply SQL files in `/supabase/migrations` in order (`001` -> `014`), then apply `/supabase/seed.sql`.
 
 ## Remotion Video
 

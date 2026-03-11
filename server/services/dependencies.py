@@ -14,6 +14,8 @@ from openvegas.fraud.engine import FraudEngine
 from openvegas.gateway.catalog import ProviderCatalog
 from openvegas.gateway.inference import AIGateway
 from openvegas.mint.engine import MintService
+from openvegas.payments.service import BillingService
+from openvegas.payments.stripe_gateway import StripeGateway
 from openvegas.wallet.ledger import WalletService
 
 
@@ -198,6 +200,20 @@ async def assert_schema_compatible(db: Any, flags: FeatureFlags) -> None:
     await require_migration_min(db, "008_schema_migrations_and_readiness")
     await require_migration_min(db, "011_agent_balance_hardening")
     await require_migration_min(db, "012_rls_hardening")
+    await require_migration_min(db, "013_stripe_billing")
+    await require_migration_min(db, "014_demo_mode_isolation")
+
+    await require_tables(db, {"fiat_topups", "stripe_webhook_events"})
+    await require_columns(
+        db,
+        {
+            ("org_sponsorships", "stripe_subscription_status"),
+            ("org_sponsorships", "has_active_subscription"),
+            ("org_sponsorships", "cancel_at_period_end"),
+            ("org_sponsorships", "current_period_end"),
+            ("game_history", "is_demo"),
+        },
+    )
 
     if flags.store_enabled:
         await require_migration_min(db, "009_inference_grant_usages_and_preauth")
@@ -337,3 +353,7 @@ def get_store_service():
     from openvegas.store.service import StoreService
 
     return StoreService(get_db(), get_wallet())
+
+
+def get_billing_service() -> BillingService:
+    return BillingService(get_db(), get_wallet(), StripeGateway())

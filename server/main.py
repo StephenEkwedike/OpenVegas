@@ -18,6 +18,7 @@ from server.routes import models as model_routes
 from server.routes import casino as casino_routes
 from server.routes import store as store_routes
 from server.routes import agent as agent_routes
+from server.routes import payments as payment_routes
 from server.services.dependencies import (
     assert_db_ready,
     assert_redis_ready,
@@ -59,6 +60,7 @@ app.include_router(model_routes.router, tags=["models"])
 app.include_router(casino_routes.router, tags=["casino"])
 app.include_router(store_routes.router, tags=["store"])
 app.include_router(agent_routes.router, tags=["agent"])
+app.include_router(payment_routes.router, tags=["billing"])
 
 
 @app.get("/health")

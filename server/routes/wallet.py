@@ -23,15 +23,24 @@ async def get_balance(user: dict = Depends(get_current_user)):
 
 
 @router.get("/history")
-async def get_history(user: dict = Depends(get_current_user)):
+async def get_history(user: dict = Depends(get_current_user), include_demo: bool = False):
     db = get_db()
     account_id = f"user:{user['user_id']}"
-    rows = await db.fetch(
-        """SELECT * FROM ledger_entries
-           WHERE debit_account = $1 OR credit_account = $1
-           ORDER BY created_at DESC LIMIT 50""",
-        account_id,
-    )
+    if include_demo:
+        rows = await db.fetch(
+            """SELECT * FROM ledger_entries
+               WHERE debit_account = $1 OR credit_account = $1
+               ORDER BY created_at DESC LIMIT 50""",
+            account_id,
+        )
+    else:
+        rows = await db.fetch(
+            """SELECT * FROM ledger_entries
+               WHERE (debit_account = $1 OR credit_account = $1)
+                 AND entry_type NOT IN ('demo_play', 'demo_win', 'demo_loss')
+               ORDER BY created_at DESC LIMIT 50""",
+            account_id,
+        )
     entries = [
         {
             "entry_type": r.get("entry_type", ""),

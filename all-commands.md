@@ -1,3 +1,15 @@
+Where to see balances:
+
+As a User view:
+openvegas balance
+openvegas history
+
+How much money OpenVegas has made -System/company view (SQL):
+
+select account_id,balance
+from wallet_accounts
+where account_id in ('house','store','mint_reserve','rake_revenue');
+
 # OpenVegas Commands
 
 This is the complete command list currently exposed by the Python CLI in
@@ -12,6 +24,7 @@ pip install -e .
 # CLI help/version
 openvegas --help
 openvegas --version
+openvegas ui
 ```
 
 ## Authentication
@@ -30,6 +43,7 @@ openvegas status
 openvegas balance
 openvegas history
 openvegas deposit <amount>
+openvegas deposit-status <topup_id>
 ```
 
 ## Keys
@@ -56,7 +70,7 @@ openvegas mint --amount 3 --provider gemini --mode split
 ## Play games (backend endpoints)
 
 ```bash
-openvegas play <horse|skillshot> --stake <amount> [--horse <n>] [--type <win|place|show>]
+openvegas play <horse|skillshot> --stake <amount> [--horse <n>] [--type <win|place|show>] [--demo-force-win]
 ```
 
 Examples:
@@ -64,6 +78,7 @@ Examples:
 ```bash
 openvegas play horse --stake 5 --horse 2 --type win
 openvegas play skillshot --stake 5
+openvegas play horse --stake 1 --horse 1 --type win --demo-force-win
 ```
 
 ## Inference spend
@@ -100,7 +115,13 @@ openvegas store grants
 ## Provably-fair verification
 
 ```bash
-openvegas verify <game_id>
+openvegas verify <game_id> [--demo]
+```
+
+Demo verify example:
+
+```bash
+openvegas verify <game_id> --demo
 ```
 
 ## Config
@@ -166,4 +187,14 @@ POST /v1/agent/casino/rounds/{round_id}/action
 POST /v1/agent/casino/rounds/{round_id}/resolve
 GET  /v1/agent/casino/rounds/{round_id}/verify
 GET  /v1/agent/casino/sessions/{session_id}
+```
+
+## npm wrapper (real-user distribution convenience)
+
+```bash
+npx @openvegas/cli --help
+npx @openvegas/cli balance
+
+npm i -g @openvegas/cli
+openvegas balance
 ```

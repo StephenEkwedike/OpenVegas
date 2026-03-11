@@ -1,0 +1,10 @@
+{
+  "name": "@openvegas/cli",
+  "version": "0.1.0",
+  "description": "npm wrapper for the OpenVegas Python CLI",
+  "type": "module",
+  "bin": {
+    "openvegas": "bin/openvegas.js"
+  },
+  "license": "MIT"
+}

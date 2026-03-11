@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 import httpx
 
 from openvegas.config import get_backend_url, get_bearer_token
@@ -76,6 +78,9 @@ class OpenVegasClient:
     async def play_game(self, game: str, bet: dict) -> dict:
         return await self._request("POST", f"/games/{game}/play", json=bet)
 
+    async def play_game_demo(self, game: str, bet: dict) -> dict:
+        return await self._request("POST", f"/games/{game}/play-demo", json=bet)
+
     async def ask(self, prompt: str, provider: str, model: str) -> dict:
         return await self._request(
             "POST", "/inference/ask",
@@ -91,6 +96,9 @@ class OpenVegasClient:
     async def verify_game(self, game_id: str) -> dict:
         return await self._request("GET", f"/games/verify/{game_id}")
 
+    async def verify_demo_game(self, game_id: str) -> dict:
+        return await self._request("GET", f"/games/demo/verify/{game_id}")
+
     async def store_list(self) -> dict:
         return await self._request("GET", "/store/list")
 
@@ -102,3 +110,16 @@ class OpenVegasClient:
 
     async def store_grants(self) -> dict:
         return await self._request("GET", "/store/grants")
+
+    async def create_topup_checkout(
+        self,
+        amount_usd: Decimal | str,
+        idempotency_key: str | None = None,
+    ) -> dict:
+        payload: dict = {"amount_usd": str(amount_usd)}
+        if idempotency_key:
+            payload["idempotency_key"] = idempotency_key
+        return await self._request("POST", "/billing/topups/checkout", json=payload)
+
+    async def get_topup_status(self, topup_id: str) -> dict:
+        return await self._request("GET", f"/billing/topups/{topup_id}")
