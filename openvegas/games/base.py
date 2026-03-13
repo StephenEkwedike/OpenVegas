@@ -25,7 +25,12 @@ class GameResult:
 
 
 class BaseGame(ABC):
-    """Interface all OpenVegas games implement."""
+    """Interface all OpenVegas games implement.
+
+    Renderer contract guidance:
+    - Preferred for new games: expose `render_async(result, console, opts)`.
+    - Backward compatible: keep `render(result, console)` (or `render(..., opts)`).
+    """
 
     name: str
     rtp: Decimal

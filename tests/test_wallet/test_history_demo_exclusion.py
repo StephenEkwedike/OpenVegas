@@ -28,7 +28,11 @@ async def test_history_excludes_demo_entries_by_default(monkeypatch):
     db = _FakeDB()
     monkeypatch.setattr(wallet_routes, "get_db", lambda: db)
     out = await wallet_routes.get_history(user={"user_id": "abc"})
-    assert "entry_type NOT IN ('demo_play', 'demo_win', 'demo_loss')" in db.last_query
+    assert "demo_human_casino_play" in db.last_query
+    assert "demo_human_casino_win" in db.last_query
+    assert "demo_human_casino_loss" in db.last_query
+    assert "debit_account <> 'demo_reserve'" in db.last_query
+    assert "credit_account <> 'demo_reserve'" in db.last_query
     assert out["entries"][0]["entry_type"] == "win"
 
 
@@ -37,4 +41,4 @@ async def test_history_can_include_demo_entries(monkeypatch):
     db = _FakeDB()
     monkeypatch.setattr(wallet_routes, "get_db", lambda: db)
     await wallet_routes.get_history(user={"user_id": "abc"}, include_demo=True)
-    assert "entry_type NOT IN ('demo_play', 'demo_win', 'demo_loss')" not in db.last_query
+    assert "demo_human_casino_play" not in db.last_query

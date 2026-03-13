@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 from fastapi import APIRouter, Depends
 
 from server.middleware.auth import get_current_user
@@ -13,7 +15,13 @@ router = APIRouter()
 @router.get("/balance")
 async def get_balance(user: dict = Depends(get_current_user)):
     wallet = get_wallet()
-    balance = await wallet.get_balance(f"user:{user['user_id']}")
+    account_id = f"user:{user['user_id']}"
+    await wallet.ensure_demo_admin_floor(
+        account_id=account_id,
+        pending_debit=Decimal("0"),
+        reason="read",
+    )
+    balance = await wallet.get_balance(account_id)
     return {
         "balance": str(balance),
         "tier": "free",
@@ -37,7 +45,12 @@ async def get_history(user: dict = Depends(get_current_user), include_demo: bool
         rows = await db.fetch(
             """SELECT * FROM ledger_entries
                WHERE (debit_account = $1 OR credit_account = $1)
-                 AND entry_type NOT IN ('demo_play', 'demo_win', 'demo_loss')
+                 AND entry_type NOT IN (
+                   'demo_play', 'demo_win', 'demo_loss', 'demo_autofund',
+                   'demo_human_casino_play', 'demo_human_casino_win', 'demo_human_casino_loss'
+                 )
+                 AND debit_account <> 'demo_reserve'
+                 AND credit_account <> 'demo_reserve'
                ORDER BY created_at DESC LIMIT 50""",
             account_id,
         )

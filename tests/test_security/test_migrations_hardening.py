@@ -29,6 +29,8 @@ def test_startup_schema_requires_security_migrations():
     assert 'require_migration_min(db, "012_rls_hardening")' in deps
     assert 'require_migration_min(db, "013_stripe_billing")' in deps
     assert 'require_migration_min(db, "014_demo_mode_isolation")' in deps
+    assert 'require_migration_min(db, "015_demo_admin_autofund")' in deps
+    assert 'require_migration_min(db, "016_human_casino")' in deps
 
 
 def test_billing_migration_exists_and_hardens_dedupe_and_projection():
@@ -43,3 +45,18 @@ def test_demo_isolation_migration_exists_and_adds_game_history_flag():
     sql = _read("supabase/migrations/014_demo_mode_isolation.sql")
     assert "ADD COLUMN IF NOT EXISTS is_demo BOOLEAN NOT NULL DEFAULT FALSE" in sql
     assert "idx_game_history_is_demo_created" in sql
+
+
+def test_demo_autofund_migration_exists_and_seeds_demo_reserve():
+    sql = _read("supabase/migrations/015_demo_admin_autofund.sql")
+    assert "('demo_reserve', 0)" in sql
+    assert "idx_ledger_demo_autofund_recent" in sql
+
+
+def test_human_casino_migration_exists_and_enforces_uniques():
+    sql = _read("supabase/migrations/016_human_casino.sql")
+    assert "CREATE TABLE IF NOT EXISTS human_casino_sessions" in sql
+    assert "CREATE TABLE IF NOT EXISTS human_casino_rounds" in sql
+    assert "CREATE TABLE IF NOT EXISTS human_casino_idempotency" in sql
+    assert "UNIQUE (round_id)" in sql  # payout + verification
+    assert "UNIQUE (user_id, scope, idempotency_key)" in sql

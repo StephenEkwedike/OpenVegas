@@ -128,7 +128,7 @@ class SkillShotGame(BaseGame):
 
         return position
 
-    async def render(self, result: GameResult, console: Console):
+    async def render(self, result: GameResult, console: Console, opts=None):
         """Render result with zones revealed from the same seeded positions."""
         ascii_safe = ascii_safe_mode()
         mode = render_mode()
@@ -151,3 +151,6 @@ class SkillShotGame(BaseGame):
             ]))
         else:
             console.print(f"\n[red]Missed! Lost {result.bet_amount} $V.[/red]")
+
+    async def render_async(self, result: GameResult, console: Console, opts=None):
+        await self.render(result, console, opts)

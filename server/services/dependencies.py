@@ -202,6 +202,7 @@ async def assert_schema_compatible(db: Any, flags: FeatureFlags) -> None:
     await require_migration_min(db, "012_rls_hardening")
     await require_migration_min(db, "013_stripe_billing")
     await require_migration_min(db, "014_demo_mode_isolation")
+    await require_migration_min(db, "015_demo_admin_autofund")
 
     await require_tables(db, {"fiat_topups", "stripe_webhook_events"})
     await require_columns(
@@ -227,7 +228,18 @@ async def assert_schema_compatible(db: Any, flags: FeatureFlags) -> None:
         await require_tables(db, {"agent_accounts", "agent_tokens", "agent_sessions", "agent_session_events"})
 
     if flags.human_casino_enabled:
-        await require_tables(db, {"casino_sessions", "casino_rounds", "casino_moves"})
+        await require_migration_min(db, "016_human_casino")
+        await require_tables(
+            db,
+            {
+                "human_casino_sessions",
+                "human_casino_rounds",
+                "human_casino_moves",
+                "human_casino_payouts",
+                "human_casino_verifications",
+                "human_casino_idempotency",
+            },
+        )
 
     if flags.mint_audit_enabled:
         await require_columns(
@@ -341,6 +353,12 @@ def get_casino_service():
     from openvegas.casino.service import CasinoService
 
     return CasinoService(get_db(), get_wallet())
+
+
+def get_human_casino_service():
+    from openvegas.casino.human_service import HumanCasinoService
+
+    return HumanCasinoService(get_db(), get_wallet())
 
 
 def get_org_service():

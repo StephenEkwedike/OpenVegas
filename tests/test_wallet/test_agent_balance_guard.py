@@ -24,6 +24,9 @@ class _FakeDB:
     def transaction(self):
         return _FakeTx()
 
+    async def fetchrow(self, *args, **kwargs):
+        return None
+
 
 @pytest.mark.asyncio
 async def test_agent_debit_check_violation_maps_to_insufficient_balance():

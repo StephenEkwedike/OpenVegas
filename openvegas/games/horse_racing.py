@@ -100,9 +100,10 @@ class HorseRacing(BaseGame):
     name = "horse_racing"
     rtp = Decimal("0.95")
 
-    def __init__(self, num_horses: int = 8):
+    def __init__(self, num_horses: int = 8, render_duration_sec: float | None = None):
         self.num_horses = min(num_horses, len(HORSE_NAMES))
         self.horses: list[Horse] = []
+        self.render_duration_sec = render_duration_sec
 
     async def validate_bet(self, bet: dict) -> bool:
         horse = bet.get("horse", 0)
@@ -237,11 +238,12 @@ class HorseRacing(BaseGame):
             provably_fair=True,
         )
 
-    async def render(self, result: GameResult, console: Console):
+    async def render(self, result: GameResult, console: Console, opts=None):
         ascii_safe = ascii_safe_mode()
         mode = render_mode()
         track_width = TRACK_WIDTHS.get(mode, 80)
-        num_frames = int(RACE_DURATION_SEC / ANIM["frame_delay"])
+        duration = self.render_duration_sec if self.render_duration_sec is not None else RACE_DURATION_SEC
+        num_frames = max(1, int(duration / ANIM["frame_delay"]))
 
         horses_data = result.outcome_data["horses"]
         checkpoints = _normalize_checkpoints(result.outcome_data.get("checkpoints"))
@@ -320,3 +322,8 @@ class HorseRacing(BaseGame):
             console.print(f"\n[yellow]Push — {winner_name} won.[/yellow]")
         else:
             console.print(f"\n[red]{winner_name} won. You lost {bet_amount} $V.[/red]")
+
+    async def render_async(self, result: GameResult, console: Console, opts=None):
+        if opts is not None and getattr(opts, "duration_sec", None) is not None:
+            self.render_duration_sec = float(opts.duration_sec)
+        await self.render(result, console, opts)

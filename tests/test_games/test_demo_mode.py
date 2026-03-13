@@ -110,6 +110,7 @@ async def test_play_demo_rejects_non_admin(monkeypatch):
 async def test_play_demo_allows_local_when_allowlist_empty(monkeypatch):
     monkeypatch.setenv("OPENVEGAS_DEMO_ALWAYS_WIN_ENABLED", "1")
     monkeypatch.setenv("OPENVEGAS_DEMO_ADMIN_USER_IDS", "")
+    monkeypatch.setenv("OPENVEGAS_DEMO_ALLOW_LOCAL_OPEN", "1")
     monkeypatch.setitem(games_routes.GAMES, "horse", _FakeGame)
     monkeypatch.setenv("OPENVEGAS_DEMO_MAX_ATTEMPTS", "5")
 
@@ -122,6 +123,18 @@ async def test_play_demo_allows_local_when_allowlist_empty(monkeypatch):
     out = await games_routes.play_game_demo("horse", req, user={"user_id": "local-user"})
     assert out["demo_mode"] is True
     assert out["canonical"] is False
+
+
+@pytest.mark.asyncio
+async def test_play_demo_rejects_local_when_allowlist_empty_and_local_open_off(monkeypatch):
+    monkeypatch.setenv("OPENVEGAS_DEMO_ALWAYS_WIN_ENABLED", "1")
+    monkeypatch.setenv("OPENVEGAS_DEMO_ADMIN_USER_IDS", "")
+    monkeypatch.setenv("OPENVEGAS_DEMO_ALLOW_LOCAL_OPEN", "0")
+
+    req = games_routes.DemoPlayRequest(amount=1, type="win", horse=1)
+    with pytest.raises(HTTPException) as e:
+        await games_routes.play_game_demo("horse", req, user={"user_id": "local-user"})
+    assert e.value.status_code == 403
 
 
 @pytest.mark.asyncio

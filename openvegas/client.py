@@ -123,3 +123,92 @@ class OpenVegasClient:
 
     async def get_topup_status(self, topup_id: str) -> dict:
         return await self._request("GET", f"/billing/topups/{topup_id}")
+
+    async def human_casino_start_session(
+        self,
+        *,
+        max_loss_v: Decimal | str,
+        max_rounds: int,
+        idempotency_key: str,
+    ) -> dict:
+        return await self._request(
+            "POST",
+            "/casino/human/sessions/start",
+            json={
+                "max_loss_v": float(Decimal(str(max_loss_v))),
+                "max_rounds": int(max_rounds),
+                "idempotency_key": idempotency_key,
+            },
+        )
+
+    async def human_casino_list_games(self) -> dict:
+        return await self._request("GET", "/casino/human/games")
+
+    async def human_casino_start_round(
+        self,
+        *,
+        casino_session_id: str,
+        game_code: str,
+        wager_v: Decimal | str,
+        idempotency_key: str,
+    ) -> dict:
+        return await self._request(
+            "POST",
+            "/casino/human/rounds/start",
+            json={
+                "casino_session_id": casino_session_id,
+                "game_code": game_code,
+                "wager_v": float(Decimal(str(wager_v))),
+                "idempotency_key": idempotency_key,
+            },
+        )
+
+    async def human_casino_action(
+        self,
+        *,
+        round_id: str,
+        action: str,
+        payload: dict,
+        idempotency_key: str,
+    ) -> dict:
+        return await self._request(
+            "POST",
+            f"/casino/human/rounds/{round_id}/action",
+            json={
+                "action": action,
+                "payload": payload,
+                "idempotency_key": idempotency_key,
+            },
+        )
+
+    async def human_casino_resolve(self, *, round_id: str, idempotency_key: str) -> dict:
+        return await self._request(
+            "POST",
+            f"/casino/human/rounds/{round_id}/resolve",
+            json={"idempotency_key": idempotency_key},
+        )
+
+    async def human_casino_verify(self, round_id: str) -> dict:
+        return await self._request("GET", f"/casino/human/rounds/{round_id}/verify")
+
+    async def human_casino_get_session(self, session_id: str) -> dict:
+        return await self._request("GET", f"/casino/human/sessions/{session_id}")
+
+    async def human_casino_demo_autoplay(
+        self,
+        *,
+        casino_session_id: str,
+        game_code: str,
+        wager_v: Decimal | str,
+        idempotency_key: str,
+    ) -> dict:
+        return await self._request(
+            "POST",
+            "/casino/human/rounds/demo-autoplay",
+            json={
+                "casino_session_id": casino_session_id,
+                "game_code": game_code,
+                "wager_v": float(Decimal(str(wager_v))),
+                "idempotency_key": idempotency_key,
+            },
+        )

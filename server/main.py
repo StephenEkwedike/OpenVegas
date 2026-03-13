@@ -16,6 +16,7 @@ from server.routes import wallet as wallet_routes
 from server.routes import inference as inference_routes
 from server.routes import models as model_routes
 from server.routes import casino as casino_routes
+from server.routes import casino_human as casino_human_routes
 from server.routes import store as store_routes
 from server.routes import agent as agent_routes
 from server.routes import payments as payment_routes
@@ -58,6 +59,7 @@ app.include_router(wallet_routes.router, prefix="/wallet", tags=["wallet"])
 app.include_router(inference_routes.router, prefix="/inference", tags=["inference"])
 app.include_router(model_routes.router, tags=["models"])
 app.include_router(casino_routes.router, tags=["casino"])
+app.include_router(casino_human_routes.router, tags=["casino-human"])
 app.include_router(store_routes.router, tags=["store"])
 app.include_router(agent_routes.router, tags=["agent"])
 app.include_router(payment_routes.router, tags=["billing"])

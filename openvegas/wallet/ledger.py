@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
 from typing import Any
@@ -68,6 +68,101 @@ class WalletService:
     def _money(value: Decimal | float | str) -> Decimal:
         return Decimal(str(value)).quantize(MONEY_SCALE)
 
+    async def ensure_demo_admin_floor(
+        self,
+        account_id: str,
+        *,
+        pending_debit: Decimal = Decimal("0"),
+        reason: str = "spend",
+        tx=None,
+    ) -> Decimal:
+        """Demo-admin-only autofund to keep a testing floor.
+
+        Read path: if below floor, top up toward floor.
+        Spend path: top up toward floor + pending_debit so post-debit stays above floor.
+        """
+        from server.services.demo_admin import (
+            demo_admin_autofund_enabled,
+            demo_admin_autofund_max_cycles,
+            demo_admin_autofund_min,
+            demo_admin_autofund_read_cooldown_sec,
+            demo_admin_autofund_topup,
+            is_demo_admin_account,
+        )
+
+        if not demo_admin_autofund_enabled() or not is_demo_admin_account(account_id):
+            return await self.get_balance(account_id)
+
+        min_floor = self._money(demo_admin_autofund_min())
+        topup = self._money(demo_admin_autofund_topup())
+        max_cycles = demo_admin_autofund_max_cycles()
+        cooldown_sec = demo_admin_autofund_read_cooldown_sec()
+        pending_debit = self._money(max(Decimal("0"), Decimal(str(pending_debit))))
+        target = self._money(min_floor + pending_debit)
+
+        if topup <= 0:
+            return await self.get_balance(account_id)
+
+        async def _run(conn):
+            await conn.execute(
+                "INSERT INTO wallet_accounts (account_id, balance) VALUES ($1, 0) ON CONFLICT DO NOTHING",
+                account_id,
+            )
+            await conn.execute(
+                "INSERT INTO wallet_accounts (account_id, balance) VALUES ($1, 0) ON CONFLICT DO NOTHING",
+                "demo_reserve",
+            )
+
+            row = await conn.fetchrow(
+                "SELECT balance FROM wallet_accounts WHERE account_id = $1 FOR UPDATE",
+                account_id,
+            )
+            balance = self._money(row["balance"] if row else Decimal("0"))
+            if balance >= target:
+                return balance
+
+            if reason == "read" and cooldown_sec > 0:
+                last = await conn.fetchrow(
+                    """
+                    SELECT created_at
+                    FROM ledger_entries
+                    WHERE credit_account = $1
+                      AND entry_type = 'demo_autofund'
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                    """,
+                    account_id,
+                )
+                if last and last["created_at"] is not None:
+                    last_ts = last["created_at"]
+                    if getattr(last_ts, "tzinfo", None) is None:
+                        last_ts = last_ts.replace(tzinfo=timezone.utc)
+                    now = datetime.now(timezone.utc)
+                    if now - last_ts <= timedelta(seconds=cooldown_sec):
+                        return balance
+
+            cycles = 0
+            while balance < target and cycles < max_cycles:
+                cycles += 1
+                await self._execute(
+                    LedgerEntry(
+                        debit_account="demo_reserve",
+                        credit_account=account_id,
+                        amount=topup,
+                        entry_type="demo_autofund",
+                        reference_id=f"demo_autofund:{reason}:{account_id}:{uuid.uuid4()}",
+                    ),
+                    tx=conn,
+                )
+                balance = self._money(balance + topup)
+
+            return balance
+
+        if tx is not None:
+            return await _run(tx)
+        async with self.db.transaction() as own_tx:
+            return await _run(own_tx)
+
     async def mint(self, account_id: str, amount: Decimal, mint_id: str, *, tx=None):
         """Credit wallet from mint (new $V enters system).
         account_id: full prefixed ID (e.g., 'user:abc' or 'agent:xyz').
@@ -93,14 +188,32 @@ class WalletService:
     ):
         """Move $V from account to escrow for a game/round.
         account_id: full prefixed ID (e.g., 'user:abc' or 'agent:xyz')."""
+        amount = self._money(amount)
         entry = LedgerEntry(
             debit_account=account_id,
             credit_account=f"escrow:{game_id}",
-            amount=self._money(amount),
+            amount=amount,
             entry_type=entry_type,
             reference_id=reference_id or game_id,
         )
-        await self._execute(entry, tx=tx)
+        if tx is not None:
+            await self.ensure_demo_admin_floor(
+                account_id,
+                pending_debit=amount,
+                reason="spend",
+                tx=tx,
+            )
+            await self._execute(entry, tx=tx)
+            return
+
+        async with self.db.transaction() as own_tx:
+            await self.ensure_demo_admin_floor(
+                account_id,
+                pending_debit=amount,
+                reason="spend",
+                tx=own_tx,
+            )
+            await self._execute(entry, tx=own_tx)
 
     async def settle_win(
         self,
@@ -158,14 +271,32 @@ class WalletService:
     async def redeem(self, account_id: str, amount: Decimal, reference_id: str, *, tx=None):
         """Deduct $V for AI inference or store purchase.
         account_id: full prefixed ID."""
+        amount = self._money(amount)
         entry = LedgerEntry(
             debit_account=account_id,
             credit_account="store",
-            amount=self._money(amount),
+            amount=amount,
             entry_type="redeem",
             reference_id=reference_id,
         )
-        await self._execute(entry, tx=tx)
+        if tx is not None:
+            await self.ensure_demo_admin_floor(
+                account_id,
+                pending_debit=amount,
+                reason="spend",
+                tx=tx,
+            )
+            await self._execute(entry, tx=tx)
+            return
+
+        async with self.db.transaction() as own_tx:
+            await self.ensure_demo_admin_floor(
+                account_id,
+                pending_debit=amount,
+                reason="spend",
+                tx=own_tx,
+            )
+            await self._execute(entry, tx=own_tx)
 
     async def fund_from_card(self, account_id: str, amount_v: Decimal, reference_id: str, *, tx=None):
         """Credit wallet from card purchase settlement.
@@ -184,16 +315,41 @@ class WalletService:
     async def reserve(self, account_id: str, amount: Decimal, reference_id: str, *, tx=None):
         """Reserve funds in escrow for post-settlement charging.
         reference_id should be stable/idempotent (e.g. infer-preauth:<id>)."""
+        amount = self._money(amount)
         escrow_account = f"escrow:{reference_id}"
-        await self.ensure_account(escrow_account)
         entry = LedgerEntry(
             debit_account=account_id,
             credit_account=escrow_account,
-            amount=self._money(amount),
+            amount=amount,
             entry_type="reserve",
             reference_id=reference_id,
         )
-        await self._execute(entry, tx=tx)
+        if tx is not None:
+            await tx.execute(
+                "INSERT INTO wallet_accounts (account_id, balance) VALUES ($1, 0) ON CONFLICT DO NOTHING",
+                escrow_account,
+            )
+            await self.ensure_demo_admin_floor(
+                account_id,
+                pending_debit=amount,
+                reason="spend",
+                tx=tx,
+            )
+            await self._execute(entry, tx=tx)
+            return
+
+        async with self.db.transaction() as own_tx:
+            await own_tx.execute(
+                "INSERT INTO wallet_accounts (account_id, balance) VALUES ($1, 0) ON CONFLICT DO NOTHING",
+                escrow_account,
+            )
+            await self.ensure_demo_admin_floor(
+                account_id,
+                pending_debit=amount,
+                reason="spend",
+                tx=own_tx,
+            )
+            await self._execute(entry, tx=own_tx)
 
     async def settle_reservation(
         self,

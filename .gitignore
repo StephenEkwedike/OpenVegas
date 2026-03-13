@@ -68,3 +68,14 @@ supabase/.branches/
 supabase/.cache/
 supabase/.functions/
 
+# Local planning / scratch docs (not product docs)
+all-commands.md
+enhancements-plan.md
+
+# Extra local tooling noise
+.hypothesis/
+.ipynb_checkpoints/
+.direnv/
+*.tmp
+*.bak
+*.orig

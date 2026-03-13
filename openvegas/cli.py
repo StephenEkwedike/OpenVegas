@@ -13,6 +13,7 @@ from rich.table import Table
 
 from openvegas import __version__
 from openvegas.tui.confetti import render_confetti
+from openvegas.tui.hints import verify_hint_for_result
 
 console = Console()
 
@@ -424,13 +425,9 @@ def play(
                 console.print("[bold yellow]DEMO MODE RESULT[/bold yellow] [dim](canonical: false)[/dim]")
 
             if result.get("provably_fair"):
-                console.print(
-                    f"[dim]Verify: openvegas verify {game_id}[/dim]"
-                )
+                console.print(f"[dim]Verify: {verify_hint_for_result(game_id, False)}[/dim]")
             elif result.get("demo_mode"):
-                console.print(
-                    f"[dim]Verify (demo): openvegas verify {game_id} --demo[/dim]"
-                )
+                console.print(f"[dim]Verify (demo): {verify_hint_for_result(game_id, True)}[/dim]")
 
         except APIError as e:
             console.print(f"[red]{e.detail}[/red]")
@@ -663,14 +660,32 @@ def verify(game_id: str, demo: bool):
 
 
 @cli.command("ui")
-def interactive_ui():
-    """Open interactive radio-select terminal UI."""
-    try:
-        from openvegas.tui.wizard import run_wizard
-    except Exception as e:  # pragma: no cover - runtime-only import fallback
-        console.print(f"[red]Unable to load UI mode: {e}[/red]")
+@click.option("--full", is_flag=True, help="Use legacy full-screen Textual UI mode.")
+@click.option("--no-render", is_flag=True, help="Skip game animation rendering in inline UI.")
+@click.option(
+    "--render-timeout-sec",
+    type=float,
+    default=15.0,
+    show_default=True,
+    help="Inline UI render timeout in seconds.",
+)
+def interactive_ui(full: bool, no_render: bool, render_timeout_sec: float):
+    """Open guided terminal UI."""
+    if full:
+        try:
+            from openvegas.tui.wizard import run_wizard
+        except Exception as e:  # pragma: no cover - runtime-only import fallback
+            console.print(f"[red]Unable to load full UI mode: {e}[/red]")
+            return
+        run_wizard()
         return
-    run_wizard()
+
+    try:
+        from openvegas.tui.prompt_ui import run_prompt_ui
+    except Exception as e:  # pragma: no cover - runtime-only import fallback
+        console.print(f"[red]Unable to load inline UI mode: {e}[/red]")
+        return
+    run_prompt_ui(no_render=no_render, render_timeout_sec=render_timeout_sec)
 
 
 # ---------------------------------------------------------------------------
