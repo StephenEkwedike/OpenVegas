@@ -32,8 +32,19 @@ def test_startup_schema_requires_security_migrations():
     assert 'require_migration_min(db, "015_demo_admin_autofund")' in deps
     assert 'require_migration_min(db, "016_human_casino")' in deps
     assert 'require_migration_min(db, "017_horse_quote_pricing")' in deps
+    assert 'require_migration_min(db, "018_wrapper_default_foundation")' in deps
+    assert 'require_migration_min(db, "019_inference_idempotency_and_holds")' in deps
+    assert 'require_migration_min(db, "020_provider_context_threads")' in deps
     assert '"horse_quotes"' in deps
     assert '"horse_quote_idempotency"' in deps
+    assert '"provider_credentials"' in deps
+    assert '"inference_requests"' in deps
+    assert '"wallet_history_projection"' in deps
+    assert '"wrapper_reward_events"' in deps
+    assert '"org_runtime_policies"' in deps
+    assert '"context_retention_policies"' in deps
+    assert '"provider_threads"' in deps
+    assert '"provider_thread_messages"' in deps
 
 
 def test_billing_migration_exists_and_hardens_dedupe_and_projection():
@@ -72,3 +83,32 @@ def test_horse_quote_pricing_migration_exists_and_enforces_constraints():
     assert "CHECK (budget_v >= 0)" in sql
     assert "consumed_at IS NULL AND consumed_game_id IS NULL" in sql
     assert "UNIQUE (user_id, scope, idempotency_key)" in sql
+
+
+def test_wrapper_default_foundation_migration_exists_and_enforces_request_identity():
+    sql = _read("supabase/migrations/018_wrapper_default_foundation.sql")
+    assert "CREATE TABLE IF NOT EXISTS provider_credentials" in sql
+    assert "CREATE TABLE IF NOT EXISTS inference_requests" in sql
+    assert "CREATE TABLE IF NOT EXISTS wallet_history_projection" in sql
+    assert "CREATE TABLE IF NOT EXISTS wrapper_reward_events" in sql
+    assert "ADD COLUMN IF NOT EXISTS request_id UUID" in sql
+    assert "CREATE UNIQUE INDEX IF NOT EXISTS ux_inference_usage_request_id" in sql
+    assert "CHECK (status <> 'succeeded' OR response_body_text IS NOT NULL)" in sql
+
+
+def test_inference_idempotency_holds_migration_exists_and_enforces_active_hold_uniqueness():
+    sql = _read("supabase/migrations/019_inference_idempotency_and_holds.sql")
+    assert "CREATE TABLE IF NOT EXISTS org_runtime_policies" in sql
+    assert "CREATE TABLE IF NOT EXISTS context_retention_policies" in sql
+    assert "CREATE UNIQUE INDEX IF NOT EXISTS ux_inference_preauth_request_id" in sql
+    assert "CREATE UNIQUE INDEX IF NOT EXISTS ux_inference_preauth_active_request" in sql
+    assert "019_inference_idempotency_and_holds" in sql
+
+
+def test_provider_context_threads_migration_exists_and_scopes_threads_per_provider():
+    sql = _read("supabase/migrations/020_provider_context_threads.sql")
+    assert "CREATE TABLE IF NOT EXISTS provider_threads" in sql
+    assert "provider IN ('openai', 'anthropic', 'gemini')" in sql
+    assert "thread_forked_from UUID REFERENCES provider_threads(id)" in sql
+    assert "CREATE TABLE IF NOT EXISTS provider_thread_messages" in sql
+    assert "020_provider_context_threads" in sql

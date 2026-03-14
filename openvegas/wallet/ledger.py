@@ -176,6 +176,27 @@ class WalletService:
         )
         await self._execute(entry, tx=tx)
 
+    async def reward_wrapper(
+        self,
+        account_id: str,
+        amount: Decimal,
+        inference_usage_id: str,
+        *,
+        tx=None,
+    ) -> None:
+        """Credit wrapper rewards from mint_reserve with stable reference format."""
+        amount = self._money(amount)
+        if amount <= 0:
+            return
+        entry = LedgerEntry(
+            debit_account="mint_reserve",
+            credit_account=account_id,
+            amount=amount,
+            entry_type="wrapper_reward",
+            reference_id=f"wrapper_reward:{inference_usage_id}",
+        )
+        await self._execute(entry, tx=tx)
+
     async def place_bet(
         self,
         account_id: str,

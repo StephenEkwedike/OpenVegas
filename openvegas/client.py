@@ -114,11 +114,43 @@ class OpenVegasClient:
         path = "/games/horse/play-demo" if demo_mode else "/games/horse/play"
         return await self._request("POST", path, json=payload)
 
-    async def ask(self, prompt: str, provider: str, model: str) -> dict:
-        return await self._request(
-            "POST", "/inference/ask",
-            json={"prompt": prompt, "provider": provider, "model": model},
-        )
+    async def ask(
+        self,
+        prompt: str,
+        provider: str,
+        model: str,
+        *,
+        idempotency_key: str | None = None,
+        thread_id: str | None = None,
+        conversation_mode: str | None = None,
+        persist_context: bool | None = None,
+    ) -> dict:
+        payload = {"prompt": prompt, "provider": provider, "model": model}
+        if idempotency_key:
+            payload["idempotency_key"] = idempotency_key
+        if thread_id:
+            payload["thread_id"] = thread_id
+        if conversation_mode:
+            payload["conversation_mode"] = conversation_mode
+        if persist_context is not None:
+            payload["persist_context"] = bool(persist_context)
+        return await self._request("POST", "/inference/ask", json=payload)
+
+    async def get_mode(self) -> dict:
+        return await self._request("GET", "/inference/mode")
+
+    async def set_mode(
+        self,
+        *,
+        llm_mode: str | None = None,
+        conversation_mode: str | None = None,
+    ) -> dict:
+        payload: dict = {}
+        if llm_mode is not None:
+            payload["llm_mode"] = llm_mode
+        if conversation_mode is not None:
+            payload["conversation_mode"] = conversation_mode
+        return await self._request("POST", "/inference/mode", json=payload)
 
     async def list_models(self, provider: str | None = None) -> dict:
         params = {}

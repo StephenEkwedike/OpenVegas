@@ -18,6 +18,8 @@ from openvegas.mint.engine import MintService
 from openvegas.payments.service import BillingService
 from openvegas.payments.stripe_gateway import StripeGateway
 from openvegas.wallet.ledger import WalletService
+from server.services.llm_mode import LLMModeService
+from server.services.provider_threads import ProviderThreadService
 
 
 class _Placeholder:
@@ -119,6 +121,7 @@ class FeatureFlags:
     agent_runtime_enabled: bool
     human_casino_enabled: bool
     mint_audit_enabled: bool
+    context_enabled: bool
 
 
 _db: Any = _Placeholder()
@@ -135,6 +138,7 @@ def current_flags() -> FeatureFlags:
         agent_runtime_enabled=env("AGENT_RUNTIME_ENABLED", "1") == "1",
         human_casino_enabled=env("CASINO_HUMAN_ENABLED", "0") == "1",
         mint_audit_enabled=env("MINT_AUDIT_ENABLED", "1") == "1",
+        context_enabled=env("OPENVEGAS_CONTEXT_ENABLED", "0") == "1",
     )
 
 
@@ -206,8 +210,24 @@ async def assert_schema_compatible(db: Any, flags: FeatureFlags) -> None:
     await require_migration_min(db, "014_demo_mode_isolation")
     await require_migration_min(db, "015_demo_admin_autofund")
     await require_migration_min(db, "017_horse_quote_pricing")
+    await require_migration_min(db, "018_wrapper_default_foundation")
+    await require_migration_min(db, "019_inference_idempotency_and_holds")
 
-    await require_tables(db, {"fiat_topups", "stripe_webhook_events", "horse_quotes", "horse_quote_idempotency"})
+    await require_tables(
+        db,
+        {
+            "fiat_topups",
+            "stripe_webhook_events",
+            "horse_quotes",
+            "horse_quote_idempotency",
+            "provider_credentials",
+            "inference_requests",
+            "wallet_history_projection",
+            "wrapper_reward_events",
+            "org_runtime_policies",
+            "context_retention_policies",
+        },
+    )
     await require_columns(
         db,
         {
@@ -225,6 +245,10 @@ async def assert_schema_compatible(db: Any, flags: FeatureFlags) -> None:
 
     if flags.inference_enabled:
         await require_tables(db, {"inference_preauthorizations", "inference_usage"})
+
+    if flags.context_enabled:
+        await require_migration_min(db, "020_provider_context_threads")
+        await require_tables(db, {"provider_threads", "provider_thread_messages"})
 
     if flags.agent_runtime_enabled:
         await require_migration_min(db, "010_agent_session_events_and_precision")
@@ -335,6 +359,14 @@ def get_catalog() -> ProviderCatalog:
 
 def get_gateway() -> AIGateway:
     return AIGateway(get_db(), get_wallet(), get_catalog())
+
+
+def get_llm_mode_service() -> LLMModeService:
+    return LLMModeService(get_db())
+
+
+def get_provider_thread_service() -> ProviderThreadService:
+    return ProviderThreadService(get_db())
 
 
 def get_mint_service() -> MintService:
