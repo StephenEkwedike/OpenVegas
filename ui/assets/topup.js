@@ -1,5 +1,5 @@
 import { byId } from "/ui/assets/site.js";
-import { apiFetch, apiJson, getLoginHref } from "/ui/assets/page-auth.js";
+import { apiFetch, apiJson, getLoginHref } from "/ui/assets/page-auth.js?v=20260330";
 
 function topupIdFromPath() {
   const segs = window.location.pathname.split("/").filter(Boolean);

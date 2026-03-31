@@ -55,7 +55,7 @@
         <p class="text-mono-sm page-lead">Track available funds, monitor usage, and act before work stalls.</p>
       </header>
 
-      <section id="authState" class="auth-state" hidden>
+      <section id="authState" class="auth-state">
         <div class="text-mono-xs">AUTH REQUIRED</div>
         <h2 class="card-title">Sign in to view billing data</h2>
         <p class="text-mono-sm">This page is available after authentication.</p>
@@ -73,7 +73,7 @@
             <a href="#payments">Payments</a>
             <a href="#transactions">Transactions</a>
             <button id="refreshAll" class="btn" type="button">Refresh data</button>
-            <button id="logoutBtn" class="btn" type="button">Logout browser</button>
+            <button id="logoutBtn" class="btn" type="button">Logout</button>
           </aside>
 
           <div class="panel-stack">
@@ -121,7 +121,7 @@
 
     <script type="module">
       import { renderTopNav, renderFounderLinks, installAssetGuard, byId } from "/ui/assets/site.js?v=20260330";
-      import { apiJson, authProbe, clearBrowserToken, getLoginHref, getSignupHref, showAuthedContent, showSignedOutPanel } from "/ui/assets/page-auth.js";
+      import { apiJson, authProbe, clearBrowserToken, getLoginHref, getSignupHref, showAuthedContent, showSignedOutPanel } from "/ui/assets/page-auth.js?v=20260330";
 
       installAssetGuard();
       renderTopNav("siteNav");
@@ -174,11 +174,23 @@
           .join("");
       }
 
+      function renderDataError(err) {
+        const message = String(err || "Failed to load wallet data.");
+        const meta = byId("balanceMeta");
+        if (meta) meta.textContent = message;
+        const body = byId("txBody");
+        if (body) body.innerHTML = `<tr><td colspan="4" class="text-mono-sm c-bad">${message}</td></tr>`;
+      }
+
       async function loadWallet() {
-        const balanceData = await apiJson("/wallet/balance", { method: "GET" });
-        renderBalance(balanceData);
-        const historyData = await apiJson("/billing/activity?limit=50", { method: "GET" });
-        renderHistory(historyData);
+        try {
+          const balanceData = await apiJson("/wallet/balance", { method: "GET" });
+          renderBalance(balanceData);
+          const historyData = await apiJson("/billing/activity?limit=50", { method: "GET" });
+          renderHistory(historyData);
+        } catch (err) {
+          renderDataError(err);
+        }
       }
 
       async function initAuthContent() {
@@ -212,18 +224,27 @@
         });
       }
 
-      try {
-        const probe = await authProbe();
-        if (!probe.ok) {
-          showSignedOutPanel();
-        } else {
-          await initAuthContent();
+      (async () => {
+        try {
+          const probe = await authProbe();
+          if (!probe.ok) {
+            showSignedOutPanel();
+          } else {
+            await initAuthContent();
+          }
+        } catch (err) {
+          const raw = String(err || "");
+          const authErr = raw.includes("unauthorized") || raw.includes("401") || raw.includes("403");
+          if (authErr) {
+            showSignedOutPanel();
+            const panel = byId("authState");
+            if (panel) panel.insertAdjacentHTML("beforeend", `<p class=\"text-mono-sm c-bad\">${raw}</p>`);
+          } else {
+            showAuthedContent();
+            renderDataError(raw);
+          }
         }
-      } catch (err) {
-        showSignedOutPanel();
-        const panel = byId("authState");
-        if (panel) panel.insertAdjacentHTML("beforeend", `<p class=\"text-mono-sm c-bad\">${String(err)}</p>`);
-      }
+      })();
     </script>
   </body>
 </html>

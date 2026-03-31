@@ -11,6 +11,7 @@ const NAV_LINKS = [
 const THEME_KEY = "ov_theme";
 const THEME_DEFAULT = "light";
 const THEME_TOGGLE_ID = "ov-theme-toggle";
+const NAV_AUTH_ID = "ov-nav-auth";
 const PROFILE_PREFS_ENDPOINT = "/ui/profile/preferences";
 let assetGuardInstalled = false;
 let storageListenerInstalled = false;
@@ -68,7 +69,7 @@ async function syncThemeFromProfile(cachedTheme) {
   if (profileThemeSyncAttempted) return;
   profileThemeSyncAttempted = true;
   try {
-    const auth = await import("/ui/assets/page-auth.js");
+    const auth = await import("/ui/assets/page-auth.js?v=20260330");
     if (typeof auth.bootstrapBrowserSession === "function") {
       await auth.bootstrapBrowserSession();
     }
@@ -98,7 +99,7 @@ async function syncThemeFromProfile(cachedTheme) {
 
 async function saveProfileTheme(theme) {
   try {
-    const auth = await import("/ui/assets/page-auth.js");
+    const auth = await import("/ui/assets/page-auth.js?v=20260330");
     if (typeof auth.bootstrapBrowserSession === "function") {
       await auth.bootstrapBrowserSession();
     }
@@ -156,6 +157,7 @@ export function renderThemeToggle() {
   const existing = document.getElementById(THEME_TOGGLE_ID);
   const topNav = document.querySelector(".top-nav");
   const preferredHost =
+    topNav?.querySelector(".ov-nav-right") ||
     topNav?.querySelector(".founder-links")?.parentElement ||
     topNav ||
     document.body ||
@@ -175,6 +177,73 @@ export function renderThemeToggle() {
 
   bindThemeToggle(toggle);
   updateThemeToggleState();
+}
+
+function currentUiPath() {
+  const pathname = window.location.pathname || "/ui";
+  const search = window.location.search || "";
+  const hash = window.location.hash || "";
+  if (pathname === "/ui/login") {
+    const params = new URLSearchParams(search);
+    const candidate = String(params.get("next") || "").trim();
+    if (candidate.startsWith("/ui") && !candidate.startsWith("/ui/login")) {
+      return candidate;
+    }
+    return "/ui";
+  }
+  const p = `${pathname}${search}${hash}`;
+  return p.startsWith("/ui") ? p : "/ui";
+}
+
+function buildNavAuthButtons(nextPath) {
+  const wrap = document.createElement("div");
+  wrap.id = NAV_AUTH_ID;
+  wrap.className = "nav-auth";
+  wrap.dataset.ovNavAuth = "1";
+  const next = encodeURIComponent(nextPath || "/ui");
+  wrap.innerHTML = `
+    <a class="btn btn-primary" href="/ui/login?next=${next}">OpenVegas login</a>
+    <a class="btn" href="/ui/login?mode=signup&next=${next}">OpenVegas signup</a>
+  `;
+  return wrap;
+}
+
+function ensureNavRightCluster(nav) {
+  const topNav = nav?.closest?.(".top-nav");
+  if (!topNav) return null;
+  const existing = topNav.querySelector(".ov-nav-right");
+  if (existing) return existing;
+  const parent = nav.parentElement;
+  if (parent && parent !== topNav) {
+    parent.classList.add("ov-nav-right");
+    return parent;
+  }
+  const cluster = document.createElement("div");
+  cluster.className = "ov-nav-right";
+  nav.replaceWith(cluster);
+  cluster.appendChild(nav);
+  topNav.appendChild(cluster);
+  return cluster;
+}
+
+function renderNavAuthButtons(nav) {
+  const rightCluster = ensureNavRightCluster(nav);
+  if (!rightCluster) return;
+  const nextPath = currentUiPath();
+  const existing = document.getElementById(NAV_AUTH_ID);
+  const authNode = existing || buildNavAuthButtons(nextPath);
+  if (!existing) {
+    rightCluster.appendChild(authNode);
+  }
+  const links = authNode.querySelectorAll("a[href]");
+  if (links[0]) links[0].setAttribute("href", `/ui/login?next=${encodeURIComponent(nextPath)}`);
+  if (links[1]) links[1].setAttribute("href", `/ui/login?mode=signup&next=${encodeURIComponent(nextPath)}`);
+  const themeToggle = document.getElementById(THEME_TOGGLE_ID);
+  if (themeToggle && authNode.nextElementSibling !== themeToggle) {
+    rightCluster.insertBefore(authNode, themeToggle);
+  } else if (!themeToggle && authNode.parentElement !== rightCluster) {
+    rightCluster.appendChild(authNode);
+  }
 }
 
 function initTheme() {
@@ -201,6 +270,7 @@ export function renderTopNav(targetId = "siteNav") {
       return `<a href="${href}" class="${active ? "active" : ""}">${label}</a>`;
     }).join("");
   }
+  renderNavAuthButtons(nav);
   renderThemeToggle();
 }
 

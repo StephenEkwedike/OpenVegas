@@ -26,6 +26,7 @@
       }
       .token-area { min-height: 100px; }
       .inline-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
+      #signupBtn[hidden] { display: none !important; }
       .status { margin-top: 12px; font-family: var(--font-mono); font-size: 11px; color: var(--grey-light); }
       details { margin-top: 14px; border-top: 1px solid var(--grey-dark); padding-top: 12px; }
       summary { cursor: pointer; font-family: var(--font-mono); font-size: 11px; color: var(--grey-light); }
@@ -54,7 +55,7 @@
 
       <section class="card login-form">
         <div class="text-mono-xs">CREDENTIAL LOGIN</div>
-        <h2 class="card-title">Sign in</h2>
+        <h2 id="authHeading" class="card-title">Sign in</h2>
         <p id="authCopy" class="card-copy">Use the same email/password as `openvegas login` and `openvegas signup`.</p>
 
         <div class="field-grid">
@@ -64,8 +65,8 @@
 
         <div class="inline-actions">
           <button id="loginBtn" class="btn btn-primary" type="button">Login and continue</button>
-          <button id="signupBtn" class="btn" type="button">Create account</button>
-          <button id="clearToken" class="btn" type="button">Logout browser</button>
+          <button id="signupBtn" class="btn" type="button" hidden>Create account</button>
+          <button id="clearToken" class="btn" type="button">Logout</button>
           <a id="backLink" class="btn" href="/ui/balance">Back to balance</a>
         </div>
 
@@ -83,7 +84,7 @@
 
     <script type="module">
       import { renderTopNav, renderFounderLinks, installAssetGuard, byId } from "/ui/assets/site.js?v=20260330";
-      import { authProbe, clearBrowserToken, getBrowserToken, setBrowserToken } from "/ui/assets/page-auth.js";
+      import { authProbe, clearBrowserToken, getBrowserToken, setBrowserToken } from "/ui/assets/page-auth.js?v=20260330";
 
       installAssetGuard();
       renderTopNav("siteNav");
@@ -91,18 +92,41 @@
 
       const params = new URLSearchParams(window.location.search);
       const rawNext = params.get("next") || "/ui/balance";
-      const next = rawNext.startsWith("/ui") ? rawNext : "/ui/balance";
+      const next = rawNext.startsWith("/ui") && !rawNext.startsWith("/ui/login") ? rawNext : "/ui/balance";
       const mode = String(params.get("mode") || "").toLowerCase();
       byId("backLink").href = next;
       const signupMode = mode === "signup";
+      const signupBtn = byId("signupBtn");
+
+      if (signupBtn) {
+        signupBtn.hidden = true;
+        signupBtn.disabled = true;
+        signupBtn.style.display = "none";
+      }
 
       if (signupMode) {
+        document.title = "OpenVegas | Browser Signup";
+        const pageTitle = document.querySelector(".page-title");
+        if (pageTitle) pageTitle.textContent = "Browser Signup";
+        const pageLead = document.querySelector(".page-lead");
+        if (pageLead) {
+          pageLead.textContent = "Create your OpenVegas account. After verification, wallet and billing pages use your live account data.";
+        }
         const authCopy = byId("authCopy");
         if (authCopy) {
           authCopy.textContent = "Create a browser account using the same credentials flow as `openvegas signup`.";
         }
+        const authHeading = byId("authHeading");
+        if (authHeading) authHeading.textContent = "Create account";
         const loginBtn = byId("loginBtn");
         if (loginBtn) loginBtn.textContent = "Create account";
+        const passwordInput = byId("passwordInput");
+        if (passwordInput) passwordInput.setAttribute("autocomplete", "new-password");
+        signupBtn?.remove();
+      } else if (signupBtn) {
+        signupBtn.hidden = false;
+        signupBtn.disabled = false;
+        signupBtn.style.display = "inline-flex";
       }
 
       const statusEl = byId("status");
@@ -111,6 +135,33 @@
       if (existing) {
         tokenInput.value = existing;
         statusEl.textContent = "Token already loaded in this tab.";
+      }
+
+      const hashRaw = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : "";
+      let hashSession = null;
+      if (hashRaw) {
+        const hashParams = new URLSearchParams(hashRaw);
+        const errDesc = String(hashParams.get("error_description") || hashParams.get("error") || "").trim();
+        const flowType = String(hashParams.get("type") || "").trim().toLowerCase();
+        const accessToken = String(hashParams.get("access_token") || "").trim();
+        const refreshToken = String(hashParams.get("refresh_token") || "").trim();
+        const expiresAtRaw = Number(hashParams.get("expires_at") || 0);
+        const expiresInRaw = Number(hashParams.get("expires_in") || 0);
+        const expiresAt = Number.isFinite(expiresAtRaw) && expiresAtRaw > 0
+          ? Math.floor(expiresAtRaw)
+          : (Number.isFinite(expiresInRaw) && expiresInRaw > 0
+              ? Math.floor(Date.now() / 1000) + Math.floor(expiresInRaw)
+              : 0);
+        if (errDesc) {
+          const pretty = decodeURIComponent(errDesc.replace(/\+/g, " "));
+          statusEl.textContent = `Email confirmation failed: ${pretty}`;
+        } else if (accessToken) {
+          statusEl.textContent = "Email confirmed. Signing you in...";
+          hashSession = { accessToken, refreshToken, expiresAt };
+        } else if (flowType === "signup" || hashParams.has("access_token")) {
+          statusEl.textContent = "Email confirmed. Sign in to continue.";
+        }
+        window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
       }
 
       async function validateAndRedirect() {
@@ -123,11 +174,7 @@
         window.location.assign(next);
       }
 
-      byId("loginBtn")?.addEventListener("click", async () => {
-        if (signupMode) {
-          byId("signupBtn")?.click();
-          return;
-        }
+      async function submitLogin() {
         const email = byId("emailInput")?.value?.trim() || "";
         const password = byId("passwordInput")?.value || "";
         if (!email || !password) {
@@ -159,9 +206,9 @@
         } catch (err) {
           statusEl.textContent = `Login request failed: ${String(err)}`;
         }
-      });
+      }
 
-      byId("signupBtn")?.addEventListener("click", async () => {
+      async function submitSignup() {
         const email = byId("emailInput")?.value?.trim() || "";
         const password = byId("passwordInput")?.value || "";
         if (!email || !password) {
@@ -184,7 +231,7 @@
 
           const token = String(body?.access_token || "").trim();
           if (!token || body?.pending_verification) {
-            statusEl.textContent = "Signup submitted. Check your email if verification is required, then log in.";
+            statusEl.textContent = "Signup submitted. Check email for verification link";
             return;
           }
 
@@ -194,6 +241,19 @@
         } catch (err) {
           statusEl.textContent = `Signup request failed: ${String(err)}`;
         }
+      }
+
+      byId("loginBtn")?.addEventListener("click", async () => {
+        if (signupMode) {
+          await submitSignup();
+          return;
+        }
+        await submitLogin();
+      });
+
+      byId("signupBtn")?.addEventListener("click", () => {
+        const target = `/ui/login?mode=signup&next=${encodeURIComponent(next)}`;
+        window.location.assign(target);
       });
 
       byId("saveToken")?.addEventListener("click", async () => {
@@ -229,6 +289,40 @@
         if (pwEl) pwEl.value = "";
         statusEl.textContent = "Browser session cleared.";
       });
+
+      if (hashSession?.accessToken) {
+        (async () => {
+          let accessToken = String(hashSession.accessToken || "").trim();
+          let expiresAt = Number(hashSession.expiresAt || 0);
+          const refreshToken = String(hashSession.refreshToken || "").trim();
+
+          if (refreshToken) {
+            try {
+              const res = await fetch("/ui/auth/session/import", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                credentials: "include",
+                body: JSON.stringify({ refresh_token: refreshToken }),
+              });
+              const body = await res.json().catch(() => ({}));
+              if (res.ok) {
+                const importedAccess = String(body?.access_token || "").trim();
+                if (importedAccess) accessToken = importedAccess;
+                const importedExp = Number(body?.expires_at || 0);
+                if (Number.isFinite(importedExp) && importedExp > 0) expiresAt = Math.floor(importedExp);
+              }
+            } catch (_) {
+              // If import fails, continue with access token from callback hash.
+            }
+          }
+
+          if (accessToken) {
+            setBrowserToken(accessToken, expiresAt);
+            tokenInput.value = accessToken;
+            await validateAndRedirect();
+          }
+        })();
+      }
     </script>
   </body>
 </html>

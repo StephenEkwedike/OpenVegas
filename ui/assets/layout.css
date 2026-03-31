@@ -28,6 +28,14 @@
   gap: 12px;
 }
 
+.ov-nav-right {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
 .nav-links a {
   color: var(--grey-light);
   text-decoration: none;
@@ -50,6 +58,16 @@
 .founder-links a {
   text-decoration: none;
   color: var(--aqua);
+}
+
+.nav-auth {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.nav-auth .btn {
+  padding: 6px 10px;
 }
 
 .page-shell {
@@ -290,6 +308,11 @@ tbody tr:last-child td {
   }
 
   .nav-links {
+    justify-content: flex-start;
+  }
+
+  .ov-nav-right {
+    width: 100%;
     justify-content: flex-start;
   }
 

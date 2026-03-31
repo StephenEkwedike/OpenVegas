@@ -6,6 +6,7 @@ let walletBootstrapDone = false;
 let authState = "signed_out"; // signed_out | refreshing | signed_in
 let authStateVersion = 0;
 const authStateListeners = new Set();
+const SESSION_STORAGE_KEY = "ov_browser_access_session";
 
 function nowUnix() {
   return Math.floor(Date.now() / 1000);
@@ -41,9 +42,41 @@ function normalizeExpiresAt(raw) {
   return Math.floor(n);
 }
 
+function loadSessionFromStorage() {
+  try {
+    const raw = window.sessionStorage.getItem(SESSION_STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    const token = normalizeToken(parsed?.accessToken);
+    const exp = normalizeExpiresAt(parsed?.expiresAt);
+    if (!token) return;
+    accessToken = token;
+    accessExpUnix = exp;
+    authState = "signed_in";
+  } catch {
+    // Ignore malformed or unavailable storage.
+  }
+}
+
+function persistSessionToStorage() {
+  try {
+    if (!accessToken) {
+      window.sessionStorage.removeItem(SESSION_STORAGE_KEY);
+      return;
+    }
+    window.sessionStorage.setItem(
+      SESSION_STORAGE_KEY,
+      JSON.stringify({ accessToken, expiresAt: accessExpUnix || 0 }),
+    );
+  } catch {
+    // Ignore storage failures (private mode, disabled storage).
+  }
+}
+
 function setAccessToken(rawToken, expiresAtUnix = 0) {
   accessToken = normalizeToken(rawToken);
   accessExpUnix = normalizeExpiresAt(expiresAtUnix);
+  persistSessionToStorage();
   setAuthState(accessToken ? "signed_in" : "signed_out");
 }
 
@@ -141,6 +174,7 @@ export function clearBrowserToken() {
   accessToken = "";
   accessExpUnix = 0;
   walletBootstrapDone = false;
+  persistSessionToStorage();
   setAuthState("signed_out");
 }
 
@@ -266,4 +300,8 @@ export function showAuthedContent({ panelId = "authState", contentId = "authCont
   const content = document.getElementById(contentId);
   if (panel) panel.hidden = true;
   if (content) content.hidden = false;
+}
+
+if (typeof window !== "undefined") {
+  loadSessionFromStorage();
 }

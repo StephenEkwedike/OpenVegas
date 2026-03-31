@@ -28,6 +28,10 @@ class UiLoginRequest(BaseModel):
     password: str
 
 
+class UiImportSessionRequest(BaseModel):
+    refresh_token: str
+
+
 def _as_bool(raw: str, default: bool = False) -> bool:
     value = str(raw or "").strip().lower()
     if not value:
@@ -211,14 +215,44 @@ async def _supabase_token_password(*, email: str, password: str) -> dict[str, An
     return body if isinstance(body, dict) else {}
 
 
-async def _supabase_signup(*, email: str, password: str) -> dict[str, Any]:
+def _signup_email_redirect(request: Request) -> str:
+    explicit = str(os.getenv("OPENVEGAS_AUTH_EMAIL_REDIRECT_URL", "")).strip()
+    if explicit:
+        return explicit
+
+    path = str(
+        os.getenv(
+            "OPENVEGAS_AUTH_EMAIL_REDIRECT_PATH",
+            "/ui/login?mode=signup&next=%2Fui%2Fbalance",
+        )
+    ).strip()
+    if not path:
+        path = "/ui/login?mode=signup&next=%2Fui%2Fbalance"
+    if path.startswith("http://") or path.startswith("https://"):
+        return path
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return f"{_request_origin_base(request)}{path}"
+
+
+async def _supabase_signup(
+    *,
+    email: str,
+    password: str,
+    email_redirect_to: str | None = None,
+) -> dict[str, Any]:
     supabase_url, supabase_anon = _supabase_cfg()
+    payload: dict[str, Any] = {"email": email, "password": password}
+    if email_redirect_to:
+        # GoTrue compatibility across versions: include both fields.
+        payload["email_redirect_to"] = email_redirect_to
+        payload["redirect_to"] = email_redirect_to
     try:
         async with httpx.AsyncClient(timeout=12) as client:
             res = await client.post(
                 f"{supabase_url}/auth/v1/signup",
                 headers={"apikey": supabase_anon, "Content-Type": "application/json"},
-                json={"email": email, "password": password},
+                json=payload,
             )
     except Exception as e:  # pragma: no cover - defensive network wrapper
         raise HTTPException(status_code=503, detail="Unable to reach auth provider") from e
@@ -326,7 +360,8 @@ async def ui_signup(payload: UiLoginRequest, request: Request):
     if len(payload.password or "") < 8:
         raise HTTPException(status_code=422, detail="Password must be at least 8 characters")
 
-    body = await _supabase_signup(email=email, password=payload.password)
+    redirect_to = _signup_email_redirect(request)
+    body = await _supabase_signup(email=email, password=payload.password, email_redirect_to=redirect_to)
     access_token = str(body.get("access_token") or "").strip()
     refresh_token = str(body.get("refresh_token") or "").strip()
     expires_at = _extract_expires_at(body) if access_token else 0
@@ -342,6 +377,27 @@ async def ui_signup(payload: UiLoginRequest, request: Request):
     )
     if refresh_token:
         _set_refresh_cookie(resp, refresh_token)
+    _no_store(resp)
+    return resp
+
+
+@router.post("/ui/auth/session/import")
+async def ui_import_session(payload: UiImportSessionRequest, request: Request):
+    _emit_cookie_mode_once()
+    _assert_same_origin(request)
+
+    refresh_token = str(payload.refresh_token or "").strip()
+    if not refresh_token:
+        raise HTTPException(status_code=422, detail="Missing refresh token")
+
+    body = await _supabase_token_refresh(refresh_token)
+    access_token = str(body.get("access_token") or "").strip()
+    rotated_refresh = str(body.get("refresh_token") or "").strip()
+    if not access_token or not rotated_refresh:
+        raise HTTPException(status_code=502, detail="Refresh provider payload missing required fields")
+
+    resp = JSONResponse({"access_token": access_token, "expires_at": _extract_expires_at(body)})
+    _set_refresh_cookie(resp, rotated_refresh)
     _no_store(resp)
     return resp
 
