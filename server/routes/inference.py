@@ -427,7 +427,7 @@ async def ask(
     web_search_requested = bool(req.enable_web_search)
     attachments_requested = bool(req.attachments)
     web_search_effective = bool(
-        web_search_requested and resolve_capability(
+        web_search_requested and req.provider == "openai" and resolve_capability(
             req.provider,
             req.model,
             "web_search",
