@@ -368,55 +368,121 @@ def _classify_patch_failure(*, stdout: str, stderr: str) -> str:
 
 
 def _run_patch(root: Path, patch_text: str, timeout_sec: int) -> tuple[int, str, str, int, list[dict[str, Any]]]:
-    patch_bin = shutil.which("patch")
-    if not patch_bin:
-        return 127, "", "patch command is not available", 0, []
-
     attempts: list[dict[str, Any]] = []
-    last_dry_rc = 1
-    last_dry_out = ""
-    last_dry_err = ""
-    for p_level in (1, 0):
-        dry = subprocess.run(
-            [patch_bin, f"-p{p_level}", "--batch", "--forward", "--dry-run"],
-            input=patch_text,
-            text=True,
-            cwd=str(root),
-            capture_output=True,
-            timeout=timeout_sec,
-            check=False,
-        )
-        attempt: dict[str, Any] = {
-            "p_level": p_level,
-            "dry_run_rc": int(dry.returncode),
-            "dry_run_stdout": dry.stdout or "",
-            "dry_run_stderr": dry.stderr or "",
-            "apply_rc": None,
-            "apply_stdout": "",
-            "apply_stderr": "",
-        }
-        attempts.append(attempt)
-        last_dry_rc = int(dry.returncode)
-        last_dry_out = dry.stdout or ""
-        last_dry_err = dry.stderr or ""
-        if dry.returncode != 0:
-            continue
+    last_rc = 1
+    last_out = ""
+    last_err = ""
+    patch_bin = shutil.which("patch")
+    if patch_bin:
+        for p_level in (1, 0):
+            for ignore_ws in (False, True):
+                dry_cmd = [patch_bin, f"-p{p_level}", "--batch", "--forward", "--dry-run"]
+                if ignore_ws:
+                    dry_cmd.insert(2, "-l")
+                dry = subprocess.run(
+                    dry_cmd,
+                    input=patch_text,
+                    text=True,
+                    cwd=str(root),
+                    capture_output=True,
+                    timeout=timeout_sec,
+                    check=False,
+                )
+                attempt: dict[str, Any] = {
+                    "engine": "patch",
+                    "p_level": p_level,
+                    "ignore_whitespace": ignore_ws,
+                    "dry_run_rc": int(dry.returncode),
+                    "dry_run_stdout": dry.stdout or "",
+                    "dry_run_stderr": dry.stderr or "",
+                    "apply_rc": None,
+                    "apply_stdout": "",
+                    "apply_stderr": "",
+                }
+                attempts.append(attempt)
+                last_rc = int(dry.returncode)
+                last_out = dry.stdout or ""
+                last_err = dry.stderr or ""
+                if dry.returncode != 0:
+                    continue
 
-        apply = subprocess.run(
-            [patch_bin, f"-p{p_level}", "--batch", "--forward"],
-            input=patch_text,
-            text=True,
-            cwd=str(root),
-            capture_output=True,
-            timeout=timeout_sec,
-            check=False,
-        )
-        attempt["apply_rc"] = int(apply.returncode)
-        attempt["apply_stdout"] = apply.stdout or ""
-        attempt["apply_stderr"] = apply.stderr or ""
-        return int(apply.returncode), apply.stdout or "", apply.stderr or "", p_level, attempts
+                apply_cmd = [patch_bin, f"-p{p_level}", "--batch", "--forward"]
+                if ignore_ws:
+                    apply_cmd.insert(2, "-l")
+                apply = subprocess.run(
+                    apply_cmd,
+                    input=patch_text,
+                    text=True,
+                    cwd=str(root),
+                    capture_output=True,
+                    timeout=timeout_sec,
+                    check=False,
+                )
+                attempt["apply_rc"] = int(apply.returncode)
+                attempt["apply_stdout"] = apply.stdout or ""
+                attempt["apply_stderr"] = apply.stderr or ""
+                if apply.returncode == 0:
+                    return int(apply.returncode), apply.stdout or "", apply.stderr or "", p_level, attempts
+                last_rc = int(apply.returncode)
+                last_out = apply.stdout or ""
+                last_err = apply.stderr or ""
 
-    return last_dry_rc, last_dry_out, last_dry_err, -1, attempts
+    git_bin = shutil.which("git")
+    if git_bin:
+        for p_level in (1, 0):
+            for ignore_ws in (False, True):
+                check_cmd = [git_bin, "apply", "--no-index", "--check", f"-p{p_level}"]
+                apply_cmd = [git_bin, "apply", "--no-index", f"-p{p_level}"]
+                if ignore_ws:
+                    check_cmd.insert(3, "--ignore-space-change")
+                    apply_cmd.insert(3, "--ignore-space-change")
+                dry = subprocess.run(
+                    check_cmd,
+                    input=patch_text,
+                    text=True,
+                    cwd=str(root),
+                    capture_output=True,
+                    timeout=timeout_sec,
+                    check=False,
+                )
+                attempt = {
+                    "engine": "git_apply",
+                    "p_level": p_level,
+                    "ignore_whitespace": ignore_ws,
+                    "dry_run_rc": int(dry.returncode),
+                    "dry_run_stdout": dry.stdout or "",
+                    "dry_run_stderr": dry.stderr or "",
+                    "apply_rc": None,
+                    "apply_stdout": "",
+                    "apply_stderr": "",
+                }
+                attempts.append(attempt)
+                last_rc = int(dry.returncode)
+                last_out = dry.stdout or ""
+                last_err = dry.stderr or ""
+                if dry.returncode != 0:
+                    continue
+                apply = subprocess.run(
+                    apply_cmd,
+                    input=patch_text,
+                    text=True,
+                    cwd=str(root),
+                    capture_output=True,
+                    timeout=timeout_sec,
+                    check=False,
+                )
+                attempt["apply_rc"] = int(apply.returncode)
+                attempt["apply_stdout"] = apply.stdout or ""
+                attempt["apply_stderr"] = apply.stderr or ""
+                if apply.returncode == 0:
+                    return int(apply.returncode), apply.stdout or "", apply.stderr or "", p_level, attempts
+                last_rc = int(apply.returncode)
+                last_out = apply.stdout or ""
+                last_err = apply.stderr or ""
+
+    if not patch_bin and not git_bin:
+        return 127, "", "Neither patch nor git apply is available", 0, []
+    return last_rc, last_out, last_err, -1, attempts
 
 
 def _exec_fs_apply_patch(root: Path, arguments: dict[str, Any], timeout_sec: int) -> ToolExecutionResult:

@@ -47,7 +47,7 @@ class OpenVegasClient:
         self._wallet_bootstrap_done = False
         self._refresh_lock = asyncio.Lock()
         self._refresh_inflight: asyncio.Task[str] | None = None
-        self._proactive_fail_last_ts = 0.0
+        self._proactive_fail_last_ts: float | None = None
         self._proactive_fail_cooldown_sec = 60.0
         self._emit_startup_auth_mode_once()
 
@@ -72,7 +72,10 @@ class OpenVegasClient:
 
     def _allow_preflight_failure_metric(self) -> bool:
         now = time.monotonic()
-        if (now - self._proactive_fail_last_ts) < self._proactive_fail_cooldown_sec:
+        if (
+            self._proactive_fail_last_ts is not None
+            and (now - self._proactive_fail_last_ts) < self._proactive_fail_cooldown_sec
+        ):
             return False
         self._proactive_fail_last_ts = now
         return True
