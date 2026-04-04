@@ -48,6 +48,7 @@ from openvegas.cli import _has_workspace_tooling_intent
 from openvegas.cli import _should_enable_web_search_for_turn
 from openvegas.cli import _augment_web_search_prompt
 from openvegas.cli import _attachment_search_roots
+from openvegas.cli import _attachment_path_allowed
 from openvegas.cli import _detect_auto_attach_paths
 from openvegas.cli import _extract_filename_like_tokens
 from openvegas.cli import _split_compound_attachment_token
@@ -169,6 +170,22 @@ def test_detect_auto_attach_paths_finds_file_in_downloads_without_home_scan(monk
     )
     assert str(target.resolve()) in {str(Path(p).resolve()) for p in paths}
     assert unresolved == []
+
+
+def test_attachment_path_allowed_blocks_sensitive_prefixes_by_default(monkeypatch, tmp_path: Path):
+    target = tmp_path / "secret.txt"
+    target.write_text("x", encoding="utf-8")
+    monkeypatch.setenv("OPENVEGAS_CHAT_ATTACH_BLOCK_SENSITIVE", "1")
+    monkeypatch.setenv("OPENVEGAS_CHAT_ATTACH_BLOCK_PATH_PREFIXES", str(tmp_path))
+    assert _attachment_path_allowed(target) is False
+
+
+def test_attachment_path_allowed_can_be_disabled(monkeypatch, tmp_path: Path):
+    target = tmp_path / "safe.txt"
+    target.write_text("x", encoding="utf-8")
+    monkeypatch.setenv("OPENVEGAS_CHAT_ATTACH_BLOCK_SENSITIVE", "0")
+    monkeypatch.setenv("OPENVEGAS_CHAT_ATTACH_BLOCK_PATH_PREFIXES", str(tmp_path))
+    assert _attachment_path_allowed(target) is True
 
 
 @pytest.mark.asyncio

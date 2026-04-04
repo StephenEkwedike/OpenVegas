@@ -19,6 +19,8 @@ _COUNTERS: DefaultDict[str, int] = defaultdict(int)
 _EMITTED_ONCE_KEYS: set[str] = set()
 _RUN_METRICS: list[dict[str, object]] = []
 _RUN_METRICS_MAX = 2000
+_HTTP_REQUESTS: list[dict[str, object]] = []
+_HTTP_REQUESTS_MAX = 5000
 
 
 def _key(name: str, tags: dict[str, object] | None = None) -> str:
@@ -33,6 +35,29 @@ def emit_metric(name: str, tags: dict[str, object] | None = None, value: int = 1
     metric_key = _key(str(name), tags)
     with _LOCK:
         _COUNTERS[metric_key] += int(value)
+
+
+def record_http_request(*, method: str, route: str, status_code: int, latency_ms: float) -> None:
+    """Record bounded per-request telemetry for ops latency/error alerts."""
+    status = int(status_code)
+    route_token = str(route or "unknown")
+    method_token = str(method or "GET").upper()
+    latency = max(0.0, float(latency_ms or 0.0))
+    status_class = f"{status // 100}xx" if 100 <= status <= 599 else "other"
+    emit_metric("http_request_total", {"method": method_token, "route": route_token, "status_class": status_class})
+    if status >= 500:
+        emit_metric("http_5xx_total", {"method": method_token, "route": route_token})
+    with _LOCK:
+        _HTTP_REQUESTS.append(
+            {
+                "method": method_token,
+                "route": route_token,
+                "status_code": status,
+                "latency_ms": latency,
+            }
+        )
+        if len(_HTTP_REQUESTS) > _HTTP_REQUESTS_MAX:
+            del _HTTP_REQUESTS[0 : len(_HTTP_REQUESTS) - _HTTP_REQUESTS_MAX]
 
 
 def emit_run_metrics(run_id: str, data: dict[str, object]) -> None:
@@ -80,18 +105,6 @@ def get_dashboard_slices() -> dict[str, object]:
     with _LOCK:
         snapshot = dict(_COUNTERS)
 
-    def _parse_tags(metric_key: str) -> tuple[str, dict[str, str]]:
-        if "|" not in metric_key:
-            return metric_key, {}
-        name, raw_tags = metric_key.split("|", 1)
-        tags: dict[str, str] = {}
-        for token in raw_tags.split(","):
-            if "=" not in token:
-                continue
-            k, v = token.split("=", 1)
-            tags[k] = v
-        return name, tags
-
     retry_by_status: dict[str, int] = defaultdict(int)
     finalize_reason_dist: dict[str, int] = defaultdict(int)
     same_intent_fail_total = 0
@@ -100,7 +113,7 @@ def get_dashboard_slices() -> dict[str, object]:
     topup_checkout_created: dict[str, int] = defaultdict(int)
 
     for metric_key, count in snapshot.items():
-        name, tags = _parse_tags(metric_key)
+        name, tags = _parse_metric_key(metric_key)
         if name == "tool_apply_patch_same_intent_fail_total":
             same_intent_fail_total += int(count)
         elif name == "tool_apply_patch_retry_total":
@@ -122,6 +135,58 @@ def get_dashboard_slices() -> dict[str, object]:
         "topup_suggest_suppressed_total_by_reason": dict(sorted(topup_suggest_suppressed.items())),
         "topup_status_transition_total": dict(sorted(topup_transitions.items())),
         "topup_checkout_created_total_by_mode": dict(sorted(topup_checkout_created.items())),
+    }
+
+
+def _parse_metric_key(metric_key: str) -> tuple[str, dict[str, str]]:
+    if "|" not in metric_key:
+        return metric_key, {}
+    name, raw_tags = metric_key.split("|", 1)
+    tags: dict[str, str] = {}
+    for token in raw_tags.split(","):
+        if "=" not in token:
+            continue
+        k, v = token.split("=", 1)
+        tags[k] = v
+    return name, tags
+
+
+def _sum_counter(
+    snapshot: dict[str, int],
+    metric_name: str,
+    *,
+    match_tags: dict[str, str] | None = None,
+) -> int:
+    total = 0
+    required = {str(k): str(v) for k, v in (match_tags or {}).items()}
+    for key, count in snapshot.items():
+        name, tags = _parse_metric_key(key)
+        if name != metric_name:
+            continue
+        if required and any(str(tags.get(k, "")) != v for k, v in required.items()):
+            continue
+        total += int(count)
+    return total
+
+
+def get_http_request_summary() -> dict[str, float]:
+    with _LOCK:
+        rows = list(_HTTP_REQUESTS)
+    if not rows:
+        return {
+            "http_request_count": 0.0,
+            "http_5xx_count": 0.0,
+            "http_5xx_rate": 0.0,
+            "http_latency_ms_p95": 0.0,
+        }
+    latencies = [max(0.0, float(row.get("latency_ms", 0.0) or 0.0)) for row in rows]
+    total = len(rows)
+    failures = sum(1 for row in rows if int(row.get("status_code", 0) or 0) >= 500)
+    return {
+        "http_request_count": float(total),
+        "http_5xx_count": float(failures),
+        "http_5xx_rate": float(failures) / float(max(1, total)),
+        "http_latency_ms_p95": _percentile(latencies, 95),
     }
 
 
@@ -206,16 +271,47 @@ def get_alert_thresholds() -> dict[str, float]:
         "tool_fail_rate": _env_float("OPENVEGAS_ALERT_TOOL_FAIL_RATE", 0.20, min_value=0.0, max_value=1.0),
         "fallback_rate": _env_float("OPENVEGAS_ALERT_FALLBACK_RATE", 0.25, min_value=0.0, max_value=1.0),
         "avg_cost_usd": _env_float("OPENVEGAS_ALERT_AVG_COST_USD", 3.0, min_value=0.0, max_value=1000.0),
+        "http_5xx_rate": _env_float("OPENVEGAS_ALERT_HTTP_5XX_RATE", 0.02, min_value=0.0, max_value=1.0),
+        "http_latency_ms_p95": _env_float("OPENVEGAS_ALERT_HTTP_P95_LATENCY_MS", 2000.0, min_value=50.0, max_value=120000.0),
+        "upload_failure_rate": _env_float("OPENVEGAS_ALERT_UPLOAD_FAILURE_RATE", 0.10, min_value=0.0, max_value=1.0),
+        "auth_refresh_failure_rate": _env_float("OPENVEGAS_ALERT_AUTH_REFRESH_FAILURE_RATE", 0.25, min_value=0.0, max_value=1.0),
+        "payment_failure_rate": _env_float("OPENVEGAS_ALERT_PAYMENT_FAILURE_RATE", 0.10, min_value=0.0, max_value=1.0),
     }
 
 
 def get_ops_alerts() -> dict[str, object]:
     summary = get_run_metrics_summary()
+    snapshot = get_metrics_snapshot()
+    http_summary = get_http_request_summary()
     thresholds = get_alert_thresholds()
     alerts: list[dict[str, object]] = []
 
+    upload_success = _sum_counter(snapshot, "file_upload_request_total", match_tags={"outcome": "success"})
+    upload_failure = _sum_counter(snapshot, "file_upload_request_total", match_tags={"outcome": "failure"})
+    upload_total = upload_success + upload_failure
+
+    auth_refresh_success = _sum_counter(snapshot, "auth_refresh_attempt_total", match_tags={"outcome": "success"})
+    auth_refresh_failure = _sum_counter(snapshot, "auth_refresh_attempt_total", match_tags={"outcome": "failure"})
+    auth_refresh_total = auth_refresh_success + auth_refresh_failure
+
+    payment_success = _sum_counter(snapshot, "topup_saved_card_charge_total", match_tags={"status": "success"}) + _sum_counter(
+        snapshot, "topup_checkout_session_total", match_tags={"status": "success"}
+    )
+    payment_failure = _sum_counter(snapshot, "topup_saved_card_charge_total", match_tags={"status": "failure"}) + _sum_counter(
+        snapshot, "topup_checkout_session_total", match_tags={"status": "failure"}
+    )
+    payment_total = payment_success + payment_failure
+
+    derived = {
+        "http_5xx_rate": float(http_summary.get("http_5xx_rate", 0.0) or 0.0),
+        "http_latency_ms_p95": float(http_summary.get("http_latency_ms_p95", 0.0) or 0.0),
+        "upload_failure_rate": float(upload_failure) / float(max(1, upload_total)),
+        "auth_refresh_failure_rate": float(auth_refresh_failure) / float(max(1, auth_refresh_total)),
+        "payment_failure_rate": float(payment_failure) / float(max(1, payment_total)),
+    }
+
     def _check(metric: str, severity: str = "warning") -> None:
-        observed = float(summary.get(metric, 0.0) or 0.0)
+        observed = float(derived.get(metric, summary.get(metric, 0.0)) or 0.0)
         threshold = float(thresholds.get(metric, 0.0))
         fired = bool(observed > threshold)
         if fired:
@@ -233,11 +329,18 @@ def get_ops_alerts() -> dict[str, object]:
     _check("tool_fail_rate", severity="warning")
     _check("fallback_rate", severity="warning")
     _check("avg_cost_usd", severity="warning")
+    _check("http_5xx_rate", severity="critical")
+    _check("http_latency_ms_p95", severity="warning")
+    _check("upload_failure_rate", severity="warning")
+    _check("auth_refresh_failure_rate", severity="warning")
+    _check("payment_failure_rate", severity="critical")
 
     return {
         "alerts": alerts,
         "thresholds": thresholds,
         "run_summary": summary,
+        "http_summary": http_summary,
+        "derived": derived,
     }
 
 
@@ -271,6 +374,7 @@ def reset_metrics() -> None:
         _COUNTERS.clear()
         _EMITTED_ONCE_KEYS.clear()
         _RUN_METRICS.clear()
+        _HTTP_REQUESTS.clear()
 
 
 def _reset_emit_once_cache_for_tests() -> None:

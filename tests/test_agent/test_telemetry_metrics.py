@@ -10,6 +10,9 @@ from openvegas.telemetry import (
     emit_run_metrics,
     get_dashboard_slices,
     get_metrics_snapshot,
+    get_ops_alerts,
+    get_http_request_summary,
+    record_http_request,
     get_run_metrics_summary,
     reset_metrics,
 )
@@ -147,3 +150,39 @@ def test_run_metrics_summary_exposes_percentiles_and_rates():
     assert summary["turn_latency_ms_p95"] >= summary["turn_latency_ms_p50"]
     assert summary["tool_fail_rate"] > 0
     assert summary["avg_cost_usd"] > 0
+
+
+def test_ops_alerts_include_http_upload_auth_and_payment_rates(monkeypatch):
+    reset_metrics()
+    monkeypatch.setenv("OPENVEGAS_ALERT_HTTP_5XX_RATE", "0.01")
+    monkeypatch.setenv("OPENVEGAS_ALERT_UPLOAD_FAILURE_RATE", "0.20")
+    monkeypatch.setenv("OPENVEGAS_ALERT_AUTH_REFRESH_FAILURE_RATE", "0.20")
+    monkeypatch.setenv("OPENVEGAS_ALERT_PAYMENT_FAILURE_RATE", "0.20")
+
+    for _ in range(3):
+        record_http_request(method="GET", route="/health", status_code=200, latency_ms=30.0)
+    for _ in range(2):
+        record_http_request(method="POST", route="/inference/ask", status_code=500, latency_ms=2500.0)
+
+    emit_metric("file_upload_request_total", {"endpoint": "init", "outcome": "success"})
+    emit_metric("file_upload_request_total", {"endpoint": "complete", "outcome": "failure", "reason": "upload_expired"})
+
+    emit_metric("auth_refresh_attempt_total", {"surface": "browser", "trigger": "reactive", "outcome": "success"})
+    emit_metric(
+        "auth_refresh_attempt_total",
+        {"surface": "browser", "trigger": "reactive", "outcome": "failure", "reason": "refresh_preflight_failed"},
+    )
+
+    emit_metric("topup_saved_card_charge_total", {"status": "success"})
+    emit_metric("topup_saved_card_charge_total", {"status": "failure", "reason": "intent_create_failed"})
+
+    payload = get_ops_alerts()
+    alerts = payload.get("alerts", [])
+    metrics = {str(item.get("metric")) for item in alerts}
+    assert "http_5xx_rate" in metrics
+    assert "upload_failure_rate" in metrics
+    assert "auth_refresh_failure_rate" in metrics
+    assert "payment_failure_rate" in metrics
+
+    http_summary = get_http_request_summary()
+    assert float(http_summary["http_5xx_rate"]) > 0.0

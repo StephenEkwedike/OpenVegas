@@ -530,6 +530,7 @@ class BillingService:
                         topup_id,
                         str(retry_e)[:500],
                     )
+                    emit_metric("topup_checkout_session_total", {"mode": mode, "status": "failure", "reason": "customer_retry_failed"})
                     raise BillingError("Unable to create Stripe Checkout session") from retry_e
             else:
                 await self.db.execute(
@@ -541,6 +542,7 @@ class BillingService:
                     topup_id,
                     msg[:500],
                 )
+                emit_metric("topup_checkout_session_total", {"mode": mode, "status": "failure", "reason": "session_create_failed"})
                 raise BillingError("Unable to create Stripe Checkout session") from e
 
         row = await self.db.fetchrow(
@@ -569,9 +571,11 @@ class BillingService:
                 latest = await self.db.fetchrow("SELECT * FROM fiat_topups WHERE id = $1", topup_id)
                 if latest:
                     return self._format_topup(latest)
+            emit_metric("topup_checkout_session_total", {"mode": mode, "status": "failure", "reason": "persist_failed"})
             raise BillingError("Unable to persist checkout session")
 
         emit_metric("topup_checkout_created_total", {"mode": mode})
+        emit_metric("topup_checkout_session_total", {"mode": mode, "status": "success"})
         return self._format_topup(row)
 
     async def get_saved_payment_method_status(self, *, user_id: str) -> dict:
@@ -716,6 +720,7 @@ class BillingService:
                 topup_id,
                 str(e)[:500],
             )
+            emit_metric("topup_saved_card_charge_total", {"status": "failure", "reason": "intent_create_failed"})
             raise BillingError("Unable to charge saved card") from e
 
         intent_id = str(intent.get("id") or "")
@@ -733,6 +738,10 @@ class BillingService:
                 topup_id,
                 intent_id or None,
                 f"payment_intent_status:{intent_status}"[:500],
+            )
+            emit_metric(
+                "topup_saved_card_charge_total",
+                {"status": "failure", "reason": f"intent_status_{(intent_status or 'unknown')[:32]}"},
             )
             raise BillingError(f"Saved-card charge did not complete ({intent_status or 'unknown'})")
 

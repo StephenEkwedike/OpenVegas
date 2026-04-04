@@ -6,11 +6,13 @@ import os
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
+from time import perf_counter
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, RedirectResponse, Response
 from dotenv import load_dotenv
 from openvegas.compact_uuid import decode_compact_uuid
+from openvegas.telemetry import record_http_request
 
 from server.routes import mint as mint_routes
 from server.routes import games as game_routes
@@ -84,6 +86,28 @@ app = FastAPI(
     description="Terminal Arcade for Developers",
     lifespan=lifespan,
 )
+
+
+@app.middleware("http")
+async def telemetry_http_middleware(request: Request, call_next):
+    started = perf_counter()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = int(getattr(response, "status_code", 500) or 500)
+        return response
+    except Exception:
+        status_code = 500
+        raise
+    finally:
+        route = request.scope.get("route")
+        route_path = str(getattr(route, "path", "") or request.url.path or "/")
+        record_http_request(
+            method=str(request.method or "GET"),
+            route=route_path,
+            status_code=status_code,
+            latency_ms=(perf_counter() - started) * 1000.0,
+        )
 
 UI_INDEX = ROOT_DIR / "ui" / "index.html"
 TOPUP_UI_PAGE = ROOT_DIR / "ui" / "topup.html"

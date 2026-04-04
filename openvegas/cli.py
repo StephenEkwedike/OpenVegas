@@ -788,6 +788,37 @@ def _attachment_search_roots(workspace_root: str) -> list[Path]:
     return out
 
 
+def _attachment_sensitive_block_prefixes() -> list[Path]:
+    raw = str(
+        os.getenv(
+            "OPENVEGAS_CHAT_ATTACH_BLOCK_PATH_PREFIXES",
+            "/etc,/proc,/sys,/dev,/private/etc,/private/var/run,/var/run,~/Library/Keychains",
+        )
+    ).strip()
+    out: list[Path] = []
+    for token in [p.strip() for p in raw.split(",") if p.strip()]:
+        try:
+            resolved = Path(token).expanduser().resolve()
+        except Exception:
+            continue
+        out.append(resolved)
+    return out
+
+
+def _attachment_path_allowed(path: Path) -> bool:
+    raw = str(os.getenv("OPENVEGAS_CHAT_ATTACH_BLOCK_SENSITIVE", "1")).strip().lower()
+    if raw not in {"1", "true", "yes", "on"}:
+        return True
+    try:
+        resolved = path.resolve()
+    except Exception:
+        return False
+    for blocked in _attachment_sensitive_block_prefixes():
+        if resolved == blocked or blocked in resolved.parents:
+            return False
+    return True
+
+
 def _candidate_search_roots(workspace_root: str) -> list[Path]:
     # Backward-compatible alias.
     return _attachment_search_roots(workspace_root)
@@ -917,7 +948,7 @@ def _resolve_attachment_token_path(token: str, *, workspace_root: str) -> str | 
             p = Path(candidate_value).expanduser()
             if p.is_absolute():
                 try:
-                    if p.exists() and p.is_file():
+                    if p.exists() and p.is_file() and _attachment_path_allowed(p):
                         return str(p.resolve())
                 except Exception:
                     continue
@@ -927,7 +958,7 @@ def _resolve_attachment_token_path(token: str, *, workspace_root: str) -> str | 
                 except Exception:
                     continue
                 try:
-                    if candidate.exists() and candidate.is_file():
+                    if candidate.exists() and candidate.is_file() and _attachment_path_allowed(candidate):
                         return str(candidate)
                 except Exception:
                     continue
@@ -945,10 +976,12 @@ def _resolve_attachment_token_path(token: str, *, workspace_root: str) -> str | 
                 if not name_lc:
                     continue
                 if name_lc == raw_lc:
-                    exact_name_match = str(entry.resolve())
+                    if _attachment_path_allowed(entry):
+                        exact_name_match = str(entry.resolve())
                     break
                 if name_lc in raw_lc or raw_lc in name_lc:
-                    return str(entry.resolve())
+                    if _attachment_path_allowed(entry):
+                        return str(entry.resolve())
             if exact_name_match:
                 return exact_name_match
     return None
