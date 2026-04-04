@@ -287,6 +287,8 @@ class OpenVegasClient:
         conversation_mode: str | None = None,
         persist_context: bool | None = None,
         enable_tools: bool | None = None,
+        enable_web_search: bool | None = None,
+        attachments: list[str] | None = None,
     ) -> dict:
         payload = {"prompt": prompt, "provider": provider, "model": model}
         if idempotency_key:
@@ -299,7 +301,262 @@ class OpenVegasClient:
             payload["persist_context"] = bool(persist_context)
         if enable_tools is not None:
             payload["enable_tools"] = bool(enable_tools)
+        if enable_web_search is not None:
+            payload["enable_web_search"] = bool(enable_web_search)
+        if attachments is not None:
+            payload["attachments"] = [str(a or "").strip() for a in attachments if str(a or "").strip()]
         return await self._request("POST", "/inference/ask", json=payload)
+
+    async def ask_stream(
+        self,
+        prompt: str,
+        provider: str,
+        model: str,
+        *,
+        idempotency_key: str | None = None,
+        thread_id: str | None = None,
+        conversation_mode: str | None = None,
+        persist_context: bool | None = None,
+        enable_tools: bool | None = None,
+        enable_web_search: bool | None = None,
+        attachments: list[str] | None = None,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        payload = {"prompt": prompt, "provider": provider, "model": model}
+        if idempotency_key:
+            payload["idempotency_key"] = idempotency_key
+        if thread_id:
+            payload["thread_id"] = thread_id
+        if conversation_mode:
+            payload["conversation_mode"] = conversation_mode
+        if persist_context is not None:
+            payload["persist_context"] = bool(persist_context)
+        if enable_tools is not None:
+            payload["enable_tools"] = bool(enable_tools)
+        if enable_web_search is not None:
+            payload["enable_web_search"] = bool(enable_web_search)
+        if attachments is not None:
+            payload["attachments"] = [str(a or "").strip() for a in attachments if str(a or "").strip()]
+
+        attempted_refresh = False
+        while True:
+            try:
+                async with httpx.AsyncClient(timeout=None) as client:
+                    async with client.stream(
+                        "POST",
+                        f"{self.base_url}/inference/stream",
+                        headers=self._headers(),
+                        json=payload,
+                    ) as resp:
+                        if resp.status_code in (401, 403) and not attempted_refresh:
+                            attempted_refresh = True
+                            try:
+                                await self._refresh_single_flight(trigger="retry_401_stream")
+                            except TimeoutError:
+                                self._invalidate_session_cache("refresh_timeout")
+                                raise APIError(401, "Session refresh timed out. Run: openvegas login")
+                            except ValueError:
+                                self._invalidate_session_cache("refresh_malformed")
+                                raise APIError(401, "Session refresh returned invalid payload. Run: openvegas login")
+                            except CliAuthError:
+                                self._invalidate_session_cache("refresh_rejected")
+                                raise APIError(401, "Session expired. Run: openvegas login")
+                            continue
+
+                        if resp.status_code >= 400:
+                            detail = await resp.aread()
+                            text = detail.decode("utf-8", errors="ignore")
+                            data: dict | None = None
+                            try:
+                                parsed = json.loads(text)
+                                if isinstance(parsed, dict):
+                                    data = parsed
+                                    text = str(parsed.get("detail") or parsed.get("error") or text)
+                            except Exception:
+                                pass
+                            raise APIError(resp.status_code, text, data=data)
+
+                        current_event = "message"
+                        async for line in resp.aiter_lines():
+                            raw = (line or "").strip()
+                            if not raw:
+                                continue
+                            if raw.startswith("event:"):
+                                current_event = raw[6:].strip() or "message"
+                                continue
+                            if not raw.startswith("data:"):
+                                continue
+                            payload_line = raw[5:].strip()
+                            if not payload_line:
+                                continue
+                            try:
+                                data = json.loads(payload_line)
+                            except Exception:
+                                continue
+                            if isinstance(data, dict):
+                                yield {"event": current_event, "data": data}
+                        return
+            except httpx.HTTPError as e:
+                raise APIError(
+                    503,
+                    f"Backend stream request failed: {type(e).__name__}. "
+                    f"Check server is running and reachable at {self.base_url}.",
+                ) from e
+
+    async def upload_init(
+        self,
+        *,
+        filename: str,
+        size_bytes: int,
+        mime_type: str,
+        sha256_hex: str,
+    ) -> dict:
+        return await self._request(
+            "POST",
+            "/files/upload/init",
+            json={
+                "filename": str(filename or ""),
+                "size_bytes": int(size_bytes),
+                "mime_type": str(mime_type or ""),
+                "sha256": str(sha256_hex or "").lower(),
+            },
+        )
+
+    async def upload_complete(
+        self,
+        *,
+        upload_id: str,
+        content_base64: str,
+    ) -> dict:
+        return await self._request(
+            "POST",
+            "/files/upload/complete",
+            json={
+                "upload_id": str(upload_id or ""),
+                "content_base64": str(content_base64 or ""),
+            },
+        )
+
+    async def search_files(self, *, query: str, limit: int = 5) -> dict:
+        return await self._request(
+            "POST",
+            "/files/search",
+            json={
+                "query": str(query or ""),
+                "limit": int(limit),
+            },
+        )
+
+    async def mcp_list_servers(self) -> dict:
+        return await self._request("GET", "/mcp/servers")
+
+    async def mcp_register_server(
+        self,
+        *,
+        name: str,
+        transport: str,
+        target: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict:
+        return await self._request(
+            "POST",
+            "/mcp/servers/register",
+            json={
+                "name": str(name or ""),
+                "transport": str(transport or ""),
+                "target": str(target or ""),
+                "metadata": dict(metadata or {}),
+            },
+        )
+
+    async def mcp_server_health(self, *, server_id: str) -> dict:
+        return await self._request("GET", f"/mcp/servers/{server_id}/health")
+
+    async def mcp_call_tool(
+        self,
+        *,
+        server_id: str,
+        tool: str,
+        arguments: dict[str, Any] | None = None,
+        timeout_sec: int = 20,
+    ) -> dict:
+        return await self._request(
+            "POST",
+            f"/mcp/servers/{server_id}/tools/call",
+            json={
+                "tool": str(tool or ""),
+                "arguments": dict(arguments or {}),
+                "timeout_sec": int(timeout_sec),
+            },
+        )
+
+    async def code_exec_create(self, *, language: str, code: str, timeout_sec: int = 10) -> dict:
+        return await self._request(
+            "POST",
+            "/code-exec/jobs",
+            json={
+                "language": str(language or "python"),
+                "code": str(code or ""),
+                "timeout_sec": int(timeout_sec),
+            },
+        )
+
+    async def code_exec_status(self, *, job_id: str) -> dict:
+        return await self._request("GET", f"/code-exec/jobs/{job_id}")
+
+    async def code_exec_result(self, *, job_id: str) -> dict:
+        return await self._request("GET", f"/code-exec/jobs/{job_id}/result")
+
+    async def image_generate(
+        self,
+        *,
+        prompt: str,
+        provider: str = "openai",
+        model: str = "gpt-image-1",
+        size: str = "1024x1024",
+    ) -> dict:
+        return await self._request(
+            "POST",
+            "/images/generate",
+            json={
+                "prompt": str(prompt or ""),
+                "provider": str(provider or "openai"),
+                "model": str(model or "gpt-image-1"),
+                "size": str(size or "1024x1024"),
+            },
+        )
+
+    async def create_realtime_session(
+        self,
+        *,
+        provider: str = "openai",
+        model: str = "gpt-4o-realtime-preview",
+        voice: str = "alloy",
+    ) -> dict:
+        return await self._request(
+            "POST",
+            "/realtime/session",
+            json={
+                "provider": str(provider or "openai"),
+                "model": str(model or "gpt-4o-realtime-preview"),
+                "voice": str(voice or "alloy"),
+            },
+        )
+
+    async def cancel_realtime_relay(self, *, relay_session_id: str, reason: str = "user_cancel") -> dict:
+        return await self._request(
+            "POST",
+            f"/realtime/relay/{relay_session_id}/cancel",
+            json={"reason": str(reason or "user_cancel")},
+        )
+
+    async def get_ops_diagnostics(self) -> dict:
+        return await self._request("GET", "/ops/diagnostics")
+
+    async def get_ops_alerts(self) -> dict:
+        return await self._request("GET", "/ops/alerts")
+
+    async def get_ops_runs(self, *, limit: int = 25) -> dict:
+        return await self._request("GET", "/ops/runs", params={"limit": max(1, int(limit))})
 
     async def get_mode(self) -> dict:
         return await self._request("GET", "/inference/mode")
@@ -350,6 +607,22 @@ class OpenVegasClient:
         if idempotency_key:
             payload["idempotency_key"] = idempotency_key
         return await self._request("POST", "/billing/topups/checkout", json=payload)
+
+    async def get_saved_topup_payment_method(self) -> dict:
+        return await self._request("GET", "/billing/topups/saved-payment-method")
+
+    async def charge_saved_topup(
+        self,
+        amount_usd: Decimal | str,
+        idempotency_key: str | None = None,
+    ) -> dict:
+        payload: dict = {"amount_usd": str(amount_usd)}
+        if idempotency_key:
+            payload["idempotency_key"] = idempotency_key
+        return await self._request("POST", "/billing/topups/charge-saved", json=payload)
+
+    async def create_topup_payment_method_portal_session(self) -> dict:
+        return await self._request("POST", "/billing/topups/payment-method-portal-session")
 
     async def preview_topup_checkout(self, amount_usd: Decimal | str) -> dict:
         return await self._request(
@@ -451,16 +724,23 @@ class OpenVegasClient:
         game_code: str,
         wager_v: Decimal | str,
         idempotency_key: str,
+        preferred_action: str | None = None,
+        preferred_payload: dict | None = None,
     ) -> dict:
+        body = {
+            "casino_session_id": casino_session_id,
+            "game_code": game_code,
+            "wager_v": float(Decimal(str(wager_v))),
+            "idempotency_key": idempotency_key,
+        }
+        if preferred_action:
+            body["preferred_action"] = str(preferred_action)
+        if preferred_payload:
+            body["preferred_payload"] = dict(preferred_payload)
         return await self._request(
             "POST",
             "/casino/human/rounds/demo-autoplay",
-            json={
-                "casino_session_id": casino_session_id,
-                "game_code": game_code,
-                "wager_v": float(Decimal(str(wager_v))),
-                "idempotency_key": idempotency_key,
-            },
+            json=body,
         )
 
     async def agent_start_session(self, *, envelope_v: Decimal | str) -> dict:

@@ -9,6 +9,12 @@ from openvegas.games.base import GameResult
 from server.routes import games as games_routes
 
 
+@pytest.fixture(autouse=True)
+def _clear_win_always_aliases(monkeypatch):
+    monkeypatch.delenv("OPENVEGAS_WIN_ALWAYS", raising=False)
+    monkeypatch.delenv("OPENVEGAS_WIN_ALWAYS_USER_IDS", raising=False)
+
+
 class _FakeGame:
     async def validate_bet(self, bet: dict) -> bool:
         return True

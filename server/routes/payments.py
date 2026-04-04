@@ -22,6 +22,11 @@ class TopupCheckoutRequest(BaseModel):
     idempotency_key: str | None = None
 
 
+class TopupSavedChargeRequest(BaseModel):
+    amount_usd: str
+    idempotency_key: str | None = None
+
+
 class TopupPreviewRequest(BaseModel):
     amount_usd: str
 
@@ -109,6 +114,35 @@ async def preview_topup_checkout(req: TopupPreviewRequest, user: dict = Depends(
         raise HTTPException(status_code=400, detail=str(e))
 
 
+@router.get("/topups/saved-payment-method")
+async def get_saved_payment_method(user: dict = Depends(get_current_user)):
+    svc = get_billing_service()
+    try:
+        return await svc.get_saved_payment_method_status(user_id=user["user_id"])
+    except BillingError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/topups/charge-saved")
+async def charge_saved_topup(req: TopupSavedChargeRequest, user: dict = Depends(get_current_user)):
+    svc = get_billing_service()
+    key = req.idempotency_key or f"saved-{uuid.uuid4().hex[:12]}"
+    try:
+        amount = Decimal(req.amount_usd)
+    except (InvalidOperation, TypeError):
+        raise HTTPException(status_code=400, detail="Invalid amount_usd")
+    try:
+        return await svc.charge_saved_topup(
+            user_id=user["user_id"],
+            amount_usd=amount,
+            idempotency_key=key,
+        )
+    except IdempotencyConflict as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except BillingError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.get("/continuation/status")
 async def continuation_status(user: dict = Depends(get_current_user)):
     svc = get_billing_service()
@@ -164,9 +198,11 @@ async def list_topups(user: dict = Depends(get_current_user), limit: int = 50):
 
 
 @router.get("/activity")
-async def list_activity(user: dict = Depends(get_current_user), limit: int = 50):
+async def list_activity(response: Response, user: dict = Depends(get_current_user), limit: int = 50):
     svc = get_billing_service()
     try:
+        response.headers["Cache-Control"] = "private, no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
         return await svc.list_activity_history(user_id=user["user_id"], limit=limit)
     except BillingError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -302,6 +338,15 @@ async def create_user_subscription_portal_session(
             user_id=user["user_id"],
             flow_type=(req.flow_type if req else None),
         )
+    except BillingError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/topups/payment-method-portal-session")
+async def create_topup_payment_method_portal_session(user: dict = Depends(get_current_user)):
+    svc = get_billing_service()
+    try:
+        return await svc.create_user_payment_method_portal(user_id=user["user_id"])
     except BillingError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

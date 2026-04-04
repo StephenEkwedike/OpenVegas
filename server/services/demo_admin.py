@@ -6,16 +6,31 @@ import os
 from decimal import Decimal
 
 
+def _truthy(raw: str) -> bool:
+    return str(raw or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def demo_mode_enabled() -> bool:
-    return os.getenv("OPENVEGAS_DEMO_ALWAYS_WIN_ENABLED", "0") == "1"
+    # Preferred alias for QA/content workflows; falls back to legacy flag.
+    win_always_raw = str(os.getenv("OPENVEGAS_WIN_ALWAYS", "")).strip()
+    if win_always_raw:
+        return _truthy(win_always_raw)
+    return _truthy(os.getenv("OPENVEGAS_DEMO_ALWAYS_WIN_ENABLED", "0"))
 
 
 def is_demo_admin_user(user_id: str) -> bool:
     if not demo_mode_enabled():
         return False
-    raw = os.getenv("OPENVEGAS_DEMO_ADMIN_USER_IDS", "").strip()
+    # Prefer new allowlist alias, fall back to legacy var for compatibility.
+    raw = str(os.getenv("OPENVEGAS_WIN_ALWAYS_USER_IDS", "")).strip()
     if not raw:
-        return os.getenv("OPENVEGAS_DEMO_ALLOW_LOCAL_OPEN", "0") == "1"
+        raw = str(os.getenv("OPENVEGAS_DEMO_ADMIN_USER_IDS", "")).strip()
+    if not raw:
+        # Single-switch behavior: OPENVEGAS_WIN_ALWAYS=Y with no allowlist
+        # enables QA win mode for all accounts.
+        if _truthy(os.getenv("OPENVEGAS_WIN_ALWAYS", "")):
+            return True
+        return _truthy(os.getenv("OPENVEGAS_DEMO_ALLOW_LOCAL_OPEN", "0"))
     allow = {x.strip() for x in raw.split(",") if x.strip()}
     return user_id in allow
 

@@ -9,13 +9,13 @@ from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from openvegas.casino.constants import min_game_wager_v
 from openvegas.wallet.ledger import InsufficientBalance
 from server.middleware.auth import get_current_user
 from server.services.dependencies import get_human_casino_service
-from server.services.demo_admin import is_demo_admin_user
+from server.services.demo_admin import demo_mode_enabled, is_demo_admin_user
 
 try:  # pragma: no cover - import guard for runtime environments without asyncpg
     from asyncpg.exceptions import UndefinedTableError
@@ -72,10 +72,12 @@ class DemoAutoplayRequest(BaseModel):
     game_code: str
     wager_v: float
     idempotency_key: str
+    preferred_action: str | None = None
+    preferred_payload: dict = Field(default_factory=dict)
 
 
 def _is_demo_admin(user_id: str) -> bool:
-    if os.getenv("OPENVEGAS_DEMO_ALWAYS_WIN_ENABLED", "0") != "1":
+    if not demo_mode_enabled():
         return False
     return is_demo_admin_user(user_id)
 
@@ -216,6 +218,8 @@ async def demo_autoplay(req: DemoAutoplayRequest, user: dict = Depends(get_curre
             game_code=req.game_code,
             wager_v=Decimal(str(req.wager_v)),
             idempotency_key=req.idempotency_key or f"demo-{uuid.uuid4()}",
+            preferred_action=req.preferred_action,
+            preferred_payload=req.preferred_payload,
         )
         return _json_response(resp.status_code, resp.body_text)
     except InsufficientBalance as e:

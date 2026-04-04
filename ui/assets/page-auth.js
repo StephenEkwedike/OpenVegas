@@ -36,6 +36,20 @@ function normalizeToken(raw) {
   return v.toLowerCase().startsWith("bearer ") ? v.slice(7).trim() : v;
 }
 
+function decodeJwtPayload(token) {
+  const raw = String(token || "").trim();
+  if (!raw || !raw.includes(".")) return {};
+  try {
+    const payloadPart = raw.split(".")[1] || "";
+    const b64 = payloadPart.replace(/-/g, "+").replace(/_/g, "/");
+    const pad = b64.length % 4 === 0 ? "" : "=".repeat(4 - (b64.length % 4));
+    const json = atob(`${b64}${pad}`);
+    return JSON.parse(json);
+  } catch {
+    return {};
+  }
+}
+
 function normalizeExpiresAt(raw) {
   const n = Number(raw || 0);
   if (!Number.isFinite(n) || n <= 0) return 0;
@@ -178,6 +192,19 @@ export function clearBrowserToken() {
   setAuthState("signed_out");
 }
 
+export async function logoutBrowserSession() {
+  try {
+    await fetch("/ui/auth/logout", {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+    });
+  } catch {
+    // Best-effort remote logout; local clear always runs.
+  }
+  clearBrowserToken();
+}
+
 export async function bootstrapBrowserSession() {
   if (bootstrapAttempted) return Boolean(accessToken);
   bootstrapAttempted = true;
@@ -188,6 +215,24 @@ export async function bootstrapBrowserSession() {
     clearBrowserToken();
     return false;
   }
+}
+
+export function getSessionSummary() {
+  const token = getBrowserToken();
+  const claims = decodeJwtPayload(token);
+  return {
+    signed_in: Boolean(token),
+    email: String(claims?.email || claims?.user_metadata?.email || "").trim(),
+    user_id: String(claims?.sub || "").trim(),
+    expires_at: accessExpUnix || 0,
+  };
+}
+
+export async function resolveSessionSummary({ refresh = false } = {}) {
+  if (refresh && (!accessToken || expiresSoon(0))) {
+    await bootstrapBrowserSession();
+  }
+  return getSessionSummary();
 }
 
 export function getLoginHref(nextPath) {
@@ -212,6 +257,7 @@ export function authHeaders(extraHeaders = {}) {
 function withAuthInit(init = {}) {
   return {
     ...init,
+    cache: init.cache || "no-store",
     credentials: init.credentials || "same-origin",
     headers: authHeaders(init.headers),
   };

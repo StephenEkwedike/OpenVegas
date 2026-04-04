@@ -376,6 +376,12 @@ class BillingService:
         raise BillingError("Missing user_id in subscription metadata")
 
     async def _ensure_user_customer(self, user_id: str) -> str:
+        existing = await self._find_user_customer(user_id)
+        if existing:
+            return existing
+        return await self._create_user_customer(user_id)
+
+    async def _find_user_customer(self, user_id: str) -> str | None:
         row = await self.db.fetchrow(
             """
             SELECT stripe_customer_id
@@ -392,7 +398,19 @@ class BillingService:
         if row and row["stripe_customer_id"]:
             return str(row["stripe_customer_id"])
 
-        return await self._create_user_customer(user_id)
+        row = await self.db.fetchrow(
+            """
+            SELECT stripe_customer_id
+            FROM user_subscriptions
+            WHERE user_id = $1
+              AND stripe_customer_id IS NOT NULL
+              AND stripe_customer_id LIKE 'cus_%'
+            """,
+            user_id,
+        )
+        if row and row["stripe_customer_id"]:
+            return str(row["stripe_customer_id"])
+        return None
 
     async def _create_user_customer(self, user_id: str) -> str:
         user = await self.db.fetchrow(
@@ -555,6 +573,193 @@ class BillingService:
 
         emit_metric("topup_checkout_created_total", {"mode": mode})
         return self._format_topup(row)
+
+    async def get_saved_payment_method_status(self, *, user_id: str) -> dict:
+        if self._resolve_mode() != "stripe":
+            return {
+                "available": False,
+                "reason": "billing_mode_not_stripe",
+                "customer_id": None,
+            }
+        customer_id = await self._find_user_customer(user_id)
+        if not customer_id:
+            return {
+                "available": False,
+                "reason": "missing_customer",
+                "customer_id": None,
+            }
+        try:
+            customer = self.stripe_gateway.retrieve_customer(customer_id=customer_id)
+        except Exception:
+            return {
+                "available": False,
+                "reason": "customer_lookup_failed",
+                "customer_id": customer_id,
+            }
+        customer_get = customer.get if hasattr(customer, "get") else (lambda _k, _d=None: _d)
+        customer_invoice_settings = customer_get("invoice_settings", {}) or {}
+        default_pm = str((customer_invoice_settings or {}).get("default_payment_method") or "").strip()
+        pm_data: dict[str, Any] | None = None
+        if default_pm:
+            try:
+                pm_data = self.stripe_gateway.retrieve_payment_method(payment_method_id=default_pm)
+            except Exception:
+                pm_data = None
+        if pm_data is None:
+            try:
+                methods = self.stripe_gateway.list_customer_card_payment_methods(customer_id=customer_id, limit=5)
+            except Exception:
+                methods = {"data": []}
+            method_get = methods.get if hasattr(methods, "get") else (lambda _k, _d=None: _d)
+            rows = method_get("data", []) or []
+            if rows:
+                first = rows[0]
+                pm_data = first if hasattr(first, "get") else None
+        if not pm_data:
+            return {
+                "available": False,
+                "reason": "missing_payment_method",
+                "customer_id": customer_id,
+            }
+        pm_get = pm_data.get if hasattr(pm_data, "get") else (lambda _k, _d=None: _d)
+        card = pm_get("card", {}) or {}
+        return {
+            "available": True,
+            "reason": "ok",
+            "customer_id": customer_id,
+            "payment_method_id": str(pm_get("id") or ""),
+            "brand": str((card or {}).get("brand") or ""),
+            "last4": str((card or {}).get("last4") or ""),
+            "exp_month": int((card or {}).get("exp_month") or 0),
+            "exp_year": int((card or {}).get("exp_year") or 0),
+        }
+
+    async def charge_saved_topup(self, *, user_id: str, amount_usd: Decimal, idempotency_key: str) -> dict:
+        if self._resolve_mode() != "stripe":
+            raise BillingError("Saved-card top-up requires Stripe billing mode")
+
+        try:
+            amount_usd = Decimal(str(amount_usd))
+        except InvalidOperation as e:
+            raise BillingError("Invalid amount") from e
+
+        min_usd = Decimal(os.getenv("TOPUP_MIN_USD", "10"))
+        max_usd = Decimal(os.getenv("TOPUP_MAX_USD", "500"))
+        if amount_usd < min_usd or amount_usd > max_usd:
+            raise BillingError(f"Amount must be between {min_usd} and {max_usd} USD")
+
+        payment_status = await self.get_saved_payment_method_status(user_id=user_id)
+        if not payment_status.get("available"):
+            raise BillingError("No saved card available. Use checkout to add or update a card.")
+
+        customer_id = str(payment_status.get("customer_id") or "")
+        payment_method_id = str(payment_status.get("payment_method_id") or "")
+        if not customer_id or not payment_method_id:
+            raise BillingError("Saved card is not configured correctly")
+
+        v_per_usd = Decimal(os.getenv("V_PER_USD", "100"))
+        v_credit = (amount_usd * v_per_usd).quantize(V_SCALE)
+        payload_hash = self.canonical_payload_hash(
+            {"amount_usd": amount_usd, "currency": "usd", "charge_type": "saved_card"}
+        )
+
+        topup_id = ""
+        async with self.db.transaction() as tx:
+            existing = await tx.fetchrow(
+                """
+                SELECT *
+                FROM fiat_topups
+                WHERE user_id = $1 AND idempotency_key = $2
+                FOR UPDATE
+                """,
+                user_id,
+                idempotency_key,
+            )
+            if existing:
+                if existing["idempotency_payload_hash"] != payload_hash:
+                    raise IdempotencyConflict("IDEMPOTENCY_PAYLOAD_CONFLICT")
+                status = str(existing["status"])
+                if status == "paid":
+                    return self._format_topup(existing)
+                topup_id = str(existing["id"])
+            else:
+                topup_id = str(uuid.uuid4())
+                await tx.execute(
+                    """
+                    INSERT INTO fiat_topups
+                      (id, user_id, amount_usd, v_credit, status, idempotency_key, idempotency_payload_hash, mode, stripe_customer_id, expires_at)
+                    VALUES ($1, $2, $3, $4, 'created', $5, $6, 'stripe', $7, NULL)
+                    """,
+                    topup_id,
+                    user_id,
+                    amount_usd,
+                    v_credit,
+                    idempotency_key,
+                    payload_hash,
+                    customer_id,
+                )
+
+        try:
+            intent = self.stripe_gateway.create_saved_card_topup_payment_intent(
+                customer_id=customer_id,
+                payment_method_id=payment_method_id,
+                amount_usd=amount_usd,
+                topup_id=topup_id,
+            )
+        except Exception as e:
+            await self.db.execute(
+                """
+                UPDATE fiat_topups
+                SET status = 'failed', failure_reason = $2, updated_at = now()
+                WHERE id = $1
+                """,
+                topup_id,
+                str(e)[:500],
+            )
+            raise BillingError("Unable to charge saved card") from e
+
+        intent_id = str(intent.get("id") or "")
+        intent_status = str(intent.get("status") or "")
+        if intent_status != "succeeded":
+            await self.db.execute(
+                """
+                UPDATE fiat_topups
+                SET status = 'failed',
+                    stripe_payment_intent_id = COALESCE($2, stripe_payment_intent_id),
+                    failure_reason = $3,
+                    updated_at = now()
+                WHERE id = $1
+                """,
+                topup_id,
+                intent_id or None,
+                f"payment_intent_status:{intent_status}"[:500],
+            )
+            raise BillingError(f"Saved-card charge did not complete ({intent_status or 'unknown'})")
+
+        async with self.db.transaction() as tx:
+            row = await tx.fetchrow(
+                """
+                SELECT *
+                FROM fiat_topups
+                WHERE id = $1
+                FOR UPDATE
+                """,
+                topup_id,
+            )
+            if not row:
+                raise BillingError("Top-up not found after charge")
+            await self._settle_topup_paid(
+                tx=tx,
+                row=row,
+                provider_ref=intent_id or None,
+                settlement_surface="stripe",
+                provider_paid_at=self._utc_now(),
+            )
+            final = await tx.fetchrow("SELECT * FROM fiat_topups WHERE id = $1", topup_id)
+        if not final:
+            raise BillingError("Unable to fetch settled top-up")
+        emit_metric("topup_saved_card_charge_total", {"status": "success"})
+        return self._format_topup(final)
 
     async def preview_topup_checkout(self, *, user_id: str, amount_usd: Decimal) -> dict:
         try:
@@ -1079,10 +1284,10 @@ class BillingService:
               id,
               game_type,
               (COALESCE(payout, 0) - COALESCE(bet_amount, 0)) AS net_v,
-              created_at
+              created_at,
+              COALESCE(is_demo, FALSE) AS is_demo
             FROM game_history
             WHERE user_id = $1
-              AND COALESCE(is_demo, FALSE) = FALSE
             ORDER BY created_at DESC
             LIMIT $2
             """,
@@ -1148,6 +1353,7 @@ class BillingService:
                 continue
             ts_raw = self._row_get(row, "created_at")
             sort_ts = _coerce_sort_ts(ts_raw)
+            is_demo = bool(self._row_get(row, "is_demo", False))
             entries.append(
                 {
                     "_sort_ts": sort_ts,
@@ -1159,7 +1365,7 @@ class BillingService:
                     "amount_v_2dp": self._fmt_v_2(net_v),
                     "reference_id": str(self._row_get(row, "id", "")),
                     "game_code": str(self._row_get(row, "game_type", "")),
-                    "source": "legacy_game",
+                    "source": "legacy_game_demo" if is_demo else "legacy_game",
                 }
             )
 
@@ -1362,6 +1568,17 @@ class BillingService:
                 customer_id=str(row["stripe_customer_id"]),
                 flow_type=flow_type,
                 subscription_id=str(row["stripe_subscription_id"]) if row["stripe_subscription_id"] else None,
+            )
+        except ValueError as e:
+            raise BillingError(str(e)) from e
+        return {"url": url}
+
+    async def create_user_payment_method_portal(self, *, user_id: str) -> dict:
+        customer_id = await self._ensure_user_customer(user_id)
+        try:
+            url = self.stripe_gateway.create_billing_portal(
+                customer_id=customer_id,
+                flow_type="payment_method_update",
             )
         except ValueError as e:
             raise BillingError(str(e)) from e

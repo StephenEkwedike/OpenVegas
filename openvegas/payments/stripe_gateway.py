@@ -42,6 +42,19 @@ class StripeGateway:
                 options={"idempotency_key": idempotency_key},
             )
 
+    def _payment_intent_create(self, *, idempotency_key: str, **params) -> dict:
+        """Create payment intent with SDK-compatible idempotency options."""
+        try:
+            return self.stripe.PaymentIntent.create(
+                idempotency_key=idempotency_key,
+                **params,
+            )
+        except TypeError:
+            return self.stripe.PaymentIntent.create(
+                **params,
+                options={"idempotency_key": idempotency_key},
+            )
+
     def create_customer(
         self,
         *,
@@ -76,6 +89,40 @@ class StripeGateway:
             }],
             success_url=os.environ["CHECKOUT_SUCCESS_URL"],
             cancel_url=os.environ["CHECKOUT_CANCEL_URL"],
+            metadata={"topup_id": topup_id},
+            payment_intent_data={"setup_future_usage": "off_session"},
+        )
+
+    def retrieve_customer(self, *, customer_id: str) -> dict:
+        return self.stripe.Customer.retrieve(customer_id)
+
+    def list_customer_card_payment_methods(self, *, customer_id: str, limit: int = 5) -> dict:
+        return self.stripe.PaymentMethod.list(
+            customer=customer_id,
+            type="card",
+            limit=max(1, min(int(limit), 20)),
+        )
+
+    def retrieve_payment_method(self, *, payment_method_id: str) -> dict:
+        return self.stripe.PaymentMethod.retrieve(payment_method_id)
+
+    def create_saved_card_topup_payment_intent(
+        self,
+        *,
+        customer_id: str,
+        payment_method_id: str,
+        amount_usd: Decimal,
+        topup_id: str,
+    ) -> dict:
+        cents = int((amount_usd * Decimal("100")).quantize(Decimal("1")))
+        return self._payment_intent_create(
+            idempotency_key=f"topup-saved-charge:{topup_id}",
+            amount=cents,
+            currency="usd",
+            customer=customer_id,
+            payment_method=payment_method_id,
+            off_session=True,
+            confirm=True,
             metadata={"topup_id": topup_id},
         )
 

@@ -18,7 +18,7 @@ from pydantic import BaseModel
 from openvegas.casino.constants import min_game_wager_v
 from server.middleware.auth import get_current_user
 from server.services.dependencies import get_wallet, get_fraud_engine, get_db
-from server.services.demo_admin import is_demo_admin_user
+from server.services.demo_admin import demo_mode_enabled, is_demo_admin_user
 from openvegas.games.horse_racing import HorseRacing
 from openvegas.games.skill_shot import SkillShotGame
 from openvegas.rng.provably_fair import ProvablyFairRNG
@@ -122,7 +122,7 @@ def _error_response(status_code: int, code: str, detail: str) -> SerializedRespo
 
 
 def _is_demo_admin(user_id: str) -> bool:
-    if os.getenv("OPENVEGAS_DEMO_ALWAYS_WIN_ENABLED", "0") != "1":
+    if not demo_mode_enabled():
         return False
     return is_demo_admin_user(user_id)
 

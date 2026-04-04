@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import os
 import uuid
 import webbrowser
 from dataclasses import dataclass
@@ -55,6 +56,17 @@ GAME_LABELS = {
 HORSE_BET_CHOICES = ["win", "place", "show"]
 MIN_BILLING_USD = Decimal("10")
 MAX_BILLING_USD = Decimal("500")
+
+
+def _truthy(raw: str) -> bool:
+    return str(raw or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _win_always_enabled() -> bool:
+    raw = str(os.getenv("OPENVEGAS_WIN_ALWAYS", "")).strip()
+    if raw:
+        return _truthy(raw)
+    return _truthy(os.getenv("OPENVEGAS_DEMO_ALWAYS_WIN_ENABLED", "0"))
 
 
 def _format_v_amount(value: Any) -> str:
@@ -667,7 +679,7 @@ class InlinePromptUI:
         _ = state
         return action, payload
 
-    async def _run_human_card_round(self, *, stake: Decimal) -> str:
+    async def _run_human_card_round(self, *, stake: Decimal, force_win_mode: bool = False) -> str:
         session = await self.client.human_casino_start_session(
             max_loss_v=max(Decimal("100"), stake * Decimal("5")),
             max_rounds=100,
@@ -676,6 +688,50 @@ class InlinePromptUI:
         session_id = str(session.get("casino_session_id", ""))
         if not session_id:
             return f"Unable to start casino session: {session}"
+
+        if force_win_mode:
+            preferred_action: str | None = None
+            preferred_payload: dict = {}
+            if self.state.game == "roulette":
+                roulette_actions = ["bet_red", "bet_black", "bet_odd", "bet_even", "bet_number"]
+                selected = self._choose_round_action(self.state.game, roulette_actions, {})
+                if selected is None:
+                    return "Round view exited before resolve."
+                preferred_action, preferred_payload = selected
+            resolved = await self.client.human_casino_demo_autoplay(
+                casino_session_id=session_id,
+                game_code=self.state.game,
+                wager_v=stake,
+                idempotency_key=f"ui-demo-autoplay-{uuid.uuid4()}",
+                preferred_action=preferred_action,
+                preferred_payload=preferred_payload,
+            )
+            if resolved.get("error"):
+                return (
+                    f"{resolved.get('error')}\n"
+                    f"state={resolved.get('current_state')}\n"
+                    f"valid_actions={resolved.get('valid_actions', [])}"
+                )
+            outcome = resolved.get("outcome", {}) or {}
+            payout = Decimal(str(resolved.get("payout_v", "0")))
+            net = Decimal(str(resolved.get("net_v", "0")))
+            round_id = str(resolved.get("round_id", ""))
+            if self.state.game == "roulette" and bool(load_config().get("animation", True)):
+                try:
+                    await animate_roulette_spin(self.console, result_number=int(outcome.get("result", 0)))
+                except Exception:
+                    await self._animate_resolve(self.state.game)
+            else:
+                await self._animate_resolve(self.state.game)
+            self._last_is_win = net > 0
+            visual = self._render_card_outcome(self.state.game, outcome, stake, payout)
+            return (
+                f"{visual}\n"
+                f"LIVE MODE\n"
+                f"Payout: {payout} | Net: {net}\n"
+                f"Round ID: {round_id}\n"
+                f"Verify (API): /casino/human/rounds/{round_id}/verify"
+            )
 
         started = await self.client.human_casino_start_round(
             casino_session_id=session_id,
@@ -831,7 +887,38 @@ class InlinePromptUI:
             return "\n".join(lines)
 
         if action == "Deposit":
-            data = await self.client.create_topup_checkout(Decimal(self.state.amount))
+            amount = Decimal(self.state.amount)
+            saved_info: dict[str, Any] = {}
+            try:
+                with self.console.status("Checking saved payment method...", spinner="dots"):
+                    saved_info = await self.client.get_saved_topup_payment_method()
+            except Exception:
+                saved_info = {}
+
+            if bool(saved_info.get("available")):
+                brand = str(saved_info.get("brand") or "card").upper()
+                last4 = str(saved_info.get("last4") or "****")
+                confirm_saved = Confirm.ask(
+                    f"Charge saved {brand} ••••{last4} for ${amount.quantize(Decimal('0.01'))}?",
+                    default=True,
+                )
+                if confirm_saved:
+                    try:
+                        with self.console.status("Charging saved card via Stripe...", spinner="dots"):
+                            charged = await self.client.charge_saved_topup(amount)
+                        topup_id = str(charged.get("topup_id") or "").strip()
+                        return (
+                            f"Top-up ID: {topup_id}\n"
+                            f"Status: {charged.get('status')}\n"
+                            f"Charged amount: ${amount.quantize(Decimal('0.01'))}\n"
+                            "Saved card charged successfully."
+                        )
+                    except APIError as e:
+                        return f"Saved-card charge failed: API error {e.status}: {e.detail}"
+                    except Exception as e:
+                        return f"Saved-card charge failed: {e}"
+
+            data = await self.client.create_topup_checkout(amount)
             checkout_url = str(data.get("checkout_url") or "")
             topup_id = str(data.get("topup_id") or "").strip()
             status_page = f"/ui/topup/{topup_id}" if topup_id else ""
@@ -893,6 +980,7 @@ class InlinePromptUI:
 
         if action == "Play":
             stake = Decimal(self.state.amount)
+            force_win_mode = _win_always_enabled()
             balance_before = ""
             try:
                 bal = await self.client.get_balance()
@@ -902,6 +990,7 @@ class InlinePromptUI:
             if self.state.game in CARD_GAME_CHOICES:
                 out = await self._run_human_card_round(
                     stake=stake,
+                    force_win_mode=force_win_mode,
                 )
                 if balance_before:
                     return f"Balance before play: {balance_before} $V\n{out}"
@@ -920,7 +1009,7 @@ class InlinePromptUI:
                         quote_id=self.state.horse_quote_id,
                         horse=int(self.state.horse),
                         idempotency_key=f"ui-horse-play-{uuid.uuid4()}",
-                        demo_mode=False,
+                        demo_mode=force_win_mode,
                     )
                 except APIError as e:
                     payload = self._try_parse_json(str(e.detail))
@@ -950,7 +1039,10 @@ class InlinePromptUI:
                     except Exception:
                         # Fallback to deterministic center stop if interactive render is unavailable.
                         payload["stop_position"] = SkillShotGame.BAR_WIDTH // 2
-                data = await self.client.play_game(self.state.game, payload)
+                if force_win_mode:
+                    data = await self.client.play_game_demo(self.state.game, payload)
+                else:
+                    data = await self.client.play_game(self.state.game, payload)
 
             gr = self._to_game_result(data, stake)
             renderer = self._renderer_for()

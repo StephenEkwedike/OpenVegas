@@ -11,6 +11,7 @@ license = "MIT"
 dependencies = [
     "click>=8.1",
     "rich>=13.0",
+    "prompt-toolkit>=3.0",
     "Pillow>=10.0",
     "qrcode[pil]>=7.4",
     "textual>=0.50",

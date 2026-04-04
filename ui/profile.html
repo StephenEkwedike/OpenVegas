@@ -79,6 +79,11 @@
             <div>
               <div class="text-mono-xs" style="margin-bottom:8px;">PREFERENCES</div>
               <p class="card-copy">Changes apply to your account and are used by supported surfaces.</p>
+              <div class="text-mono-xs" style="margin-top:1rem; margin-bottom:8px;">PAYMENT METHODS</div>
+              <p class="card-copy" id="cardMeta">Checking saved card status...</p>
+              <div class="cta-row" style="margin-top:10px;">
+                <button id="manageCards" class="btn" type="button">Manage card details</button>
+              </div>
             </div>
           </div>
         </article>
@@ -101,6 +106,7 @@
       const avatarPaletteNode = byId("avatarPalette");
       const dealerSkinNode = byId("dealerSkin");
       const prefMeta = byId("prefMeta");
+      const cardMeta = byId("cardMeta");
       const FALLBACK_DISPLAY = {
         ov_user_01: "Classic Player",
         ov_user_02: "High Roller",
@@ -141,6 +147,12 @@
       async function init() {
         const manifest = await loadAvatarManifest();
         const prefs = await apiJson("/ui/profile/preferences", { method: "GET" });
+        let savedCardStatus = {};
+        try {
+          savedCardStatus = await apiJson("/billing/topups/saved-payment-method", { method: "GET" });
+        } catch {
+          savedCardStatus = {};
+        }
 
         const users = Array.isArray(manifest?.users) ? manifest.users : [];
         const dealers = Array.isArray(manifest?.dealer) ? manifest.dealer : [];
@@ -195,6 +207,39 @@
             prefMeta.textContent = String(err);
           }
         });
+
+        byId("manageCards")?.addEventListener("click", async () => {
+          if (cardMeta) cardMeta.textContent = "Opening Stripe card management...";
+          try {
+            const data = await apiJson("/billing/topups/payment-method-portal-session", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+            });
+            if (data?.url) {
+              const tab = window.open(data.url, "_blank");
+              if (tab && !tab.closed) {
+                try { tab.focus(); } catch {}
+                if (cardMeta) cardMeta.textContent = "Opened Stripe card management.";
+              } else if (cardMeta) {
+                cardMeta.textContent = "Popup blocked. Allow popups and retry.";
+              }
+            } else if (cardMeta) {
+              cardMeta.textContent = "No portal URL returned.";
+            }
+          } catch (err) {
+            if (cardMeta) cardMeta.textContent = String(err);
+          }
+        });
+
+        if (cardMeta) {
+          if (savedCardStatus?.available) {
+            const brand = String(savedCardStatus.brand || "card").toUpperCase();
+            const last4 = String(savedCardStatus.last4 || "****");
+            cardMeta.textContent = `Saved card on file: ${brand} ••••${last4}`;
+          } else {
+            cardMeta.textContent = "No saved card detected yet. Use top-up checkout once to save a card.";
+          }
+        }
 
         prefMeta.textContent = "Ready.";
       }

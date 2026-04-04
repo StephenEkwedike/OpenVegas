@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import difflib
 import hashlib
 import json
+import mimetypes
 import os
 import re
 import select
@@ -17,6 +19,7 @@ import uuid
 import webbrowser
 from dataclasses import dataclass, field
 from decimal import Decimal
+from enum import Enum
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlparse
@@ -26,6 +29,15 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
 from rich.table import Table
+
+try:  # Optional: richer in-line composer for chat input.
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.history import InMemoryHistory
+    from prompt_toolkit.key_binding import KeyBindings
+except Exception:  # pragma: no cover - exercised by runtime envs without prompt_toolkit
+    PromptSession = None
+    InMemoryHistory = None
+    KeyBindings = None
 
 from openvegas import __version__
 from openvegas.agent.local_tools import (
@@ -38,7 +50,9 @@ from openvegas.agent.local_tools import (
 from openvegas.agent.runtime_contracts import ToolPolicyDecision, evaluate_tool_policy
 from openvegas.agent.runtime_contracts import result_submission_hash as compute_result_submission_hash
 from openvegas.agent.tool_cas import redact_hash_truncate
+from openvegas.capabilities import resolve_capability
 from openvegas.config import load_config, save_config
+from openvegas.events import mk_event
 from openvegas.ide.show_diff import (
     is_valid_show_diff_payload,
     normalize_show_diff_result,
@@ -90,6 +104,7 @@ SUPPORTED_TOOL_NAMES = {
     "fs_apply_patch",
     "shell_run",
     "editor_open",
+    "mcp_call",
 }
 
 EXTERNAL_TOOL_ALIASES = {
@@ -104,6 +119,8 @@ EXTERNAL_TOOL_ALIASES = {
     "append_to_end": "fs_apply_patch",
     "bash": "shell_run",
     "list": "fs_list",
+    "mcp": "mcp_call",
+    "mcp_call": "mcp_call",
 }
 CANONICAL_EXTERNAL_TOOL_NAMES = tuple(sorted(EXTERNAL_TOOL_ALIASES.keys()))
 
@@ -125,6 +142,32 @@ RETRYABLE_MUTATION_ERRORS = {
 }
 _VSCODE_DIFF_PROMPTED = False
 _ENV_DEFAULTS_BOOTSTRAPPED = False
+_FILE_SCAN_CACHE: dict[str, tuple[float, list[Path]]] = {}
+_FILE_SCAN_CACHE_TTL_SEC = 2.5
+_FILE_SCAN_CACHE_MAX_ENTRIES = max(8, int(os.getenv("OPENVEGAS_FILE_SCAN_CACHE_MAX_ENTRIES", "64")))
+
+
+class LoopAction(str, Enum):
+    FINALIZED = "finalized"
+    CONTINUE = "continue"
+    INTERCEPT = "intercept"
+
+
+@dataclass
+class ToolLoopState:
+    tool_observations: list[dict[str, Any]] = field(default_factory=list)
+    executed_tool_calls: dict[str, int] = field(default_factory=dict)
+    streamed_tools_seen: dict[str, bool] = field(default_factory=dict)
+    completion_criteria: CompletionCriteria | None = None
+    pending_retry_tool_req: dict[str, Any] | None = None
+    bridge_caps: dict[str, bool] = field(default_factory=lambda: {"connected": False, "show_diff": False})
+    progress_fingerprint_prev: str | None = None
+    unchanged_progress_iters: int = 0
+    mutation_not_observed_iters: int = 0
+    repeated_patch_failures: dict[str, int] = field(default_factory=dict)
+    post_finalize_intercept_attempted: bool = False
+    active_mutation_timeout_hit: bool = False
+    active_mutation_observation_changed: bool = False
 
 
 def _sha256_hex(data: bytes) -> str:
@@ -227,6 +270,19 @@ def _load_openvegas_env_defaults_from_dotenv() -> None:
             os.environ[env_name] = value.strip().strip("'\"")
 
 
+def _win_always_enabled() -> bool:
+    raw = str(os.getenv("OPENVEGAS_WIN_ALWAYS", "")).strip()
+    if raw:
+        return raw.lower() in {"1", "true", "yes", "y", "on"}
+    return str(os.getenv("OPENVEGAS_DEMO_ALWAYS_WIN_ENABLED", "0")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "y",
+        "on",
+    }
+
+
 def _path_hint_candidates(msg: str) -> list[str]:
     text = (msg or "").strip()
     if not text:
@@ -302,9 +358,98 @@ def _merge_chat_prompt_and_buffered_lines(first: str, extras: list[str]) -> str:
         cleaned.append(token)
     if not cleaned:
         return base
+    # Keep one coherent prompt line to avoid fragmented multi-line composition in TTY input.
+    separator = " "
     if not base:
-        return "\n".join(cleaned).strip()
-    return "\n".join([base, *cleaned]).strip()
+        return separator.join(cleaned).strip()
+    return separator.join([base, *cleaned]).strip()
+
+
+def _coalesce_prompt_text(raw: str) -> str:
+    """Collapse multiline/pasted prompt text into one coherent chat turn."""
+    text = str(raw or "")
+    if not text:
+        return ""
+    lines = [ln.rstrip("\r") for ln in text.splitlines()]
+    if not lines:
+        return text.strip()
+    return _merge_chat_prompt_and_buffered_lines(lines[0], lines[1:])
+
+
+def _replace_nonbreaking_spaces(text: str) -> str:
+    return str(text or "").replace("\u202f", " ").replace("\xa0", " ")
+
+
+def _coalesce_live_prompt_text(raw: str) -> str:
+    """Coalesce pasted multiline input while preserving single-line typing whitespace."""
+    text = _replace_nonbreaking_spaces(str(raw or ""))
+    if not text:
+        return ""
+    if "\n" not in text and "\r" not in text:
+        return text
+    lines = [ln.rstrip("\r") for ln in text.splitlines()]
+    if not lines:
+        return ""
+    return _merge_chat_prompt_and_buffered_lines(lines[0], lines[1:])
+
+
+def _wrap_token_with_attachment_marker(text: str, token: str) -> str:
+    msg = str(text or "")
+    needle = _normalize_space_chars(token)
+    if not msg or not needle:
+        return msg
+    marker = _attachment_marker(needle)
+    if marker in msg:
+        return msg
+    pattern = re.compile(rf"(?<!\{{){re.escape(needle)}(?!\}})", flags=re.IGNORECASE)
+    return pattern.sub(marker, msg)
+
+
+def _normalize_live_chat_input_text(raw: str) -> str:
+    """Normalize in-composer chat text and annotate file-like mentions immediately."""
+    text = _coalesce_live_prompt_text(raw)
+    if not text:
+        return ""
+    if text.lstrip().startswith("/"):
+        return text
+    if _has_workspace_tooling_intent(text):
+        return text
+
+    out = text
+    for token in _extract_filename_like_tokens(text):
+        marker_token = _pick_attachment_marker_token(token)
+        out = _wrap_token_with_attachment_marker(out, marker_token)
+    for stem in _extract_screenshot_stems(text):
+        out = _wrap_token_with_attachment_marker(out, stem)
+    return out
+
+
+def _pick_attachment_marker_token(token: str) -> str:
+    raw = _normalize_space_chars(token)
+    pieces = _split_compound_attachment_token(raw)
+    if not pieces:
+        return raw
+    ext_pat = re.compile(
+        r"\.(?:pdf|png|jpe?g|gif|webp|svg|heic|bmp|tiff|txt|md|json|csv|docx?|pptx?|xlsx?)$",
+        flags=re.IGNORECASE,
+    )
+    candidates = [p for p in pieces if ext_pat.search(str(p).strip())]
+    if not candidates:
+        return raw
+
+    first_word_stop = {"in", "s", "what", "this", "these", "that", "and", "or"}
+    first_word_stop.update({"can", "you", "please", "tell", "show", "review", "check", "look", "see"})
+
+    def _first_word(value: str) -> str:
+        words = re.findall(r"[A-Za-z0-9_.-]+", str(value))
+        if not words:
+            return ""
+        return words[0].lower()
+
+    preferred = [c for c in candidates if _first_word(c) not in first_word_stop]
+    pool = preferred or candidates
+    pool.sort(key=lambda c: (len(re.findall(r"[A-Za-z0-9_.-]+", c)), len(c)), reverse=True)
+    return str(pool[0]).strip()
 
 
 def _path_hint_from_message(msg: str) -> str | None:
@@ -477,6 +622,652 @@ def _rewrite_shell_command_for_env(command: str) -> tuple[str, str | None]:
     return cmd, None
 
 
+def _is_scrape_request(text: str) -> bool:
+    msg = str(text or "").strip().lower()
+    if not msg:
+        return False
+    return "scrape" in msg or "scraping" in msg
+
+
+def _is_scrape_refusal_text(text: str) -> bool:
+    msg = str(text or "").strip().lower()
+    if not msg:
+        return False
+    markers = (
+        "can't help scrape",
+        "can’t help scrape",
+        "cannot help scrape",
+        "can't scrape",
+        "can’t scrape",
+        "bypass site restrictions",
+        "bypass access controls",
+    )
+    return any(token in msg for token in markers)
+
+
+def _rewrite_lookup_request_for_safe_web_search(text: str) -> str:
+    msg = str(text or "").strip()
+    if not msg:
+        return msg
+    rewritten = re.sub(r"\bscrap(?:e|ing)\b", "find", msg, flags=re.IGNORECASE)
+    return (
+        f"{rewritten}\n\n"
+        "Interpretation: use lawful web search on publicly accessible pages and authorized sources; "
+        "do not bypass restrictions."
+    ).strip()
+
+
+def _is_noncode_asset_reference(text: str) -> bool:
+    msg = str(text or "").strip().lower()
+    if not msg:
+        return False
+    return bool(
+        re.search(
+            r"\b[\w.\-]+\.(pdf|png|jpg|jpeg|gif|webp|svg|heic|bmp|tiff|doc|docx|ppt|pptx|xls|xlsx)\b",
+            msg,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _has_local_path_syntax(text: str) -> bool:
+    msg = str(text or "")
+    return bool(re.search(r"(^|\s)(/|\./|\.\./)", msg))
+
+
+def _has_workspace_action_verb(text: str) -> bool:
+    msg = str(text or "").lower()
+    verbs = ("open", "read", "edit", "patch", "update", "search", "grep", "list", "find")
+    return any(re.search(rf"\b{re.escape(v)}\b", msg) for v in verbs)
+
+
+def _has_code_filename_reference(text: str) -> bool:
+    msg = str(text or "")
+    return bool(
+        re.search(
+            r"\b[\w.\-]+\.(py|ts|tsx|js|jsx|md|json|yaml|yml|sql|toml|txt|rs|go|java|kt|cpp|c|h)\b",
+            msg,
+            flags=re.IGNORECASE,
+        )
+    )
+
+
+def _has_workspace_tooling_intent(text: str) -> bool:
+    msg = str(text or "").strip().lower()
+    if not msg:
+        return False
+    if _has_patch_intent(msg):
+        return True
+    if _is_noncode_asset_reference(msg) and not _has_patch_intent(msg):
+        return False
+
+    workspace_markers = (
+        "codebase",
+        "repository",
+        "repo",
+        "workspace",
+        "project files",
+        "source code",
+        "in this project",
+        "in this repo",
+        "search code",
+        "list files",
+        "run tests",
+        "pytest",
+        "grep",
+        "ripgrep",
+        "open file",
+        "read file",
+    )
+    if any(token in msg for token in workspace_markers):
+        return True
+
+    # Filename mentions only imply workspace intent when combined with local path syntax or action verbs.
+    if _has_code_filename_reference(msg) and (_has_local_path_syntax(msg) or _has_workspace_action_verb(msg)):
+        return True
+    return False
+
+
+def _extract_inline_file_mentions(text: str, *, workspace_root: str) -> list[str]:
+    msg = str(text or "")
+    if not msg.strip():
+        return []
+    candidates = re.findall(r"[\w./\\ -]+\.[A-Za-z0-9]{2,6}", msg)
+    if not candidates:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    root = Path(workspace_root).resolve()
+    for raw in candidates:
+        token = str(raw or "").strip().strip("\"'`")
+        if not token or token.lower() in seen:
+            continue
+        seen.add(token.lower())
+        path = Path(token).expanduser()
+        if not path.is_absolute():
+            path = (root / path).resolve()
+        try:
+            if path.exists() and path.is_file():
+                out.append(path.name)
+        except Exception:
+            continue
+        if len(out) >= 5:
+            break
+    return out
+
+
+def _normalize_space_chars(text: str) -> str:
+    return str(text or "").replace("\u202f", " ").replace("\xa0", " ").strip()
+
+
+def _attachment_search_roots(workspace_root: str) -> list[Path]:
+    out: list[Path] = []
+    candidates: list[Path] = [
+        Path(workspace_root).resolve(),
+        Path.cwd().resolve(),
+    ]
+    candidates.extend(_quick_attachment_dirs())
+
+    # Optional legacy broad scope (explicit opt-in only).
+    include_home_scan = str(os.getenv("OPENVEGAS_CHAT_ATTACH_SEARCH_HOME", "0")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if include_home_scan:
+        candidates.append(Path.home())
+
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except Exception:
+            continue
+        if resolved.exists() and resolved not in out:
+            out.append(resolved)
+    return out
+
+
+def _candidate_search_roots(workspace_root: str) -> list[Path]:
+    # Backward-compatible alias.
+    return _attachment_search_roots(workspace_root)
+
+
+def _quick_attachment_dirs() -> list[Path]:
+    out: list[Path] = []
+    for candidate in [
+        Path.home() / "Desktop",
+        Path.home() / "Downloads",
+        Path.home() / "Documents",
+    ]:
+        try:
+            resolved = candidate.resolve()
+        except Exception:
+            continue
+        if resolved.exists() and resolved not in out:
+            out.append(resolved)
+    return out
+
+
+def _set_file_scan_cache(cache_key: str, now_mono: float, files: list[Path]) -> None:
+    _FILE_SCAN_CACHE[cache_key] = (now_mono, list(files))
+    if len(_FILE_SCAN_CACHE) <= _FILE_SCAN_CACHE_MAX_ENTRIES:
+        return
+    # Keep freshest entries only; dict preserves insertion order.
+    stale_count = len(_FILE_SCAN_CACHE) - _FILE_SCAN_CACHE_MAX_ENTRIES
+    for key in list(_FILE_SCAN_CACHE.keys())[:stale_count]:
+        _FILE_SCAN_CACHE.pop(key, None)
+
+
+def _iter_files_limited(root: Path, *, max_depth: int = 2, max_files: int = 3000) -> list[Path]:
+    """Return a bounded recursive file listing under root for fuzzy attachment lookup."""
+    cache_key = f"{root.resolve()}::{int(max_depth)}::{int(max_files)}"
+    now_mono = time.monotonic()
+    cached = _FILE_SCAN_CACHE.get(cache_key)
+    if cached and (now_mono - cached[0]) <= _FILE_SCAN_CACHE_TTL_SEC:
+        return list(cached[1])
+
+    out: list[Path] = []
+    try:
+        root_resolved = root.resolve()
+        base_depth = len(root_resolved.parts)
+    except Exception:
+        return out
+
+    ignored_dirs = {
+        ".git",
+        "node_modules",
+        ".venv",
+        "venv",
+        "__pycache__",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".idea",
+    }
+    try:
+        for dirpath, dirnames, filenames in os.walk(root_resolved, topdown=True):
+            current_dir = Path(dirpath)
+            depth = len(current_dir.parts) - base_depth
+            if depth >= max_depth:
+                dirnames[:] = []
+            else:
+                dirnames[:] = [d for d in dirnames if d not in ignored_dirs]
+
+            for filename in filenames:
+                if len(out) >= max_files:
+                    break
+                try:
+                    out.append((current_dir / filename).resolve())
+                except Exception:
+                    continue
+            if len(out) >= max_files:
+                break
+    except Exception:
+        return out
+    _set_file_scan_cache(cache_key, now_mono, out)
+    return out
+
+
+def _split_compound_attachment_token(token: str) -> list[str]:
+    raw = _normalize_space_chars(token)
+    if not raw:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _push(value: str) -> None:
+        v = _normalize_space_chars(value).strip("\"'`").strip(" ,;:.!?")
+        key = v.lower()
+        if not v or key in seen:
+            return
+        seen.add(key)
+        out.append(v)
+
+    _push(raw)
+    ext_match = re.search(
+        r"(\.(?:pdf|png|jpe?g|gif|webp|svg|heic|bmp|tiff|txt|md|json|csv|docx?|pptx?|xlsx?))$",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    if ext_match:
+        ext = ext_match.group(1)
+        stem_words = re.findall(r"[A-Za-z0-9_.-]+", raw[: -len(ext)])
+        max_suffix_words = min(6, len(stem_words))
+        for count in range(1, max_suffix_words + 1):
+            _push(" ".join(stem_words[-count:]) + ext)
+    for piece in re.split(r"\s+(?:and|or)\s+|[,;]", raw, flags=re.IGNORECASE):
+        _push(piece)
+    for match in re.findall(
+        r"([A-Za-z0-9_.-]+(?:[ \t][A-Za-z0-9_.-]+){0,7}\.(?:pdf|png|jpe?g|gif|webp|svg|heic|bmp|tiff|txt|md|json|csv|docx?|pptx?|xlsx?))",
+        raw,
+        flags=re.IGNORECASE,
+    ):
+        _push(match)
+    return out
+
+
+def _resolve_attachment_token_path(token: str, *, workspace_root: str) -> str | None:
+    variants = _split_compound_attachment_token(token)
+    if not variants:
+        return None
+    roots = _attachment_search_roots(workspace_root)
+    for value in variants:
+        candidate_variants = [value, value.replace("\\ ", " ")]
+        for candidate_value in candidate_variants:
+            p = Path(candidate_value).expanduser()
+            if p.is_absolute():
+                try:
+                    if p.exists() and p.is_file():
+                        return str(p.resolve())
+                except Exception:
+                    continue
+            for root in roots:
+                try:
+                    candidate = (root / candidate_value).resolve()
+                except Exception:
+                    continue
+                try:
+                    if candidate.exists() and candidate.is_file():
+                        return str(candidate)
+                except Exception:
+                    continue
+
+    # Fuzzy fallback: match by basename containment in bounded root listing.
+    for raw in variants:
+        raw_lc = raw.lower()
+        for root in roots:
+            exact_name_match: str | None = None
+            for entry in _iter_files_limited(root, max_depth=2, max_files=3000):
+                try:
+                    name_lc = _normalize_space_chars(entry.name).lower()
+                except Exception:
+                    continue
+                if not name_lc:
+                    continue
+                if name_lc == raw_lc:
+                    exact_name_match = str(entry.resolve())
+                    break
+                if name_lc in raw_lc or raw_lc in name_lc:
+                    return str(entry.resolve())
+            if exact_name_match:
+                return exact_name_match
+    return None
+
+
+def _read_clipboard_text() -> str:
+    try:
+        if sys.platform == "darwin":
+            proc = subprocess.run(
+                ["pbpaste"],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if proc.returncode == 0:
+                return str(proc.stdout or "").strip()
+    except Exception:
+        return ""
+    return ""
+
+
+def _clipboard_has_image() -> bool:
+    if sys.platform != "darwin":
+        return False
+    try:
+        proc = subprocess.run(
+            ["osascript", "-e", "clipboard info"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            return False
+        info = str(proc.stdout or "")
+        return "«class PNGf»" in info or "«class TIFF»" in info or "picture" in info.lower()
+    except Exception:
+        return False
+
+
+def _save_clipboard_image_to_file() -> str | None:
+    """Best-effort clipboard-image export (macOS) modeled after Continue CLI."""
+    if sys.platform != "darwin":
+        return None
+    timestamp = int(time.time() * 1000)
+    tmp_path = Path("/tmp") / f"openvegas-clipboard-{timestamp}.png"
+    script = (
+        "set png_data to (the clipboard as «class PNGf»)\n"
+        f'set file_ref to open for access POSIX file "{tmp_path}" with write permission\n'
+        "try\n"
+        "  set eof file_ref to 0\n"
+        "  write png_data to file_ref\n"
+        "on error errMsg number errNum\n"
+        "  close access file_ref\n"
+        "  error errMsg number errNum\n"
+        "end try\n"
+        "close access file_ref\n"
+    )
+    try:
+        proc = subprocess.run(
+            ["osascript", "-e", script],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            return None
+        if not tmp_path.exists() or not tmp_path.is_file():
+            return None
+        return str(tmp_path)
+    except Exception:
+        return None
+
+
+def _extract_pasted_path_candidates(text: str) -> list[str]:
+    msg = _normalize_space_chars(text)
+    if not msg:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for line in msg.splitlines():
+        token = _normalize_space_chars(line).strip("\"'`")
+        if not token:
+            continue
+        key = token.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(token)
+    return out
+
+
+def _message_requests_attachment_analysis(text: str) -> bool:
+    msg = str(text or "").strip().lower()
+    if not msg:
+        return False
+    markers = (
+        "what do you see",
+        "tell me what you see",
+        "what's in",
+        "what is in",
+        "analyze this",
+        "analyze these",
+        "summarize this",
+        "summarize these",
+        "in this image",
+        "in this screenshot",
+        "in this pdf",
+        "from this file",
+    )
+    return any(token in msg for token in markers)
+
+
+def _extract_filename_like_tokens(text: str) -> list[str]:
+    msg = _normalize_space_chars(text)
+    if not msg:
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    patterns = [
+        r"\{([^{}]+)\}",
+        r'"([^"\n]+\.(?:pdf|png|jpe?g|gif|webp|svg|heic|bmp|tiff|txt|md|json|csv|docx?|pptx?|xlsx?))"',
+        r"'([^'\n]+\.(?:pdf|png|jpe?g|gif|webp|svg|heic|bmp|tiff|txt|md|json|csv|docx?|pptx?|xlsx?))'",
+        # Local paths with extension (absolute, relative, or home-prefixed).
+        r"((?:~|/|\./|\.\./)[A-Za-z0-9 _./\\\-]{1,220}\.(?:pdf|png|jpe?g|gif|webp|svg|heic|bmp|tiff|txt|md|json|csv|docx?|pptx?|xlsx?))",
+        # Basename with extension, capped token count to avoid swallowing full sentences.
+        r"([A-Za-z0-9_.-]+(?:[ \t][A-Za-z0-9_.-]+){0,7}\.(?:pdf|png|jpe?g|gif|webp|svg|heic|bmp|tiff|txt|md|json|csv|docx?|pptx?|xlsx?))",
+    ]
+    for pat in patterns:
+        for match in re.findall(pat, msg, flags=re.IGNORECASE):
+            token = _normalize_space_chars(match)
+            for part in _split_compound_attachment_token(token):
+                token_lc = part.lower()
+                if not part or token_lc in seen:
+                    continue
+                seen.add(token_lc)
+                out.append(part)
+    return out
+
+
+def _extract_screenshot_stems(text: str) -> list[str]:
+    msg = _normalize_space_chars(text)
+    if not msg:
+        return []
+    pattern = r"(Screenshot\s+\d{4}-\d{2}-\d{2}\s+at\s+\d{1,2}\.\d{2}\.\d{2}(?:\s*[AP]M)?)"
+    stems = [str(s).strip() for s in re.findall(pattern, msg, flags=re.IGNORECASE)]
+    out: list[str] = []
+    seen: set[str] = set()
+    for stem in stems:
+        key = stem.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(stem)
+    return out
+
+
+def _resolve_screenshot_stem_to_path(stem: str, *, workspace_root: str) -> str | None:
+    token = _normalize_space_chars(stem)
+    if not token:
+        return None
+    scan_roots = _attachment_search_roots(workspace_root)
+    image_exts = {".png", ".jpg", ".jpeg", ".webp", ".heic", ".gif", ".bmp", ".tiff"}
+    matches: list[str] = []
+    for root in scan_roots:
+        direct_hits: list[Path] = []
+        try:
+            direct_hits.extend(list(root.glob(f"{token}*")))
+        except Exception:
+            pass
+        file_pool = [*direct_hits, *_iter_files_limited(root, max_depth=2, max_files=3000)]
+        for path in file_pool:
+            try:
+                if not path.is_file():
+                    continue
+                if path.suffix.lower() not in image_exts:
+                    continue
+                name = _normalize_space_chars(path.name)
+                if token.lower() not in name.lower():
+                    continue
+                resolved = str(path.resolve())
+                if resolved not in matches:
+                    resolved = str(path.resolve())
+                    matches.append(resolved)
+            except Exception:
+                continue
+    if not matches:
+        return None
+    if len(matches) == 1:
+        return matches[0]
+    # Choose the freshest candidate when multiple screenshots share a prefix.
+    matches.sort(
+        key=lambda p: Path(p).stat().st_mtime if Path(p).exists() else 0.0,
+        reverse=True,
+    )
+    return matches[0]
+
+
+def _detect_auto_attach_paths(text: str, *, workspace_root: str, max_candidates: int = 5) -> tuple[list[str], list[str]]:
+    resolved: list[str] = []
+    unresolved: list[str] = []
+    seen_paths: set[str] = set()
+    for token in _extract_filename_like_tokens(text):
+        path = _resolve_attachment_token_path(token, workspace_root=workspace_root)
+        if path:
+            if path not in seen_paths:
+                seen_paths.add(path)
+                resolved.append(path)
+        else:
+            unresolved.append(token)
+        if len(resolved) >= max_candidates:
+            break
+    if len(resolved) < max_candidates:
+        for stem in _extract_screenshot_stems(text):
+            path = _resolve_screenshot_stem_to_path(stem, workspace_root=workspace_root)
+            if path and path not in seen_paths:
+                seen_paths.add(path)
+                resolved.append(path)
+            elif not path:
+                unresolved.append(stem)
+            if len(resolved) >= max_candidates:
+                break
+    uniq_unresolved: list[str] = []
+    seen_unresolved: set[str] = set()
+    for token in unresolved:
+        key = _normalize_space_chars(token).lower()
+        if key and key not in seen_unresolved:
+            seen_unresolved.add(key)
+            uniq_unresolved.append(token)
+    return resolved, uniq_unresolved[:max_candidates]
+
+
+async def _detect_auto_attach_paths_with_deadline(
+    text: str,
+    *,
+    workspace_root: str,
+    max_candidates: int = 5,
+    deadline_ms: int = 500,
+) -> tuple[list[str], list[str], bool]:
+    clamped_ms = max(100, int(deadline_ms))
+    try:
+        paths, unresolved = await asyncio.wait_for(
+            asyncio.to_thread(
+                _detect_auto_attach_paths,
+                text,
+                workspace_root=workspace_root,
+                max_candidates=max_candidates,
+            ),
+            timeout=clamped_ms / 1000.0,
+        )
+        return paths, unresolved, False
+    except asyncio.TimeoutError:
+        _tool_debug(f"auto-attach search exceeded {clamped_ms}ms; skipping")
+        emit_metric("chat_attachment_resolve_timeout_total", {"deadline_ms": clamped_ms})
+        unresolved = _extract_filename_like_tokens(text)[:max_candidates]
+        return [], unresolved, True
+
+
+def _has_web_request_signal(text: str) -> bool:
+    msg = str(text or "").strip().lower()
+    if not msg:
+        return False
+    if re.search(r"https?://", msg):
+        return True
+    markers = (
+        "web",
+        "online",
+        "internet",
+        "search",
+        "find",
+        "look up",
+        "latest",
+        "current",
+        "today",
+    )
+    return any(token in msg for token in markers)
+
+
+def _is_local_attachment_analysis_request(text: str) -> bool:
+    msg = str(text or "").strip().lower()
+    if not msg:
+        return False
+    analysis_markers = (
+        "what do you see in",
+        "summarize",
+        "analyze",
+        "extract",
+        "this pdf",
+        "this image",
+        "screenshot",
+        "attachment",
+        "file",
+    )
+    return any(token in msg for token in analysis_markers)
+
+
+def _should_enable_web_search_for_turn(text: str, *, has_uploaded_attachments: bool) -> bool:
+    if not str(text or "").strip():
+        return False
+    if has_uploaded_attachments and _is_local_attachment_analysis_request(text) and not _has_web_request_signal(text):
+        return False
+    return True
+
+
+def _augment_web_search_prompt(text: str) -> str:
+    msg = str(text or "").strip()
+    if not msg:
+        return msg
+    lower = msg.lower()
+    structured_result_verbs = ("find", "search", "look up", "compare", "list")
+    if any(token in lower for token in structured_result_verbs):
+        return (
+            f"{msg}\n\n"
+            "When using web search, prefer original source pages over aggregator landing pages. "
+            "For each distinct result, include a source URL. "
+            "Mark stale or unavailable pages explicitly."
+        ).strip()
+    return msg
+
+
 def _coerce_nonempty_text(v: Any) -> str | None:
     if isinstance(v, str):
         s = v.strip()
@@ -595,6 +1386,7 @@ def _canonical_tool_name(name: str) -> str:
         "execute_command": "shell_run",
         "terminal_run": "shell_run",
         "open_file": "editor_open",
+        "mcp_tool_call": "mcp_call",
     }
     return aliases.get(token, token)
 
@@ -651,12 +1443,39 @@ def _has_explicit_replace_wording(msg: str) -> bool:
     text = (msg or "").lower()
     if not text.strip():
         return False
+    patch_with_file = bool(
+        re.search(
+            r"\bpatch\s+(?:`[^`]+`|'[^']+'|\"[^\"]+\"|[a-z0-9_./-]+)\s+with\b",
+            text,
+        )
+    )
     return bool(
         re.search(
             r"\b(?:replace\s+all|replace\s+entire|replace\s+whole|rewrite\s+entire|rewrite\s+whole|overwrite|full\s+rewrite|replace\s+the\s+file)\b",
             text,
         )
-    )
+    ) or patch_with_file
+
+
+def _allow_full_replace_from_edit_intent(msg: str) -> bool:
+    """Allow deterministic full-file replace when user clearly asked for an edit.
+
+    This keeps strict explicit-replace wording support, while also allowing
+    practical edit prompts that target a file directly or refer to "this file".
+    """
+    text = (msg or "").strip()
+    if not text:
+        return False
+    if _has_explicit_replace_wording(text):
+        return True
+    lowered = text.lower()
+    if not _has_patch_intent(lowered):
+        return False
+    if _has_explicit_file_target(lowered):
+        return True
+    if re.search(r"\b(?:this|the)\s+file\b", lowered):
+        return True
+    return False
 
 
 def _has_explicit_replace_intent_from_arguments(arguments: dict[str, Any]) -> bool:
@@ -746,6 +1565,48 @@ def _replace_exact_matches(
     return text[:start] + replacement + text[end:]
 
 
+def _resolve_and_read_target(
+    *,
+    workspace_root: str,
+    path: str,
+    tool_label: str,
+    require_existing: bool,
+) -> tuple[Path | None, str, bool, dict[str, Any] | None]:
+    target = _safe_workspace_resolve(workspace_root, path)
+    if target is None:
+        return None, "", False, {
+            "status": "blocked",
+            "error": "workspace_path_out_of_bounds",
+            "detail": f"{tool_label} target is outside workspace root.",
+        }
+
+    exists = target.exists()
+    if exists and not target.is_file():
+        return target, "", exists, {
+            "status": "blocked",
+            "error": "invalid_tool_arguments",
+            "detail": f"{tool_label} target must be a file.",
+        }
+    if require_existing and (not exists or not target.is_file()):
+        return target, "", exists, {
+            "status": "blocked",
+            "error": "invalid_tool_arguments",
+            "detail": f"{tool_label} target must be an existing file.",
+        }
+
+    old_text = ""
+    if exists:
+        loaded, err = _read_existing_text_for_write(target)
+        if err is not None:
+            return target, "", exists, {
+                "status": "blocked",
+                "error": "binary_file_unsupported",
+                "detail": err,
+            }
+        old_text = loaded or ""
+    return target, old_text, exists, None
+
+
 def _prepare_find_replace_patch(
     *,
     workspace_root: str,
@@ -782,28 +1643,14 @@ def _prepare_find_replace_patch(
             "detail": "FindAndReplace old_string and new_string must differ.",
         }
 
-    target = _safe_workspace_resolve(workspace_root, path)
-    if target is None:
-        return None, {
-            "status": "blocked",
-            "error": "workspace_path_out_of_bounds",
-            "detail": "FindAndReplace target is outside workspace root.",
-        }
-    if not target.exists() or not target.is_file():
-        return None, {
-            "status": "blocked",
-            "error": "invalid_tool_arguments",
-            "detail": "FindAndReplace target must be an existing file.",
-        }
-
-    loaded, err = _read_existing_text_for_write(target)
-    if err is not None:
-        return None, {
-            "status": "blocked",
-            "error": "binary_file_unsupported",
-            "detail": err,
-        }
-    old_text = loaded or ""
+    target, old_text, _exists, resolve_err = _resolve_and_read_target(
+        workspace_root=workspace_root,
+        path=path,
+        tool_label="FindAndReplace",
+        require_existing=True,
+    )
+    if resolve_err is not None or target is None:
+        return None, resolve_err
     matches = _find_all_exact_matches(old_text, old_string)
     if not matches:
         return None, {
@@ -887,31 +1734,14 @@ def _prepare_insert_at_end_patch(
             "detail": "InsertAtEnd requires filepath and content.",
         }
 
-    target = _safe_workspace_resolve(workspace_root, path)
-    if target is None:
-        return None, {
-            "status": "blocked",
-            "error": "workspace_path_out_of_bounds",
-            "detail": "InsertAtEnd target is outside workspace root.",
-        }
-    if target.exists() and not target.is_file():
-        return None, {
-            "status": "blocked",
-            "error": "invalid_tool_arguments",
-            "detail": "InsertAtEnd target must be a file.",
-        }
-
-    old_text = ""
-    exists = target.exists()
-    if exists:
-        loaded, err = _read_existing_text_for_write(target)
-        if err is not None:
-            return None, {
-                "status": "blocked",
-                "error": "binary_file_unsupported",
-                "detail": err,
-            }
-        old_text = loaded or ""
+    target, old_text, exists, resolve_err = _resolve_and_read_target(
+        workspace_root=workspace_root,
+        path=path,
+        tool_label="InsertAtEnd",
+        require_existing=False,
+    )
+    if resolve_err is not None or target is None:
+        return None, resolve_err
 
     if _already_at_end(old_text, content):
         return None, {
@@ -1059,6 +1889,236 @@ class PairQuality:
     max_anchor_distance: int
     total_anchor_distance: int
     is_partial: bool
+
+
+class AttachmentState(str, Enum):
+    ATTACHED = "attached"
+    UPLOADING = "uploading"
+    UPLOADED = "uploaded"
+    FAILED = "failed"
+    UNSUPPORTED = "unsupported"
+
+
+ATTACHMENT_ALLOWED_TRANSITIONS: dict[AttachmentState, set[AttachmentState]] = {
+    AttachmentState.ATTACHED: {AttachmentState.UPLOADING, AttachmentState.UNSUPPORTED, AttachmentState.FAILED},
+    AttachmentState.UPLOADING: {AttachmentState.UPLOADED, AttachmentState.FAILED, AttachmentState.UNSUPPORTED},
+    AttachmentState.UPLOADED: set(),
+    AttachmentState.FAILED: set(),
+    AttachmentState.UNSUPPORTED: set(),
+}
+
+
+@dataclass
+class PendingAttachment:
+    local_id: str
+    path: str
+    name: str
+    mime_type: str
+    size_bytes: int
+    sha256: str
+    state: AttachmentState = AttachmentState.ATTACHED
+    remote_file_id: str | None = None
+    error: str | None = None
+
+
+def _can_attachment_transition(src: AttachmentState, dst: AttachmentState) -> bool:
+    return dst in ATTACHMENT_ALLOWED_TRANSITIONS.get(src, set())
+
+
+def _attachment_key(path: str, size_bytes: int, sha256: str) -> str:
+    return f"{sha256}:{int(size_bytes)}:{str(path or '')}"
+
+
+def _attachment_marker(name: str) -> str:
+    return f"{{{str(name or '').strip()}}}"
+
+
+def _format_composer_attachment_status_row(
+    attachments: list[PendingAttachment],
+    *,
+    provider: str | None = None,
+    model: str | None = None,
+    max_markers: int = 4,
+) -> str | None:
+    if not attachments:
+        return None
+    image_count = sum(1 for att in attachments if _attachment_is_image(att))
+    file_count = max(0, len(attachments) - image_count)
+    parts: list[str] = []
+    if image_count > 0:
+        image_supported = True
+        if provider and model:
+            image_supported = resolve_capability(provider, model, "image_input")
+        if image_supported:
+            parts.append(f"🖼 {image_count} image(s)")
+        else:
+            parts.append(f"⚠ {image_count} image(s) unsupported")
+    if file_count > 0:
+        parts.append(f"📄 {file_count} file(s)")
+    if not parts:
+        markers = [_attachment_marker(att.name) for att in attachments[:max(1, int(max_markers))]]
+        extra = len(attachments) - len(markers)
+        suffix = f" +{extra}" if extra > 0 else ""
+        return f"Attachments: {' '.join(markers)}{suffix}"
+    return f"Attachments: {'  '.join(parts)}"
+
+
+def _format_live_composer_status_row(
+    *,
+    draft_text: str,
+    attachments: list[PendingAttachment],
+    provider: str | None,
+    model: str | None,
+) -> str | None:
+    base = _format_composer_attachment_status_row(
+        attachments,
+        provider=provider,
+        model=model,
+    )
+    message = str(draft_text or "")
+    if message.lstrip().startswith("/"):
+        return base
+    mentions = _extract_filename_like_tokens(message)
+    if not mentions:
+        return base
+    markers = " ".join(_attachment_marker(_pick_attachment_marker_token(tok)) for tok in mentions[:2])
+    if base:
+        return f"{base}  |  candidates {markers}"
+    return f"candidates {markers}"
+
+
+def _attachment_is_image(att: PendingAttachment) -> bool:
+    mime = str(att.mime_type or _sniff_mime_type(att.path)).strip().lower()
+    return mime.startswith("image/")
+
+
+def _preflight_filter_attachments_for_capabilities(
+    pending_attachments: list[PendingAttachment],
+    *,
+    provider: str,
+    model: str,
+) -> tuple[list[PendingAttachment], int, bool]:
+    if not pending_attachments:
+        return list(pending_attachments), 0, False
+    image_supported = resolve_capability(provider, model, "image_input")
+    if image_supported:
+        return list(pending_attachments), 0, False
+
+    kept = [att for att in pending_attachments if not _attachment_is_image(att)]
+    dropped = len(pending_attachments) - len(kept)
+    blocked = dropped > 0 and not kept
+    return kept, max(0, dropped), blocked
+
+
+def _inject_attachment_markers_into_message(message: str, attachments: list[PendingAttachment]) -> str:
+    text = str(message or "")
+    if not text.strip() or not attachments:
+        return text
+    out = text
+    appended: list[str] = []
+    for att in attachments:
+        marker = _attachment_marker(att.name)
+        if marker in out:
+            continue
+        name_pat = re.escape(att.name)
+        if re.search(name_pat, out, flags=re.IGNORECASE):
+            out = re.sub(name_pat, marker, out, flags=re.IGNORECASE)
+            continue
+        appended.append(marker)
+    if appended:
+        out = f"{out} {' '.join(appended)}".strip()
+    return out
+
+
+def _attachment_icon(mime_type: str, *, unicode_ok: bool) -> str:
+    token = str(mime_type or "").lower()
+    if token.startswith("image/"):
+        return "🖼" if unicode_ok else "[IMG]"
+    if token in {"application/pdf"}:
+        return "📄" if unicode_ok else "[FILE]"
+    return "📎" if unicode_ok else "[FILE]"
+
+
+def _supports_unicode_output() -> bool:
+    encoding = str(getattr(sys.stdout, "encoding", "") or "").lower()
+    return bool(encoding) and "utf" in encoding
+
+
+def _sniff_mime_type(path: str) -> str:
+    guessed, _ = mimetypes.guess_type(path)
+    return str(guessed or "application/octet-stream")
+
+
+def _mime_matches_pattern(mime_type: str, pattern: str) -> bool:
+    token = str(mime_type or "").strip().lower()
+    pat = str(pattern or "").strip().lower()
+    if not token or not pat:
+        return False
+    if pat.endswith("/*"):
+        return token.startswith(pat[:-1])
+    return token == pat
+
+
+def _chat_allowed_mime_patterns() -> list[str]:
+    raw = str(
+        os.getenv(
+            "OPENVEGAS_CHAT_ALLOWED_MIME",
+            "text/*,image/*,application/pdf,application/json,application/xml,application/octet-stream",
+        )
+    ).strip()
+    if not raw:
+        return []
+    return [part.strip().lower() for part in raw.split(",") if part.strip()]
+
+
+def _is_chat_attachment_mime_allowed(mime_type: str) -> bool:
+    patterns = _chat_allowed_mime_patterns()
+    if not patterns:
+        return True
+    return any(_mime_matches_pattern(mime_type, pat) for pat in patterns)
+
+
+def _is_likely_text_mime(mime_type: str) -> bool:
+    token = str(mime_type or "").lower()
+    return token.startswith("text/") or token in {
+        "application/json",
+        "application/xml",
+        "application/yaml",
+        "application/x-yaml",
+        "application/toml",
+        "application/x-sh",
+        "application/javascript",
+        "application/typescript",
+        "application/sql",
+        "application/x-sql",
+    }
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _read_attachment_preview(path: str, *, max_chars: int) -> str:
+    token = str(path or "").strip()
+    if not token:
+        return ""
+    try:
+        raw = Path(token).read_bytes()
+    except Exception:
+        return ""
+    text = raw.decode("utf-8", errors="ignore").strip()
+    if not text:
+        return ""
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "\n...[truncated]..."
 
 
 _HUNK_HEADER_RE = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@")
@@ -1660,21 +2720,14 @@ def _prepare_write_patch(
             "detail": "Write requires filepath and content.",
         }
 
-    target = _safe_workspace_resolve(workspace_root, path)
-    if target is None:
-        return None, {
-            "status": "blocked",
-            "error": "workspace_path_out_of_bounds",
-            "detail": "Write target is outside workspace root.",
-        }
-
-    exists = target.exists()
-    if exists and not target.is_file():
-        return None, {
-            "status": "blocked",
-            "error": "invalid_tool_arguments",
-            "detail": "Write target must be a file.",
-        }
+    target, old_text, exists, resolve_err = _resolve_and_read_target(
+        workspace_root=workspace_root,
+        path=path,
+        tool_label="Write",
+        require_existing=False,
+    )
+    if resolve_err is not None or target is None:
+        return None, resolve_err
 
     rel_path = _safe_rel_from_workspace(workspace_root, target)
     raw_mode = str(arguments.get("write_mode") or arguments.get("mode") or "").strip().lower()
@@ -1683,16 +2736,7 @@ def _prepare_write_patch(
         str(user_message or "")
     )
 
-    old_text = ""
     if exists:
-        loaded, err = _read_existing_text_for_write(target)
-        if err is not None:
-            return None, {
-                "status": "blocked",
-                "error": "binary_file_unsupported",
-                "detail": err,
-            }
-        old_text = loaded or ""
         if (not append_mode) and old_text == content:
             return None, {
                 "status": "noop",
@@ -1767,14 +2811,22 @@ def _has_patch_intent(msg: str) -> bool:
     if re.search(r"\b(?:do\s+not|don't|without)\s+\b(?:edit|modify|change|patch|write|apply)\b", text):
         return False
 
-    if re.search(
-        r"\b(patch|edit|modify|update|change|add|remove|delete|fix|refactor|implement|rewrite|replace|insert|append|rename|move|extract)\b",
+    edit_verbs = re.search(
+        r"\b(patch|edit|modify|update|change|add|remove|delete|fix|refactor|implement|rewrite|replace|insert|append|rename|move|extract|create|make|write|generate|overwrite)\b",
         text,
-    ):
+    )
+    read_only_verbs = re.search(
+        r"\b(show|explain|read|describe|list|display|summarize|review|search|inspect|view|open)\b",
+        text,
+    )
+    has_file_target = _has_explicit_file_target(msg)
+
+    if edit_verbs:
         return True
-    if re.search(r"\b(create|write|append|overwrite)\b", text) and (
-        "file" in text or bool(re.search(r"[A-Za-z0-9_.\-/]+\.[A-Za-z0-9_]+", text))
-    ):
+    # File-targeted prompts default to edit intent unless explicitly read-only.
+    if has_file_target:
+        if read_only_verbs and not edit_verbs:
+            return False
         return True
     return False
 
@@ -2495,7 +3547,7 @@ def _synth_write_tool_req_from_model_edit(
             "timeout_sec": 30,
         }
 
-    if not _has_explicit_replace_wording(user_message):
+    if not _allow_full_replace_from_edit_intent(user_message):
         _skip("existing_file_replace_requires_explicit_intent")
         return None
 
@@ -2617,30 +3669,67 @@ def _diagnose_synth_write_skip_reason(
         current_text = str(payload.get("content") if isinstance(payload, dict) else "")
         if current_text and _derive_single_replace_from_old_and_new(current_text, content) is not None:
             return None
-    if not _has_explicit_replace_wording(user_message):
+    if not _allow_full_replace_from_edit_intent(user_message):
         return "existing_file_replace_requires_explicit_intent"
     return None
 
 
-def _deep_find_keyed_string(v: Any, keys: tuple[str, ...], depth: int = 0) -> str | None:
+def _deep_find_keyed_string(
+    v: Any,
+    keys: tuple[str, ...],
+    depth: int = 0,
+    *,
+    _fallback_emitted: list[bool] | None = None,
+) -> str | None:
     if depth > 4:
         return None
+    if _fallback_emitted is None:
+        _fallback_emitted = [False]
+
+    def _emit_nested_fallback(hit_key: str) -> None:
+        if depth <= 0 or _fallback_emitted[0]:
+            return
+        _fallback_emitted[0] = True
+        emit_metric(
+            "tool_argument_deep_fallback_total",
+            {
+                "depth": str(depth),
+                "key": str(hit_key or ""),
+            },
+        )
+
     if isinstance(v, dict):
         for k in keys:
             if k in v:
                 hit = _coerce_nonempty_text(v.get(k))
                 if hit:
+                    _emit_nested_fallback(k)
                     return hit
-                hit = _deep_find_keyed_string(v.get(k), keys, depth + 1)
+                hit = _deep_find_keyed_string(
+                    v.get(k),
+                    keys,
+                    depth + 1,
+                    _fallback_emitted=_fallback_emitted,
+                )
                 if hit:
                     return hit
         for child in v.values():
-            hit = _deep_find_keyed_string(child, keys, depth + 1)
+            hit = _deep_find_keyed_string(
+                child,
+                keys,
+                depth + 1,
+                _fallback_emitted=_fallback_emitted,
+            )
             if hit:
                 return hit
     elif isinstance(v, list):
         for child in v:
-            hit = _deep_find_keyed_string(child, keys, depth + 1)
+            hit = _deep_find_keyed_string(
+                child,
+                keys,
+                depth + 1,
+                _fallback_emitted=_fallback_emitted,
+            )
             if hit:
                 return hit
     return None
@@ -2758,6 +3847,13 @@ def _semantic_tool_signature(tool_name: str, arguments: dict[str, Any], shell_mo
             "tool_name": name,
             "shell_mode": str(shell_mode or "read_only"),
             "command": str(args.get("command", "")).strip(),
+        }
+    elif name == "mcp_call":
+        key = {
+            "tool_name": name,
+            "server_id": str(args.get("server_id", "")).strip(),
+            "tool": str(args.get("tool", "")).strip(),
+            "arguments": args.get("arguments", {}),
         }
     else:
         key = {"tool_name": name, "arguments": args}
@@ -3027,6 +4123,42 @@ def _preprocess_tool_request_for_runtime(
                 "detail": "Unable to infer shell_run.command from model output or user request.",
             }
 
+    if tool_name == "mcp_call":
+        server_id = _coerce_nonempty_text(arguments.get("server_id"))
+        if server_id is None:
+            server_id = _coerce_nonempty_text(
+                _deep_find_keyed_string(arguments, ("server_id", "server", "mcp_server_id"))
+            )
+        if server_id is not None:
+            arguments["server_id"] = server_id
+
+        tool_label = _coerce_nonempty_text(arguments.get("tool"))
+        if tool_label is None:
+            tool_label = _coerce_nonempty_text(
+                _deep_find_keyed_string(arguments, ("tool", "tool_name", "name"))
+            )
+        if tool_label is not None:
+            arguments["tool"] = tool_label
+
+        if not isinstance(arguments.get("arguments"), dict):
+            alias_args = arguments.get("args")
+            arguments["arguments"] = dict(alias_args) if isinstance(alias_args, dict) else {}
+
+        if not (isinstance(arguments.get("server_id"), str) and str(arguments.get("server_id")).strip()):
+            return None, {
+                "tool_name": tool_name,
+                "status": "blocked",
+                "error": "invalid_tool_arguments",
+                "detail": "mcp_call requires server_id.",
+            }
+        if not (isinstance(arguments.get("tool"), str) and str(arguments.get("tool")).strip()):
+            return None, {
+                "tool_name": tool_name,
+                "status": "blocked",
+                "error": "invalid_tool_arguments",
+                "detail": "mcp_call requires tool.",
+            }
+
     shell_mode = str(tool_req.get("shell_mode") or "read_only")
     timeout_sec = int(tool_req.get("timeout_sec", 30))
     prepared = {
@@ -3214,7 +4346,8 @@ def history():
 
 @cli.command()
 @click.argument("amount")
-def deposit(amount: str):
+@click.option("--saved/--no-saved", "use_saved", default=True, show_default=True, help="Attempt saved-card charge before checkout flow.")
+def deposit(amount: str, use_saved: bool):
     """Buy $V with cash (returns Stripe checkout URL)."""
     async def _deposit():
         from openvegas.client import OpenVegasClient, APIError
@@ -3226,6 +4359,30 @@ def deposit(amount: str):
 
         try:
             client = OpenVegasClient()
+            if use_saved:
+                try:
+                    saved = await client.get_saved_topup_payment_method()
+                except APIError:
+                    saved = {"available": False}
+                if bool(saved.get("available")):
+                    brand = str(saved.get("brand") or "card").upper()
+                    last4 = str(saved.get("last4") or "****")
+                    prompt = f"Charge saved {brand} ••••{last4} for ${amt.quantize(Decimal('0.01'))}?"
+                    if click.confirm(prompt, default=True):
+                        with console.status("[bold cyan]Calculating top-up preview...[/bold cyan]", spinner="dots"):
+                            preview = await client.preview_topup_checkout(amt)
+                        console.print(
+                            "[bold]Preview:[/bold] "
+                            f"gross={preview.get('v_credit_gross')} $V, "
+                            f"repay={preview.get('repay_v')} $V, "
+                            f"net={preview.get('net_credit_v')} $V"
+                        )
+                        with console.status("[bold cyan]Charging saved card via Stripe...[/bold cyan]", spinner="dots"):
+                            charged = await client.charge_saved_topup(amt)
+                        console.print(f"[green]Top-up ID:[/green] {charged.get('topup_id')}")
+                        console.print(f"[green]Status:[/green] {charged.get('status')}")
+                        console.print("[green]Saved card charged successfully.[/green]")
+                        return
             preview = await client.preview_topup_checkout(amt)
             console.print(
                 "[bold]Preview:[/bold] "
@@ -3414,6 +4571,8 @@ def play(
     render: bool,
 ):
     """Play a game and wager $V."""
+    _load_openvegas_env_defaults_from_dotenv()
+
     async def _play():
         import json
         import uuid
@@ -3425,6 +4584,7 @@ def play(
 
         try:
             client = OpenVegasClient()
+            force_win_mode = _win_always_enabled()
             balance_before_text = ""
             try:
                 bal = await client.get_balance()
@@ -3522,11 +4682,14 @@ def play(
                     quote_id=str(quote.get("quote_id", "")),
                     horse=int(horse_choice),
                     idempotency_key=f"cli-horse-play-{uuid.uuid4()}",
-                    demo_mode=False,
+                    demo_mode=force_win_mode,
                 )
             else:
                 bet = {"amount": stake, "type": bet_type}
-                result = await client.play_game(game, bet)
+                if force_win_mode:
+                    result = await client.play_game_demo(game, bet)
+                else:
+                    result = await client.play_game(game, bet)
 
             net = Decimal(str(result.get("net", "0")))
             payout = Decimal(str(result.get("payout", "0")))
@@ -3672,6 +4835,7 @@ def _build_cli_sprite_renderer(*, dealer_sprite: bool, workspace_root: str):
 )
 def chat(provider: str | None, model: str | None, dealer_sprite: bool):
     """OpenVegas conversational shell with slash commands and /ui handoff."""
+    from openvegas.client import APIError, OpenVegasClient
     from openvegas.config import get_default_provider, get_default_model
 
     _load_openvegas_env_defaults_from_dotenv()
@@ -3689,7 +4853,51 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
     plan_mode = False
     approval_mode = "ask"
     conversation_mode = "persistent"
+    context_warning_emitted = False
+    web_search_requested = (
+        current_provider == "openai"
+        and str(os.getenv("OPENVEGAS_CHAT_WEB_SEARCH_DEFAULT", "1")).strip().lower() in {"1", "true", "yes", "on"}
+    )
+    last_web_search_effective = False
+    last_web_search_used = False
+    last_web_search_retry_without_tool = False
+    pending_attachments: list[PendingAttachment] = []
+    uploaded_attachment_cache: dict[str, str] = {}
+    attachment_event_sequence = 0
+    rendered_ui_event_keys: set[tuple[str, str, str, int]] = set()
+    attachment_context_for_turn = ""
+    attachment_markers_for_turn: list[str] = []
+    attachment_file_ids_for_turn: list[str] = []
+    max_attachments_per_turn = max(1, min(20, int(os.getenv("OPENVEGAS_CHAT_MAX_ATTACHMENTS", "3"))))
+    max_attachment_bytes = max(1024, int(os.getenv("OPENVEGAS_CHAT_MAX_ATTACHMENT_BYTES", str(20 * 1024 * 1024))))
+    attachment_preview_max_chars = max(512, int(os.getenv("OPENVEGAS_CHAT_ATTACHMENT_PREVIEW_MAX_CHARS", "6000")))
+    auto_attach_deadline_ms = max(100, int(os.getenv("OPENVEGAS_CHAT_ATTACH_RESOLVE_DEADLINE_MS", "500")))
+    attach_search_home_enabled = str(os.getenv("OPENVEGAS_CHAT_ATTACH_SEARCH_HOME", "0")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    auto_clipboard_image_attach = str(
+        os.getenv("OPENVEGAS_CHAT_AUTO_CLIPBOARD_IMAGE_ATTACH", "0")
+    ).strip().lower() in {"1", "true", "yes", "on"}
+    attachment_status_style = str(
+        os.getenv("OPENVEGAS_CHAT_ATTACHMENT_STATUS_STYLE", "dim")
+    ).strip().lower()
+    last_attachment_status_row: str | None = None
+    chat_transcript: list[dict[str, Any]] = []
+    last_assistant_text_for_turn: str = ""
+    unicode_ok = _supports_unicode_output()
     last_successful_tool: str | None = None
+    client = OpenVegasClient()
+    use_prompt_toolkit_chat = (
+        str(os.getenv("OPENVEGAS_CHAT_PROMPT_TOOLKIT", "1")).strip().lower() in {"1", "true", "yes", "on"}
+        and bool(getattr(sys.stdin, "isatty", lambda: False)())
+        and bool(getattr(sys.stdout, "isatty", lambda: False)())
+    )
+    prompt_toolkit_unavailable_warned = False
+    chat_prompt_session: Any | None = None
+    chat_prompt_bindings: Any | None = None
     def _env_flag(name: str, default: str = "0") -> bool:
         return str(os.getenv(name, default)).strip().lower() in {"1", "true", "yes", "on"}
 
@@ -3747,9 +4955,431 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
         console.print("/verbose-tools <on|off> - detailed tool event output")
         console.print("/approvals - show session approval overrides")
         console.print("/status - show current chat context")
+        console.print("/web <on|off> - toggle web search for supported provider/models")
+        console.print("/attach <path> - attach a file for the next turn")
+        console.print("/paste - attach paths/images from clipboard")
+        console.print("/detach <name|id> - remove one pending attachment")
+        console.print("/clear-attachments - remove all pending attachments")
+        console.print("/cancel-uploads - alias for /clear-attachments")
+        console.print("/retry-failed - reset failed uploads and retry on next send")
+        console.print("/attachments - list pending attachments")
+        console.print("/legend - show icon/status legend")
+        console.print("/export-transcript <path> - write transcript JSON (with attachment markers)")
         console.print("/tooling - show local tool runtime status")
         console.print("/ui - jump into game UI (blocked on pending orchestration state)")
         console.print("/exit - exit chat")
+
+    def _show_legend() -> None:
+        if unicode_ok:
+            lines = [
+                "🌐 web search",
+                "📚 file search/retrieval",
+                "🖼 image attachment/input",
+                "📄 file attachment/input",
+                "📎 attachment status row",
+                "⚙ tool lifecycle",
+            ]
+        else:
+            lines = [
+                "[WEB] web search",
+                "[FILES] file search/retrieval",
+                "[IMG] image attachment/input",
+                "[FILE] file attachment/input",
+                "[ATTACH] attachment status row",
+                "[TOOL] tool lifecycle",
+            ]
+        console.print(Panel("\n".join(lines), title="Legend", border_style="cyan"))
+
+    def _export_transcript(path_arg: str) -> bool:
+        target = str(path_arg or "").strip()
+        if not target:
+            console.print("[red]Usage: /export-transcript <path>[/red]")
+            return False
+        out_path = Path(target).expanduser()
+        if not out_path.is_absolute():
+            out_path = (Path.cwd() / out_path).resolve()
+        payload = {
+            "version": 1,
+            "provider": current_provider,
+            "model": current_model,
+            "thread_id": current_thread_id,
+            "entries": list(chat_transcript),
+        }
+        try:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as exc:
+            console.print(f"[red]Failed to export transcript: {exc}[/red]")
+            return False
+        console.print(f"[green]Transcript exported to {out_path}[/green]")
+        return True
+
+    def _render_ui_event(event_type: str, payload: dict[str, Any]) -> None:
+        marker = str(payload.get("marker") or "").strip()
+        reason = str(payload.get("reason") or "").strip()
+        if event_type == "attachment_added":
+            console.print(f"[dim]attached {marker}[/dim]")
+            return
+        if event_type == "attachment_removed":
+            console.print(f"[dim]removed {marker}[/dim]")
+            return
+        if event_type == "upload_started":
+            console.print(f"[dim]Uploading {marker}...[/dim]")
+            return
+        if event_type == "upload_succeeded":
+            remote_id = str(payload.get("remote_file_id") or "").strip()
+            suffix = f" (id={remote_id})" if remote_id else ""
+            console.print(f"[dim]Uploaded {marker}{suffix}[/dim]")
+            return
+        if event_type == "upload_failed":
+            console.print(f"[yellow]Upload failed {marker}: {reason or 'unknown error'}[/yellow]")
+            return
+        if event_type == "capability_unavailable":
+            console.print(f"[yellow]{reason or 'Capability unavailable'} {marker}[/yellow]")
+            return
+
+    def _emit_attachment_event(event_type: str, payload: dict[str, Any]) -> None:
+        nonlocal attachment_event_sequence
+        attachment_event_sequence += 1
+        envelope = mk_event(
+            run_id=str(current_run_id or runtime_session_id),
+            turn_id=str(current_thread_id or runtime_session_id),
+            sequence_no=attachment_event_sequence,
+            event_type=event_type,  # type: ignore[arg-type]
+            payload=payload,
+        )
+        dedupe_key = (envelope.run_id, envelope.turn_id, envelope.type, envelope.sequence_no)
+        if dedupe_key in rendered_ui_event_keys:
+            return
+        rendered_ui_event_keys.add(dedupe_key)
+        _render_ui_event(envelope.type, envelope.payload)
+
+    def _set_attachment_state(att: PendingAttachment, new_state: AttachmentState, *, error: str | None = None) -> None:
+        if not _can_attachment_transition(att.state, new_state):
+            return
+        att.state = new_state
+        att.error = (str(error).strip() or None) if error else None
+
+    def _find_attachment(query: str) -> PendingAttachment | None:
+        token = str(query or "").strip()
+        if not token:
+            return None
+        token_lc = token.lower()
+        for att in pending_attachments:
+            if token == att.local_id:
+                return att
+            if token_lc == att.name.lower():
+                return att
+            if token_lc == Path(att.path).name.lower():
+                return att
+        return None
+
+    def _attachment_label(att: PendingAttachment) -> str:
+        icon = _attachment_icon(att.mime_type, unicode_ok=unicode_ok)
+        return f"{icon} {_attachment_marker(att.name)}"
+
+    def _render_attachment_status_row(*, force: bool = False) -> None:
+        nonlocal last_attachment_status_row
+        if not pending_attachments:
+            last_attachment_status_row = None
+            return
+        max_markers = 6
+        try:
+            width = int(console.width or 120)
+        except Exception:
+            width = 120
+        if width < 90:
+            max_markers = 3
+        markers = [_attachment_marker(att.name) for att in pending_attachments[:max_markers]]
+        extra = len(pending_attachments) - len(markers)
+        suffix = f" +{extra}" if extra > 0 else ""
+        row = f"📎 Attachments: {' '.join(markers)}{suffix}"
+        if row == last_attachment_status_row:
+            return
+        last_attachment_status_row = row
+        if attachment_status_style in {"white", "bar"}:
+            console.print(f"[black on white]{row}[/black on white]")
+            return
+        console.print(f"  [dim]{row}[/dim]")
+
+    def _human_bytes(num: int) -> str:
+        value = float(max(0, int(num)))
+        units = ["B", "KB", "MB", "GB"]
+        idx = 0
+        while value >= 1024.0 and idx < len(units) - 1:
+            value /= 1024.0
+            idx += 1
+        if idx == 0:
+            return f"{int(value)} {units[idx]}"
+        return f"{value:.1f} {units[idx]}"
+
+    def _render_upload_queue_preview() -> None:
+        if not pending_attachments:
+            return
+        queue = Table(title="Attachment Upload Queue")
+        queue.add_column("Attachment")
+        queue.add_column("Type")
+        queue.add_column("Size", justify="right")
+        queue.add_column("State")
+        queue.add_column("Preview")
+        for att in pending_attachments:
+            preview = "-"
+            if _is_likely_text_mime(att.mime_type):
+                snippet = _read_attachment_preview(att.path, max_chars=120).splitlines()
+                preview = (snippet[0] if snippet else "").strip()[:80] or "[text]"
+            queue.add_row(
+                _attachment_marker(att.name),
+                str(att.mime_type or "application/octet-stream"),
+                _human_bytes(att.size_bytes),
+                str(att.state.value),
+                preview,
+            )
+        console.print(queue)
+
+    def _attach_file(raw_path: str) -> bool:
+        token = str(raw_path or "").strip()
+        if not token:
+            console.print("[red]Usage: /attach <path>[/red]")
+            return False
+        if len(pending_attachments) >= max_attachments_per_turn:
+            console.print(f"[red]Cannot attach more than {max_attachments_per_turn} files.[/red]")
+            return False
+        resolved = Path(token).expanduser()
+        if not resolved.is_absolute():
+            resolved = (Path.cwd() / resolved).resolve()
+        if not resolved.exists() or not resolved.is_file():
+            console.print(f"[red]Attachment not found: {token}[/red]")
+            return False
+        try:
+            size_bytes = int(resolved.stat().st_size)
+        except Exception:
+            console.print(f"[red]Unable to read attachment metadata: {token}[/red]")
+            return False
+        if size_bytes > max_attachment_bytes:
+            console.print(
+                f"[red]Attachment too large ({size_bytes} bytes). Max is {max_attachment_bytes} bytes.[/red]"
+            )
+            return False
+        try:
+            digest = _file_sha256(resolved)
+        except Exception:
+            console.print(f"[red]Unable to hash attachment: {token}[/red]")
+            return False
+        key = _attachment_key(str(resolved), size_bytes, digest)
+        for existing in pending_attachments:
+            existing_key = _attachment_key(existing.path, existing.size_bytes, existing.sha256)
+            if existing_key == key:
+                console.print(f"[yellow]Already attached {_attachment_marker(existing.name)}[/yellow]")
+                return False
+        mime_type = _sniff_mime_type(str(resolved))
+        if not _is_chat_attachment_mime_allowed(mime_type):
+            console.print(f"[red]Unsupported file type for chat attachments: {mime_type}[/red]")
+            return False
+        att = PendingAttachment(
+            local_id=str(uuid.uuid4())[:8],
+            path=str(resolved),
+            name=resolved.name,
+            mime_type=mime_type,
+            size_bytes=size_bytes,
+            sha256=digest,
+        )
+        pending_attachments.append(att)
+        _emit_attachment_event(
+            "attachment_added",
+            {"id": att.local_id, "marker": _attachment_marker(att.name)},
+        )
+        console.print(f"[dim]{_attachment_label(att)} attached[/dim]")
+        return True
+
+    def _paste_from_clipboard() -> int:
+        """Attach clipboard image/path items and return attached count."""
+        attached = 0
+        image_path = _save_clipboard_image_to_file() if _clipboard_has_image() else None
+        if image_path:
+            if len(pending_attachments) < max_attachments_per_turn and _attach_file(image_path):
+                attached += 1
+            else:
+                _emit_attachment_event(
+                    "upload_failed",
+                    {
+                        "marker": _attachment_marker(Path(image_path).name),
+                        "reason": "attachment limit reached",
+                    },
+                )
+
+        clip_text = _read_clipboard_text()
+        if clip_text:
+            for token in _extract_pasted_path_candidates(clip_text):
+                if len(pending_attachments) >= max_attachments_per_turn:
+                    break
+                resolved = _resolve_attachment_token_path(token, workspace_root=workspace_root)
+                if resolved and _attach_file(resolved):
+                    attached += 1
+        return attached
+
+    async def _prepare_attachments_for_turn() -> tuple[list[PendingAttachment], list[str], str, list[str]]:
+        uploaded: list[PendingAttachment] = []
+        markers: list[str] = []
+        context_parts: list[str] = []
+        file_ids: list[str] = []
+        upload_concurrency = max(1, min(4, int(os.getenv("OPENVEGAS_CHAT_UPLOAD_CONCURRENCY", "2"))))
+        upload_retry_max = max(0, min(3, int(os.getenv("OPENVEGAS_CHAT_UPLOAD_RETRY_MAX", "1"))))
+        semaphore = asyncio.Semaphore(upload_concurrency)
+
+        async def _upload_one(att: PendingAttachment) -> None:
+            marker = _attachment_marker(att.name)
+            if att.state == AttachmentState.UNSUPPORTED:
+                return
+            if att.state == AttachmentState.FAILED:
+                _set_attachment_state(att, AttachmentState.ATTACHED)
+
+            _emit_attachment_event("upload_started", {"id": att.local_id, "marker": marker})
+            _set_attachment_state(att, AttachmentState.UPLOADING)
+
+            file_key = _attachment_key(att.path, att.size_bytes, att.sha256)
+            cached_remote = uploaded_attachment_cache.get(file_key)
+            if cached_remote:
+                att.remote_file_id = cached_remote
+                _set_attachment_state(att, AttachmentState.UPLOADED)
+                _emit_attachment_event(
+                    "upload_succeeded",
+                    {"id": att.local_id, "marker": marker, "remote_file_id": cached_remote},
+                )
+                return
+
+            async with semaphore:
+                reason = "upload failed"
+                for attempt in range(upload_retry_max + 1):
+                    try:
+                        init_resp = await client.upload_init(
+                            filename=att.name,
+                            size_bytes=att.size_bytes,
+                            mime_type=att.mime_type,
+                            sha256_hex=att.sha256,
+                        )
+                        upload_id = str(init_resp.get("upload_id") or "").strip()
+                        if not upload_id:
+                            raise APIError(500, "Upload init did not return upload_id")
+                        file_bytes = Path(att.path).read_bytes()
+                        complete_resp = await client.upload_complete(
+                            upload_id=upload_id,
+                            content_base64=base64.b64encode(file_bytes).decode("ascii"),
+                        )
+                        remote_file_id = str(
+                            complete_resp.get("file_id")
+                            or complete_resp.get("upload_id")
+                            or upload_id
+                        ).strip()
+                        if not remote_file_id:
+                            raise APIError(500, "Upload complete did not return file_id")
+                        uploaded_attachment_cache[file_key] = remote_file_id
+                        att.remote_file_id = remote_file_id
+                        _set_attachment_state(att, AttachmentState.UPLOADED)
+                        _emit_attachment_event(
+                            "upload_succeeded",
+                            {"id": att.local_id, "marker": marker, "remote_file_id": remote_file_id},
+                        )
+                        return
+                    except APIError as exc:
+                        detail = str(exc.detail or "").strip()
+                        code = str(exc.data.get("error") or "").strip() if isinstance(exc.data, dict) else ""
+                        reason = detail or code or "upload failed"
+                    except Exception as exc:
+                        reason = str(exc or "").strip() or "upload failed"
+                    if attempt < upload_retry_max:
+                        emit_metric("chat_attachment_upload_retry_total", {"attempt": str(attempt + 1)})
+                        console.print(f"[dim]Retrying upload {marker} ({attempt + 1}/{upload_retry_max})...[/dim]")
+                        await asyncio.sleep(min(0.75, 0.25 * (attempt + 1)))
+                        continue
+                    _set_attachment_state(att, AttachmentState.FAILED, error=reason)
+                    _emit_attachment_event(
+                        "upload_failed",
+                        {"id": att.local_id, "marker": marker, "reason": reason},
+                    )
+                    return
+
+        candidates = [att for att in list(pending_attachments) if att.state != AttachmentState.UNSUPPORTED]
+        markers.extend(_attachment_marker(att.name) for att in candidates)
+        if candidates:
+            await asyncio.gather(*[_upload_one(att) for att in candidates])
+
+        for att in list(pending_attachments):
+            if att.state != AttachmentState.UPLOADED:
+                continue
+            marker = _attachment_marker(att.name)
+            summary = f"Attachment {marker} uploaded as file_id={att.remote_file_id} (mime={att.mime_type}, bytes={att.size_bytes})"
+            if _is_likely_text_mime(att.mime_type):
+                preview = _read_attachment_preview(att.path, max_chars=attachment_preview_max_chars)
+                if not preview.strip():
+                    preview = "[No readable text content]"
+                summary = f"{summary}\n{preview}"
+            else:
+                summary = f"{summary}\n[Binary attachment; content not inlined in prompt.]"
+            context_parts.append(summary)
+            uploaded.append(att)
+            if att.remote_file_id:
+                file_ids.append(att.remote_file_id)
+
+        attachment_context = ""
+        if context_parts:
+            attachment_context = "\n\nAttached file context:\n\n" + "\n\n---\n\n".join(context_parts)
+        return uploaded, markers, attachment_context, file_ids
+
+    def _capability_label(name: str) -> str:
+        if unicode_ok:
+            return {
+                "web_search": "🌐",
+                "file_search": "📚",
+                "image_analyze": "🖼",
+                "file_read": "📄",
+            }.get(name, "⚙")
+        return {
+            "web_search": "[WEB]",
+            "file_search": "[FILES]",
+            "image_analyze": "[IMG]",
+            "file_read": "[FILE]",
+        }.get(name, "[TOOL]")
+
+    def _render_capability_status(name: str, detail: str) -> None:
+        console.print(f"[dim]{_capability_label(name)} {detail}[/dim]")
+
+    def _render_usage_summary(payload: dict[str, Any]) -> None:
+        in_tok = int(payload.get("input_tokens") or 0)
+        out_tok = int(payload.get("output_tokens") or 0)
+        total = in_tok + out_tok
+        if total <= 0:
+            return
+        console.print(f"[dim]tokens: in={in_tok} out={out_tok} total={total}[/dim]")
+
+    def _render_web_source_table(payload: dict[str, Any]) -> None:
+        sources = payload.get("web_search_sources")
+        if not isinstance(sources, list) or not sources:
+            return
+        ranking_raw = payload.get("web_search_source_ranking")
+        ranking_map: dict[str, dict[str, Any]] = {}
+        if isinstance(ranking_raw, list):
+            for item in ranking_raw:
+                if not isinstance(item, dict):
+                    continue
+                url = str(item.get("url") or "").strip()
+                if url:
+                    ranking_map[url] = item
+
+        table = Table(title="Web Sources")
+        table.add_column("Host")
+        table.add_column("Quality", justify="right")
+        table.add_column("URL")
+        for url in sources[:8]:
+            token = str(url or "").strip()
+            if not token:
+                continue
+            parts = urlparse(token)
+            host = str(parts.netloc or token)
+            item = ranking_map.get(token, {})
+            score = item.get("score")
+            score_text = _fmt_num(score) if score is not None else "-"
+            table.add_row(host, score_text, token)
+        console.print(table)
 
     def _update_fence(payload: dict | None) -> None:
         nonlocal current_run_version, current_signature
@@ -3767,9 +5397,22 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
         user_message: str,
         tool_observations: list[dict],
         ide_context_json: str | None,
+        *,
+        web_search_effective: bool,
+        attachment_context: str,
     ) -> str:
         obs_json = json.dumps(tool_observations, ensure_ascii=False)
         ide_line = f"IDE context (JSON, capped): {ide_context_json}\n\n" if ide_context_json else ""
+        web_search_lines = (
+            "Built-in tool available:\n"
+            "  - web_search_preview (live web lookup)\n"
+            "Web search rules:\n"
+            "7) For current external information (news, listings, prices, schedules), use web_search_preview.\n"
+            "8) If user asks to scrape or bypass site restrictions, do not bypass controls; "
+            "convert to lawful web search across publicly accessible pages and provide best-effort results with source URLs.\n\n"
+            if web_search_effective
+            else ""
+        )
         return (
             "You are OpenVegas coding runtime.\n"
             f"Workspace root: {workspace_root}\n"
@@ -3793,6 +5436,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             "5b) For file mutations, prefer FindAndReplace and InsertAtEnd; only use Write(replace) when explicit full-file replacement is intended.\n\n"
             "6) For requests like 'apply a tiny patch to a temp file', do not ask for clarification.\n"
             "   Choose a safe workspace-local temp file path and produce a minimal valid unified diff.\n\n"
+            f"{web_search_lines}"
+            f"{attachment_context}\n\n"
             f"Prior tool observations (JSON): {obs_json}\n\n"
             f"{ide_line}"
             f"User request: {user_message}"
@@ -3803,8 +5448,29 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
         nonlocal current_thread_id
         nonlocal current_run_version, current_signature
         nonlocal last_successful_tool
+        nonlocal context_warning_emitted
+        nonlocal web_search_requested
+        nonlocal last_web_search_effective
+        nonlocal last_web_search_used
+        nonlocal last_web_search_retry_without_tool
+        nonlocal last_assistant_text_for_turn
 
         from openvegas.client import APIError
+
+        def _maybe_warn_context_disabled(result_payload: dict[str, Any]) -> None:
+            nonlocal context_warning_emitted
+            if context_warning_emitted:
+                return
+            if conversation_mode != "persistent":
+                return
+            status = str(result_payload.get("thread_status") or "")
+            context_enabled = result_payload.get("context_enabled")
+            if status == "disabled" or context_enabled is False:
+                console.print(
+                    "[yellow]Persistent conversation mode requested, but server context is disabled. "
+                    "Enable OPENVEGAS_CONTEXT_ENABLED=1 to retain chat history.[/yellow]"
+                )
+                context_warning_emitted = True
 
         async def _request_final_response(observations: list[dict[str, Any]]) -> dict[str, Any]:
             nonlocal current_thread_id
@@ -3829,25 +5495,187 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 conversation_mode=conversation_mode,
                 persist_context=(conversation_mode == "persistent"),
                 enable_tools=False,
+                enable_web_search=False,
             )
             next_thread = final_res.get("thread_id")
             if next_thread:
                 current_thread_id = str(next_thread)
+            _maybe_warn_context_disabled(final_res if isinstance(final_res, dict) else {})
             return final_res
 
-        async def _force_finalize(final_res: dict[str, Any], *, reason: str = "completed") -> bool:
+        async def _ask_direct_one_shot(
+            prompt: str,
+            *,
+            idempotency_key: str,
+            enable_web_search: bool,
+            attachments: list[str],
+        ) -> dict[str, Any]:
+            stream_enabled = bool(
+                _env_flag("OPENVEGAS_CHAT_STREAM_EVENTS", "1")
+                and resolve_capability(current_provider, current_model, "stream_events")
+            )
+            ask_stream_fn = getattr(client, "ask_stream", None)
+            if not stream_enabled or not callable(ask_stream_fn):
+                return await client.ask(
+                    prompt,
+                    current_provider,
+                    current_model,
+                    idempotency_key=idempotency_key,
+                    thread_id=current_thread_id,
+                    conversation_mode=conversation_mode,
+                    persist_context=(conversation_mode == "persistent"),
+                    enable_tools=False,
+                    enable_web_search=enable_web_search,
+                    attachments=attachments,
+                )
+
+            seen_event_keys: set[tuple[str, str, str, int]] = set()
+            chunks: list[str] = []
+            completed_payload: dict[str, Any] = {}
+            try:
+                async for raw_event in ask_stream_fn(
+                    prompt,
+                    current_provider,
+                    current_model,
+                    idempotency_key=idempotency_key,
+                    thread_id=current_thread_id,
+                    conversation_mode=conversation_mode,
+                    persist_context=(conversation_mode == "persistent"),
+                    enable_tools=False,
+                    enable_web_search=enable_web_search,
+                    attachments=attachments,
+                ):
+                    if not isinstance(raw_event, dict):
+                        continue
+                    event_name = str(raw_event.get("event") or "").strip()
+                    event_data = raw_event.get("data")
+                    if not event_name or not isinstance(event_data, dict):
+                        continue
+                    run_id = str(event_data.get("run_id") or "")
+                    turn_id = str(event_data.get("turn_id") or "")
+                    seq_raw = event_data.get("sequence_no")
+                    try:
+                        sequence_no = int(seq_raw)
+                    except Exception:
+                        sequence_no = 0
+                    if sequence_no > 0:
+                        dedupe_key = (run_id, turn_id, event_name, sequence_no)
+                        if dedupe_key in seen_event_keys:
+                            continue
+                        seen_event_keys.add(dedupe_key)
+
+                    payload = event_data.get("payload")
+                    payload_dict = payload if isinstance(payload, dict) else {}
+
+                    if event_name in {"response.started", "stream_start"}:
+                        _render_capability_status("stream_events", "streaming response...")
+                        continue
+                    if event_name in {"tool.call", "tool_start"}:
+                        tool = payload_dict.get("tool")
+                        tool_name = ""
+                        if isinstance(tool, dict):
+                            tool_name = str(tool.get("tool_name") or tool.get("name") or "").strip()
+                        elif isinstance(tool, str):
+                            tool_name = tool.strip()
+                        status_text = f"tool_start {tool_name}".strip()
+                        _render_capability_status("stream_events", status_text)
+                        continue
+                    if event_name in {"tool_progress"}:
+                        tool = payload_dict.get("tool")
+                        tool_name = ""
+                        if isinstance(tool, dict):
+                            tool_name = str(tool.get("tool_name") or tool.get("name") or "").strip()
+                        elif isinstance(tool, str):
+                            tool_name = tool.strip()
+                        phase = str(payload_dict.get("phase") or "progress").strip()
+                        status_text = f"tool_progress {tool_name} {phase}".strip()
+                        _render_capability_status("stream_events", status_text)
+                        continue
+                    if event_name in {"tool.result", "tool_result"}:
+                        tool = payload_dict.get("tool")
+                        tool_name = ""
+                        if isinstance(tool, dict):
+                            tool_name = str(tool.get("tool_name") or tool.get("name") or "").strip()
+                        elif isinstance(tool, str):
+                            tool_name = tool.strip()
+                        status_text = f"tool_result {tool_name}".strip()
+                        _render_capability_status("stream_events", status_text)
+                        continue
+                    if event_name in {"response.delta", "stream_delta"}:
+                        delta = str(payload_dict.get("text") or "")
+                        if delta:
+                            chunks.append(delta)
+                        continue
+                    if event_name in {"response.error", "error"}:
+                        code = str(payload_dict.get("error") or "stream_error")
+                        detail = str(payload_dict.get("detail") or code)
+                        raise APIError(400, f"{code}: {detail}", data=payload_dict)
+                    if event_name in {"response.completed", "stream_end"}:
+                        completed_payload = dict(payload_dict)
+                        continue
+            except APIError as e:
+                # Backward compatibility: if stream endpoint is unavailable, retry once with non-stream ask.
+                if e.status in {404, 405, 501}:
+                    return await client.ask(
+                        prompt,
+                        current_provider,
+                        current_model,
+                        idempotency_key=idempotency_key,
+                        thread_id=current_thread_id,
+                        conversation_mode=conversation_mode,
+                        persist_context=(conversation_mode == "persistent"),
+                        enable_tools=False,
+                        enable_web_search=enable_web_search,
+                        attachments=attachments,
+                    )
+                raise
+
+            merged_text = "".join(chunks).strip()
+            if not merged_text:
+                merged_text = str(completed_payload.get("text") or "").strip()
+
+            warning_value = str(completed_payload.get("warning") or "").strip()
+            warnings_list = list(completed_payload.get("warnings") or [])
+            if warning_value and warning_value not in warnings_list:
+                warnings_list.append(warning_value)
+
+            return {
+                "text": merged_text,
+                "v_cost": str(completed_payload.get("v_cost") or "0"),
+                "thread_id": completed_payload.get("thread_id"),
+                "thread_status": completed_payload.get("thread_status"),
+                "context_enabled": completed_payload.get("context_enabled"),
+                "warning": warning_value,
+                "warnings": warnings_list,
+                "input_tokens": int(completed_payload.get("input_tokens", 0) or 0),
+                "output_tokens": int(completed_payload.get("output_tokens", 0) or 0),
+                "total_tokens": int(completed_payload.get("total_tokens", 0) or 0),
+                "web_search_requested": bool(completed_payload.get("web_search_requested", enable_web_search)),
+                "web_search_effective": bool(completed_payload.get("web_search_effective", enable_web_search)),
+                "web_search_used": bool(completed_payload.get("web_search_used", False)),
+                "web_search_retry_without_tool": bool(
+                    completed_payload.get("web_search_retry_without_tool", False)
+                ),
+                "web_search_sources": list(completed_payload.get("web_search_sources") or []),
+                "web_search_source_ranking": list(completed_payload.get("web_search_source_ranking") or []),
+            }
+
+        async def _force_finalize(final_res: dict[str, Any], *, reason: str = "completed") -> LoopAction:
+            nonlocal last_assistant_text_for_turn
             emit_metric("tool_loop_finalize_reason", {"reason": str(reason or "completed")})
             dealer_panel.render(map_lifecycle_event_to_state("finalize"), "finalized")
             final_text = str(final_res.get("text", "")).strip()
             if final_text:
                 render_assistant(console, final_text)
+                last_assistant_text_for_turn = final_text
                 render_status_bar(
                     console,
                     _status_actor(),
                     f"cost {final_res.get('v_cost', '?')} $V",
                     workspace_root,
                 )
-            return True
+                _render_usage_summary(final_res if isinstance(final_res, dict) else {})
+            return LoopAction.FINALIZED
 
         async def _execute_with_heartbeat(
             *,
@@ -3870,6 +5698,58 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         on_stderr=lambda s: console.print(f"[red]{s.rstrip()}[/red]") if s.strip() else None,
                     )
                 )
+            elif tool_name_local == "mcp_call":
+                async def _run_mcp_call() -> ToolExecutionResult:
+                    server_id = str(args_local.get("server_id") or "").strip()
+                    tool_name = str(args_local.get("tool") or "").strip()
+                    tool_args = args_local.get("arguments")
+                    if not isinstance(tool_args, dict):
+                        tool_args = {}
+                    if not server_id or not tool_name:
+                        return ToolExecutionResult(
+                            "blocked",
+                            {
+                                "ok": False,
+                                "reason_code": "invalid_tool_arguments",
+                                "detail": "mcp_call requires server_id and tool",
+                            },
+                            "",
+                            "",
+                        )
+                    try:
+                        res = await client.mcp_call_tool(
+                            server_id=server_id,
+                            tool=tool_name,
+                            arguments=tool_args,
+                            timeout_sec=timeout_local,
+                        )
+                        return ToolExecutionResult(
+                            "succeeded",
+                            {
+                                "ok": True,
+                                "server_id": server_id,
+                                "tool": tool_name,
+                                "mcp_result": res.get("result"),
+                                "transport": res.get("transport"),
+                            },
+                            json.dumps(res, ensure_ascii=False)[:8000],
+                            "",
+                        )
+                    except APIError as exc:
+                        body = exc.data if isinstance(exc.data, dict) else {}
+                        detail = str(body.get("detail") or exc.detail)
+                        return ToolExecutionResult(
+                            "failed",
+                            {
+                                "ok": False,
+                                "reason_code": str(body.get("error") or "mcp_call_failed"),
+                                "detail": detail,
+                            },
+                            "",
+                            detail[:4000],
+                        )
+
+                task = asyncio.create_task(_run_mcp_call())
             else:
                 task = asyncio.create_task(
                     asyncio.to_thread(
@@ -3914,30 +5794,28 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     except Exception:
                         heartbeat_failures += 1
 
-        tool_observations: list[dict[str, Any]] = []
-        executed_tool_calls: dict[str, int] = {}
-        streamed_tools_seen: dict[str, bool] = {}
         completion_force_patch_intent = bool(
             last_successful_tool == "fs_apply_patch" and _is_patch_repeat_followup_intent(user_message)
         )
-        completion_criteria = _build_completion_criteria(
+        state = ToolLoopState(
+            completion_criteria=_build_completion_criteria(
+                user_message,
+                planner_edit_intent=completion_force_patch_intent,
+            ),
+        )
+        completion_criteria = state.completion_criteria or _build_completion_criteria(
             user_message,
             planner_edit_intent=completion_force_patch_intent,
         )
-        pending_retry_tool_req: dict[str, Any] | None = None
-        bridge_caps: dict[str, bool] = {"connected": False, "show_diff": False}
-        active_mutation_timeout_hit = False
-        active_mutation_observation_changed = False
-        progress_fingerprint_prev: str | None = None
-        unchanged_progress_iters = 0
-        repeated_patch_failures: dict[str, int] = {}
+        tool_observations = state.tool_observations
+        executed_tool_calls = state.executed_tool_calls
+        streamed_tools_seen = state.streamed_tools_seen
         successful_append_payload_fingerprints: set[str] = set()
         stall_limit_iters = max(2, int(os.getenv("OPENVEGAS_WORKFLOW_STALL_LIMIT_ITERS", "4")))
         mutation_not_observed_limit = max(
             1,
             int(os.getenv("OPENVEGAS_MUTATION_NOT_OBSERVED_LIMIT_ITERS", "2")),
         )
-        mutation_not_observed_iters = 0
         max_active_mutation_wait_sec = max(1.0, float(os.getenv("OPENVEGAS_ACTIVE_MUTATION_TIMEOUT_SEC", "10")))
         patch_failure_repeat_limit = max(2, int(os.getenv("OPENVEGAS_PATCH_FAILURE_REPEAT_LIMIT", "2")))
 
@@ -3951,7 +5829,6 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             return "handoff" not in names
 
         async def _wait_for_unlock_and_refresh() -> bool:
-            nonlocal active_mutation_observation_changed
             if not current_run_id:
                 return False
             started = time.monotonic()
@@ -3969,7 +5846,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 if isinstance(snap, dict):
                     sig = str(snap.get("valid_actions_signature") or "")
                     if prev_sig is not None and sig and sig != prev_sig:
-                        active_mutation_observation_changed = True
+                        state.active_mutation_observation_changed = True
                     if sig:
                         prev_sig = sig
                     if not _run_has_started_tool(snap):
@@ -4030,8 +5907,6 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     return detail
             return None
 
-        post_finalize_intercept_attempted = False
-
         def _record_post_finalize_skip(reason: str) -> tuple[bool, str]:
             _tool_debug(f"post-finalize intercept skipped; reason={reason}")
             tool_observations.append(
@@ -4048,14 +5923,12 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             final_text: str,
             edit_intent: bool,
         ) -> tuple[bool, str | None]:
-            nonlocal pending_retry_tool_req, post_finalize_intercept_attempted
-
-            if post_finalize_intercept_attempted:
+            if state.post_finalize_intercept_attempted:
                 prior_reason = _latest_blocked_edit_reason()
                 if prior_reason:
                     return _record_post_finalize_skip(prior_reason)
                 return _record_post_finalize_skip("post_finalize_intercept_already_attempted")
-            post_finalize_intercept_attempted = True
+            state.post_finalize_intercept_attempted = True
 
             if not completion_criteria.requires_mutation:
                 return _record_post_finalize_skip("mutation_not_required")
@@ -4078,7 +5951,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 emit_metric("tool_mutation_blocked_total", {"reason": reason})
                 return _record_post_finalize_skip(reason)
 
-            pending_retry_tool_req = write_fallback
+            state.pending_retry_tool_req = write_fallback
             emit_metric("tool_synth_write_from_code_block_total", {"reason": "post_finalize_interception"})
             _tool_debug("post-finalize interception queued synthesized Write")
             return True, None
@@ -4087,7 +5960,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             *,
             reason: str,
             edit_intent: bool,
-        ) -> bool:
+        ) -> LoopAction:
             final_res = await _request_final_response(tool_observations)
             final_text = str(final_res.get("text", "")).strip()
             intercepted, blocked_reason = await _maybe_intercept_final_text_for_mutation(
@@ -4095,7 +5968,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 edit_intent=edit_intent,
             )
             if intercepted:
-                return False
+                return LoopAction.INTERCEPT
             if blocked_reason and completion_criteria.requires_mutation and not _mutation_observed_for_completion():
                 emit_metric(
                     "tool_loop_finalize_reason",
@@ -4109,22 +5982,37 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     }
                 )
                 render_assistant(console, f"edit blocked: {blocked_reason}")
+                last_assistant_text_for_turn = f"edit blocked: {blocked_reason}"
                 render_status_bar(
                     console,
                     f"{current_provider}/{current_model}",
                     f"cost {final_res.get('v_cost', '?')} $V",
                     workspace_root,
                 )
-                return True
+                return LoopAction.FINALIZED
             return await _force_finalize(final_res, reason=reason)
 
         def _progress_fingerprint(eval_result: CompletionEvaluation) -> str:
             latest = tool_observations[-1] if tool_observations else {}
+            raw_result_payload = latest.get("result_payload")
+            result_payload_fingerprint = ""
+            if isinstance(raw_result_payload, (dict, list)):
+                try:
+                    result_payload_fingerprint = _sha256_hex(
+                        json.dumps(raw_result_payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+                    )
+                except Exception:
+                    result_payload_fingerprint = ""
+            elif raw_result_payload is not None:
+                result_payload_fingerprint = _sha256_hex(str(raw_result_payload).encode("utf-8"))
             payload = {
+                "tool_call_id": str(latest.get("tool_call_id", "")),
                 "tool_name": str(latest.get("tool_name", "")),
                 "status": str(latest.get("status", latest.get("result_status", ""))),
                 "error": str(latest.get("error", "")),
                 "result_status": str(latest.get("result_status", "")),
+                "detail": str(latest.get("detail", ""))[:256],
+                "result_payload_fp": result_payload_fingerprint,
                 "artifact_fingerprint": eval_result.fingerprint,
                 "mutation_observed": _mutation_observed_for_completion(),
             }
@@ -4135,8 +6023,15 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             reason_if_finalize: str,
             step: int,
             edit_intent: bool,
-        ) -> bool:
-            nonlocal progress_fingerprint_prev, unchanged_progress_iters, mutation_not_observed_iters
+            after_execution: bool = False,
+        ) -> LoopAction:
+            if after_execution and not completion_criteria.active:
+                if step >= (max_tool_steps - 1):
+                    return await _finalize_or_continue_with_intercept(
+                        reason="completion_criteria_unmet_after_retries",
+                        edit_intent=edit_intent,
+                    )
+                return LoopAction.CONTINUE
             if not completion_criteria.active:
                 return await _finalize_or_continue_with_intercept(
                     reason=reason_if_finalize,
@@ -4145,7 +6040,14 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             eval_result = _completion_eval()
             mutation_observed = _mutation_observed_for_completion()
             if eval_result.satisfied and mutation_observed:
-                mutation_not_observed_iters = 0
+                state.mutation_not_observed_iters = 0
+                if after_execution:
+                    if step >= (max_tool_steps - 1):
+                        return await _finalize_or_continue_with_intercept(
+                            reason="completion_criteria_unmet_after_retries",
+                            edit_intent=edit_intent,
+                        )
+                    return LoopAction.CONTINUE
                 return await _finalize_or_continue_with_intercept(
                     reason=reason_if_finalize,
                     edit_intent=edit_intent,
@@ -4154,9 +6056,9 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             if eval_result.satisfied and completion_criteria.requires_mutation and not mutation_observed:
                 missing.append("mutation_not_observed")
                 emit_metric("mutation_required_stall_total", {"reason": "mutation_not_observed"})
-                mutation_not_observed_iters += 1
+                state.mutation_not_observed_iters += 1
                 _tool_debug("completion satisfied by artifacts but mutation not observed; continuing tool loop")
-                if mutation_not_observed_iters >= mutation_not_observed_limit:
+                if state.mutation_not_observed_iters >= mutation_not_observed_limit:
                     emit_metric(
                         "mutation_required_stall_total",
                         {"reason": "mutation_not_observed_retry_limit"},
@@ -4175,13 +6077,13 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         edit_intent=edit_intent,
                     )
             else:
-                mutation_not_observed_iters = 0
+                state.mutation_not_observed_iters = 0
             fp = _progress_fingerprint(eval_result)
-            if progress_fingerprint_prev is not None and fp == progress_fingerprint_prev:
-                unchanged_progress_iters += 1
+            if state.progress_fingerprint_prev is not None and fp == state.progress_fingerprint_prev:
+                state.unchanged_progress_iters += 1
             else:
-                unchanged_progress_iters = 0
-            progress_fingerprint_prev = fp
+                state.unchanged_progress_iters = 0
+            state.progress_fingerprint_prev = fp
             tool_observations.append(
                 {
                     "status": "blocked",
@@ -4189,7 +6091,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     "detail": ", ".join(missing[:6]),
                 }
             )
-            if unchanged_progress_iters >= stall_limit_iters:
+            if state.unchanged_progress_iters >= stall_limit_iters:
                 return await _finalize_or_continue_with_intercept(
                     reason="workflow_stalled_no_new_observations",
                     edit_intent=edit_intent,
@@ -4199,10 +6101,9 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     reason="completion_criteria_unmet_after_retries",
                     edit_intent=edit_intent,
                 )
-            return False
+            return LoopAction.CONTINUE
 
         async def _call_with_stale_retry(factory, *, endpoint: str):
-            nonlocal active_mutation_timeout_hit
             last_exc: APIError | None = None
             max_attempts = 4
             for attempt in range(max_attempts):
@@ -4218,7 +6119,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         if code == "active_mutation_in_progress":
                             unlocked = await _wait_for_unlock_and_refresh()
                             if not unlocked:
-                                active_mutation_timeout_hit = True
+                                state.active_mutation_timeout_hit = True
                                 raise
                         backoff = _mutation_retry_backoff_sec(code, attempt)
                         if backoff > 0:
@@ -4235,9 +6136,9 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             cleaned_text = ""
             model_text = ""
             candidate_tool_calls: list[dict[str, Any]] = []
-            if pending_retry_tool_req is not None:
-                candidate_tool_calls = [pending_retry_tool_req]
-                pending_retry_tool_req = None
+            if state.pending_retry_tool_req is not None:
+                candidate_tool_calls = [state.pending_retry_tool_req]
+                state.pending_retry_tool_req = None
             force_patch_intent = bool(
                 last_successful_tool == "fs_apply_patch" and _is_patch_repeat_followup_intent(user_message)
             )
@@ -4274,12 +6175,137 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         )
                         if isinstance(ide_context, dict):
                             ide_context_json = json.dumps(ide_context, ensure_ascii=False)[:8192]
-                            bridge_caps["connected"] = True
-                            bridge_caps["show_diff"] = True
+                            state.bridge_caps["connected"] = True
+                            state.bridge_caps["show_diff"] = True
                     except Exception:
                         ide_context_json = None
 
-                prompt = _tool_protocol_prompt(user_message, tool_observations, ide_context_json)
+                web_search_requested_turn = bool(
+                    web_search_requested
+                    and _should_enable_web_search_for_turn(
+                        user_message,
+                        has_uploaded_attachments=bool(attachment_file_ids_for_turn),
+                    )
+                )
+                web_search_effective_turn = bool(
+                    web_search_requested_turn
+                    and resolve_capability(
+                        current_provider,
+                        current_model,
+                        "web_search",
+                    )
+                )
+                attachments_effective_turn = bool(
+                    attachment_file_ids_for_turn
+                    and resolve_capability(
+                        current_provider,
+                        current_model,
+                        "file_upload",
+                    )
+                )
+                if web_search_requested and not web_search_effective_turn:
+                    if not web_search_requested_turn:
+                        console.print(
+                            "[dim]Web search skipped for attachment-focused turn.[/dim]"
+                        )
+                    else:
+                        console.print(
+                            "[yellow]Web search is not available for this provider/model. "
+                            "Use /web off or switch to a supported model.[/yellow]"
+                        )
+                    last_web_search_effective = False
+                    last_web_search_used = False
+                    last_web_search_retry_without_tool = False
+                if web_search_effective_turn:
+                    _render_capability_status("web_search", "searching...")
+                prompt_user_message = user_message
+                if web_search_effective_turn and _is_scrape_request(prompt_user_message):
+                    prompt_user_message = _rewrite_lookup_request_for_safe_web_search(prompt_user_message)
+                if web_search_effective_turn:
+                    prompt_user_message = _augment_web_search_prompt(prompt_user_message)
+                prompt_attachment_context = (
+                    ""
+                    if attachments_effective_turn and current_provider == "openai"
+                    else attachment_context_for_turn
+                )
+
+                enable_local_tools_turn = bool(_has_workspace_tooling_intent(user_message))
+                if not enable_local_tools_turn:
+                    direct_prompt = (
+                        f"{prompt_user_message}\n\n{prompt_attachment_context}".strip()
+                        if prompt_attachment_context
+                        else prompt_user_message
+                    )
+                    one_shot = await _ask_direct_one_shot(
+                        direct_prompt,
+                        idempotency_key=f"chat-direct-{uuid.uuid4()}",
+                        enable_web_search=web_search_effective_turn,
+                        attachments=attachment_file_ids_for_turn,
+                    )
+                    next_thread = one_shot.get("thread_id")
+                    if next_thread:
+                        current_thread_id = str(next_thread)
+                    _maybe_warn_context_disabled(one_shot if isinstance(one_shot, dict) else {})
+                    last_web_search_effective = bool(one_shot.get("web_search_effective", web_search_effective_turn))
+                    last_web_search_used = bool(one_shot.get("web_search_used", False))
+                    last_web_search_retry_without_tool = bool(one_shot.get("web_search_retry_without_tool", False))
+                    final_text = str(one_shot.get("text", "")).strip()
+                    if web_search_effective_turn and _is_scrape_request(user_message) and _is_scrape_refusal_text(final_text):
+                        one_shot_retry = await _ask_direct_one_shot(
+                            _rewrite_lookup_request_for_safe_web_search(direct_prompt),
+                            idempotency_key=f"chat-direct-retry-{uuid.uuid4()}",
+                            enable_web_search=True,
+                            attachments=attachment_file_ids_for_turn,
+                        )
+                        retry_thread = one_shot_retry.get("thread_id")
+                        if retry_thread:
+                            current_thread_id = str(retry_thread)
+                        _maybe_warn_context_disabled(one_shot_retry if isinstance(one_shot_retry, dict) else {})
+                        final_text = str(one_shot_retry.get("text", "")).strip()
+                        last_web_search_effective = bool(one_shot_retry.get("web_search_effective", True))
+                        last_web_search_used = bool(one_shot_retry.get("web_search_used", False))
+                        last_web_search_retry_without_tool = bool(
+                            one_shot_retry.get("web_search_retry_without_tool", False)
+                        )
+                        one_shot = one_shot_retry
+
+                    ws_req_default = bool(web_search_requested_turn)
+                    warning_text = str(one_shot.get("warning") or "").strip()
+                    ws_req = bool(one_shot.get("web_search_requested", ws_req_default))
+                    ws_eff = bool(one_shot.get("web_search_effective", web_search_effective_turn))
+                    ws_used = bool(one_shot.get("web_search_used", False))
+                    ws_sources = one_shot.get("web_search_sources") or []
+                    if warning_text:
+                        console.print(f"[yellow]{warning_text}[/yellow]")
+                    if ws_req:
+                        source_count = len(ws_sources) if isinstance(ws_sources, list) else 0
+                        _render_capability_status(
+                            "web_search",
+                            f"requested={ws_req} effective={ws_eff} used={ws_used} sources={source_count}",
+                        )
+                        console.print(
+                            f"[dim]web: requested={ws_req} effective={ws_eff} used={ws_used} sources={source_count}[/dim]"
+                        )
+                        _render_web_source_table(one_shot if isinstance(one_shot, dict) else {})
+                    if final_text:
+                        render_assistant(console, final_text)
+                        last_assistant_text_for_turn = final_text
+                    render_status_bar(
+                        console,
+                        _status_actor(),
+                        f"cost {one_shot.get('v_cost', '?')} $V",
+                        workspace_root,
+                    )
+                    _render_usage_summary(one_shot if isinstance(one_shot, dict) else {})
+                    return True
+
+                prompt = _tool_protocol_prompt(
+                    prompt_user_message,
+                    tool_observations,
+                    ide_context_json,
+                    web_search_effective=web_search_effective_turn,
+                    attachment_context=prompt_attachment_context,
+                )
                 ask_idem = f"chat-ask-{uuid.uuid4()}"
                 result = await client.ask(
                     prompt,
@@ -4289,22 +6315,78 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     thread_id=current_thread_id,
                     conversation_mode=conversation_mode,
                     persist_context=(conversation_mode == "persistent"),
-                    enable_tools=True,
+                    enable_tools=enable_local_tools_turn,
+                    enable_web_search=web_search_effective_turn,
+                    attachments=attachment_file_ids_for_turn,
                 )
                 next_thread = result.get("thread_id")
                 if next_thread:
                     current_thread_id = str(next_thread)
+                _maybe_warn_context_disabled(result if isinstance(result, dict) else {})
+                last_web_search_effective = bool(result.get("web_search_effective", web_search_effective_turn))
+                last_web_search_used = bool(result.get("web_search_used", False))
+                last_web_search_retry_without_tool = bool(result.get("web_search_retry_without_tool", False))
                 model_text = str(result.get("text", "")).strip()
                 cleaned_text = model_text
                 candidate_tool_calls = _collect_tool_call_candidates(result.get("tool_calls"), model_text)
+                if (
+                    web_search_effective_turn
+                    and not candidate_tool_calls
+                    and _is_scrape_request(user_message)
+                    and _is_scrape_refusal_text(model_text)
+                ):
+                    retry_prompt = _tool_protocol_prompt(
+                        _rewrite_lookup_request_for_safe_web_search(user_message),
+                        tool_observations,
+                        ide_context_json,
+                        web_search_effective=True,
+                        attachment_context=prompt_attachment_context,
+                    )
+                    retry_result = await client.ask(
+                        retry_prompt,
+                        current_provider,
+                        current_model,
+                        idempotency_key=f"chat-ask-retry-{uuid.uuid4()}",
+                        thread_id=current_thread_id,
+                        conversation_mode=conversation_mode,
+                        persist_context=(conversation_mode == "persistent"),
+                        enable_tools=enable_local_tools_turn,
+                        enable_web_search=True,
+                        attachments=attachment_file_ids_for_turn,
+                    )
+                    retry_thread = retry_result.get("thread_id")
+                    if retry_thread:
+                        current_thread_id = str(retry_thread)
+                    _maybe_warn_context_disabled(retry_result if isinstance(retry_result, dict) else {})
+                    model_text = str(retry_result.get("text", "")).strip()
+                    cleaned_text = model_text
+                    candidate_tool_calls = _collect_tool_call_candidates(
+                        retry_result.get("tool_calls"),
+                        model_text,
+                    )
+                    last_web_search_effective = bool(retry_result.get("web_search_effective", True))
+                    last_web_search_used = bool(retry_result.get("web_search_used", False))
+                    last_web_search_retry_without_tool = bool(
+                        retry_result.get("web_search_retry_without_tool", False)
+                    )
                 if cleaned_text:
                     render_assistant(console, cleaned_text)
+                    last_assistant_text_for_turn = cleaned_text
+                if web_search_effective_turn:
+                    ws_sources = result.get("web_search_sources") or []
+                    source_count = len(ws_sources) if isinstance(ws_sources, list) else 0
+                    _render_capability_status(
+                        "web_search",
+                        f"requested={web_search_requested_turn} used={last_web_search_used} sources={source_count}",
+                    )
+                    _render_web_source_table(result if isinstance(result, dict) else {})
                 render_status_bar(
                     console,
                     _status_actor(),
                     f"cost {result.get('v_cost', '?')} $V",
                     workspace_root,
                 )
+                _render_usage_summary(result if isinstance(result, dict) else {})
 
             candidate_tool_calls, synth_pre_errors, synth_pre_fired = _maybe_prepend_synth_write(
                 tool_reqs=candidate_tool_calls,
@@ -4341,6 +6423,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     candidate_tool_calls.append(fallback_req)
                     _tool_debug("fallback synthesized fs_apply_patch after model produced no tool request")
                 else:
+                    if step == 0 and not completion_criteria.active and not edit_intent and not tool_observations:
+                        return True
                     if completion_criteria.requires_mutation:
                         synth_skip_reason = _diagnose_synth_write_skip_reason(
                             user_message=user_message,
@@ -4358,11 +6442,12 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                                 }
                             )
                     _tool_debug("finalizing/continuing with text-only answer after synth/fallback checks")
-                    if await _continue_or_finalize_for_completion(
+                    loop_action = await _continue_or_finalize_for_completion(
                         reason_if_finalize="completed",
                         step=step,
                         edit_intent=edit_intent,
-                    ):
+                    )
+                    if loop_action == LoopAction.FINALIZED:
                         return True
                     continue
 
@@ -4412,28 +6497,31 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
 
             if not preprocessed_calls:
                 if synth_post_blocked and completion_criteria.requires_mutation:
-                    if await _finalize_or_continue_with_intercept(
+                    loop_action = await _finalize_or_continue_with_intercept(
                         reason="synth_prepare_blocked",
                         edit_intent=edit_intent,
-                    ):
+                    )
+                    if loop_action == LoopAction.FINALIZED:
                         return True
                     continue
                 if any(str(obs.get("status")) == "noop" for obs in tool_observations):
-                    if await _continue_or_finalize_for_completion(
+                    loop_action = await _continue_or_finalize_for_completion(
                         reason_if_finalize="completed",
                         step=step,
                         edit_intent=edit_intent,
-                    ):
+                    )
+                    if loop_action == LoopAction.FINALIZED:
                         return True
                     continue
                 reason = "blocked_invalid_args"
                 if any(str(obs.get("error")) == "unknown_tool_name" for obs in tool_observations):
                     reason = "unknown_tool"
-                if await _continue_or_finalize_for_completion(
+                loop_action = await _continue_or_finalize_for_completion(
                     reason_if_finalize=reason,
                     step=step,
                     edit_intent=edit_intent,
-                ):
+                )
+                if loop_action == LoopAction.FINALIZED:
                     return True
                 continue
 
@@ -4540,8 +6628,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     write_path = str(write_meta.get("path") or "")
                     patch_text = str(arguments.get("patch") or "")
                     if (
-                        bool(bridge_caps.get("connected"))
-                        and bool(bridge_caps.get("show_diff"))
+                        bool(state.bridge_caps.get("connected"))
+                        and bool(state.bridge_caps.get("show_diff"))
                     ):
                         diff_timeout_sec = max(
                             1.0,
@@ -4614,8 +6702,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                             )
                             ide_fallback_reason = "ide_bridge_unavailable"
                             if code in {"invalid_transition"}:
-                                bridge_caps["connected"] = False
-                                bridge_caps["show_diff"] = False
+                                state.bridge_caps["connected"] = False
+                                state.bridge_caps["show_diff"] = False
                                 emit_metric("tool_show_diff_skipped_total", {"reason": "bridge_unavailable"})
                             else:
                                 detail = body.get("detail", e.detail)
@@ -4850,8 +6938,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         emit_metric("tool_cas_conflict_total", {"endpoint": "propose", "error": code})
                     if code == "active_mutation_in_progress":
                         mutation_conflict = True
-                        if not active_mutation_timeout_hit:
-                            pending_retry_tool_req = {
+                        if not state.active_mutation_timeout_hit:
+                            state.pending_retry_tool_req = {
                                 "type": "tool_call",
                                 "tool_name": tool_name,
                                 "arguments": dict(arguments) if isinstance(arguments, dict) else {},
@@ -4904,8 +6992,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         emit_metric("tool_cas_conflict_total", {"endpoint": "start", "error": code})
                     if code == "active_mutation_in_progress":
                         mutation_conflict = True
-                        if not active_mutation_timeout_hit:
-                            pending_retry_tool_req = {
+                        if not state.active_mutation_timeout_hit:
+                            state.pending_retry_tool_req = {
                                 "type": "tool_call",
                                 "tool_name": tool_name,
                                 "arguments": dict(arguments) if isinstance(arguments, dict) else {},
@@ -5127,8 +7215,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         emit_metric("tool_cas_conflict_total", {"endpoint": "result", "error": code})
                     if code == "active_mutation_in_progress":
                         mutation_conflict = True
-                        if not active_mutation_timeout_hit:
-                            pending_retry_tool_req = {
+                        if not state.active_mutation_timeout_hit:
+                            state.pending_retry_tool_req = {
                                 "type": "tool_call",
                                 "tool_name": tool_name,
                                 "arguments": dict(arguments) if isinstance(arguments, dict) else {},
@@ -5190,7 +7278,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     last_successful_tool = tool_name
                     _tool_debug(f"last_successful_tool={last_successful_tool}")
                     if tool_name == "fs_apply_patch":
-                        repeated_patch_failures.clear()
+                        state.repeated_patch_failures.clear()
                         if append_payload_fp is not None:
                             successful_append_payload_fingerprints.add(append_payload_fp)
                 elif tool_name == "fs_apply_patch":
@@ -5199,8 +7287,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         write_meta=write_meta if isinstance(write_meta, dict) else None,
                         outcome=outcome,
                     )
-                    repeat_count = repeated_patch_failures.get(failure_sig, 0) + 1
-                    repeated_patch_failures[failure_sig] = repeat_count
+                    repeat_count = state.repeated_patch_failures.get(failure_sig, 0) + 1
+                    state.repeated_patch_failures[failure_sig] = repeat_count
                     emit_metric("tool_apply_patch_same_intent_fail_total", {"count": str(repeat_count)})
                     if repeat_count >= patch_failure_repeat_limit:
                         tool_observations.append(
@@ -5211,97 +7299,114 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                                 "detail": "Repeated identical patch failure; stopped retry loop.",
                             }
                         )
-                        if await _finalize_or_continue_with_intercept(
+                        loop_action = await _finalize_or_continue_with_intercept(
                             reason="patch_recovery_failed_same_intent_circuit_break",
                             edit_intent=edit_intent,
-                        ):
+                        )
+                        if loop_action == LoopAction.FINALIZED:
                             return True
                         continue
                 executed_tool_calls[call_key] = executed_tool_calls.get(call_key, 0) + 1
                 did_any_execution = True
                 if terminal_reason is not None:
-                    if await _finalize_or_continue_with_intercept(
+                    loop_action = await _finalize_or_continue_with_intercept(
                         reason=terminal_reason,
                         edit_intent=edit_intent,
-                    ):
+                    )
+                    if loop_action == LoopAction.FINALIZED:
                         return True
                     continue
 
             if did_any_execution:
-                if await _continue_or_finalize_for_completion(
+                loop_action = await _continue_or_finalize_for_completion(
                     reason_if_finalize="completed",
                     step=step,
                     edit_intent=edit_intent,
-                ):
+                    after_execution=True,
+                )
+                if loop_action == LoopAction.FINALIZED:
                     return True
                 continue
             if not did_any_execution and preprocessed_calls:
                 if mutation_conflict:
-                    if active_mutation_timeout_hit:
+                    if state.active_mutation_timeout_hit:
                         timeout_reason = (
                             "workflow_stalled_no_new_observations"
-                            if not active_mutation_observation_changed
+                            if not state.active_mutation_observation_changed
                             else "active_mutation_timeout"
                         )
-                        if await _finalize_or_continue_with_intercept(
+                        loop_action = await _finalize_or_continue_with_intercept(
                             reason=timeout_reason,
                             edit_intent=edit_intent,
-                        ):
+                        )
+                        if loop_action == LoopAction.FINALIZED:
                             return True
                         continue
-                    if pending_retry_tool_req is not None:
+                    if state.pending_retry_tool_req is not None:
                         continue
-                    if await _finalize_or_continue_with_intercept(
+                    loop_action = await _finalize_or_continue_with_intercept(
                         reason="active_mutation_in_progress",
                         edit_intent=edit_intent,
-                    ):
+                    )
+                    if loop_action == LoopAction.FINALIZED:
                         return True
                     continue
                 if duplicate_suppressed:
-                    if await _continue_or_finalize_for_completion(
+                    loop_action = await _continue_or_finalize_for_completion(
                         reason_if_finalize="duplicate_suppressed",
                         step=step,
                         edit_intent=edit_intent,
-                    ):
+                    )
+                    if loop_action == LoopAction.FINALIZED:
                         return True
                     continue
                 if policy_denied:
-                    if await _continue_or_finalize_for_completion(
+                    loop_action = await _continue_or_finalize_for_completion(
                         reason_if_finalize="policy_denied",
                         step=step,
                         edit_intent=edit_intent,
-                    ):
+                    )
+                    if loop_action == LoopAction.FINALIZED:
                         return True
                     continue
                 if any(str(obs.get("error")) == "unknown_tool_name" for obs in tool_observations):
-                    if await _continue_or_finalize_for_completion(
+                    loop_action = await _continue_or_finalize_for_completion(
                         reason_if_finalize="unknown_tool",
                         step=step,
                         edit_intent=edit_intent,
-                    ):
+                    )
+                    if loop_action == LoopAction.FINALIZED:
                         return True
                     continue
-                if await _continue_or_finalize_for_completion(
+                loop_action = await _continue_or_finalize_for_completion(
                     reason_if_finalize="blocked_invalid_args",
                     step=step,
                     edit_intent=edit_intent,
-                ):
+                )
+                if loop_action == LoopAction.FINALIZED:
                     return True
                 continue
         console.print(f"[yellow]Stopped after max tool iterations ({max_tool_steps}).[/yellow]")
         if completion_criteria.active and not _completion_eval().satisfied:
             final_res = await _request_final_response(tool_observations)
-            return await _force_finalize(final_res, reason="completion_criteria_unmet_after_retries")
+            action = await _force_finalize(final_res, reason="completion_criteria_unmet_after_retries")
+            return action == LoopAction.FINALIZED
         final_res = await _request_final_response(tool_observations)
-        return await _force_finalize(final_res, reason="max_iterations")
+        action = await _force_finalize(final_res, reason="max_iterations")
+        return action == LoopAction.FINALIZED
 
     async def _run_chat() -> str:
         nonlocal current_provider, current_model, current_thread_id
         nonlocal current_run_id, current_run_version, current_signature
         nonlocal plan_mode, conversation_mode, workspace_root, workspace_fp, approval_mode
         nonlocal verbose_tool_events
-        from openvegas.client import APIError, OpenVegasClient
-
+        nonlocal web_search_requested
+        nonlocal last_web_search_effective
+        nonlocal last_web_search_used
+        nonlocal last_web_search_retry_without_tool
+        nonlocal attachment_context_for_turn
+        nonlocal attachment_markers_for_turn
+        nonlocal attachment_file_ids_for_turn
         low_floor_usd = Decimal(os.getenv("TOPUP_LOW_BALANCE_FLOOR_USD", "5.00"))
         v_per_usd = Decimal(os.getenv("V_PER_USD", "100"))
         suggest_cooldown_sec = max(30, int(os.getenv("TOPUP_SUGGEST_COOLDOWN_SEC", "300")))
@@ -5365,12 +7470,99 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             except Exception:
                 return
 
-        def _read_chat_message() -> str:
+        async def _read_chat_message() -> str:
+            nonlocal prompt_toolkit_unavailable_warned, chat_prompt_session, chat_prompt_bindings
+            if use_prompt_toolkit_chat:
+                if PromptSession is None:
+                    if not prompt_toolkit_unavailable_warned:
+                        console.print(
+                            "[yellow]prompt-toolkit not installed; falling back to basic chat input.[/yellow]"
+                        )
+                        prompt_toolkit_unavailable_warned = True
+                else:
+                    if chat_prompt_bindings is None and KeyBindings is not None:
+                        chat_prompt_bindings = KeyBindings()
+
+                        @chat_prompt_bindings.add("c-v")
+                        def _chat_paste_from_clipboard(event) -> None:
+                            pasted = _read_clipboard_text()
+                            if pasted:
+                                event.current_buffer.insert_text(pasted)
+
+                    if chat_prompt_session is None:
+                        kwargs: dict[str, Any] = {}
+                        if InMemoryHistory is not None:
+                            kwargs["history"] = InMemoryHistory()
+                        chat_prompt_session = PromptSession(**kwargs)
+
+                        state = {"editing": False}
+
+                        def _on_text_changed(_) -> None:
+                            if state["editing"]:
+                                return
+                            try:
+                                buffer = chat_prompt_session.default_buffer
+                                before = str(buffer.text or "")
+                                after = _normalize_live_chat_input_text(before)
+                                if after != before:
+                                    cursor = int(buffer.cursor_position or 0)
+                                    delta = len(after) - len(before)
+                                    state["editing"] = True
+                                    buffer.text = after
+                                    buffer.cursor_position = max(0, min(len(after), cursor + delta))
+                            finally:
+                                state["editing"] = False
+
+                        chat_prompt_session.default_buffer.on_text_changed += _on_text_changed
+
+                    try:
+                        composer_rprompt = lambda: str(
+                            _format_live_composer_status_row(
+                                draft_text=str(chat_prompt_session.default_buffer.text or ""),
+                                attachments=pending_attachments,
+                                provider=current_provider,
+                                model=current_model,
+                            )
+                            or ""
+                        )
+                        raw = await chat_prompt_session.prompt_async(
+                            "chat: ",
+                            key_bindings=chat_prompt_bindings,
+                            multiline=False,
+                            wrap_lines=True,
+                            rprompt=composer_rprompt,
+                        )
+                    except EOFError:
+                        return "/exit"
+                    merged = _normalize_live_chat_input_text(raw)
+                    if merged:
+                        return merged
+                    auto_clip = str(os.getenv("OPENVEGAS_CHAT_AUTO_CLIPBOARD_PASTE", "1")).strip().lower() in {
+                        "1",
+                        "true",
+                        "yes",
+                        "on",
+                    }
+                    if auto_clip and _clipboard_has_image():
+                        return "/paste"
+                    return merged
+
             first = Prompt.ask("chat")
             extras = _drain_stdin_buffer(window_ms=40)
-            return _merge_chat_prompt_and_buffered_lines(first, extras)
+            merged = _normalize_live_chat_input_text(_merge_chat_prompt_and_buffered_lines(first, extras))
+            if merged:
+                return merged
+            # Best-effort clipboard-image paste parity (Cmd/Ctrl+V workflows).
+            auto_clip = str(os.getenv("OPENVEGAS_CHAT_AUTO_CLIPBOARD_PASTE", "1")).strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+            if auto_clip and _clipboard_has_image():
+                return "/paste"
+            return merged
 
-        client = OpenVegasClient()
         try:
             mode = await client.get_mode()
             conversation_mode = str(mode.get("conversation_mode", "persistent"))
@@ -5413,11 +7605,16 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
         else:
             console.print(f"OpenVegas Chat · {conversation_mode}")
         console.print("Type /help for commands")
+        if attach_search_home_enabled:
+            console.print(
+                "[yellow]OPENVEGAS_CHAT_ATTACH_SEARCH_HOME=1 may slow auto-attach. "
+                "Recommended default is 0.[/yellow]"
+            )
         render_status_bar(console, _status_actor(), "ready", workspace_root)
         dealer_panel.render("idle", "ready")
 
         while True:
-            message = _read_chat_message()
+            message = await _read_chat_message()
             if not message:
                 continue
 
@@ -5431,7 +7628,18 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 if cmd == "/help":
                     _show_help()
                     continue
+                if cmd == "/legend":
+                    _show_legend()
+                    continue
                 if cmd == "/status":
+                    web_search_effective = bool(
+                        web_search_requested
+                        and resolve_capability(
+                            current_provider,
+                            current_model,
+                            "web_search",
+                        )
+                    )
                     provider_line = (
                         f"[bold]Provider:[/bold] {current_provider}\n[bold]Model:[/bold] {current_model}\n"
                         if show_model_meta
@@ -5447,10 +7655,119 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                             f"[bold]Plan Mode:[/bold] {'on' if plan_mode else 'off'}\n"
                             f"[bold]Approval Mode:[/bold] {approval_mode}\n"
                             f"[bold]Tool Events:[/bold] {'verbose' if verbose_tool_events else 'compact'}\n"
+                            f"[bold]Web Search Requested:[/bold] {web_search_requested}\n"
+                            f"[bold]Web Search Effective:[/bold] {web_search_effective}\n"
+                            f"[bold]Last Web Search Used:[/bold] {last_web_search_used}\n"
+                            f"[bold]Last Web Search Retry:[/bold] {last_web_search_retry_without_tool}\n"
+                            f"[bold]Pending Attachments:[/bold] {len(pending_attachments)}\n"
                             "[bold]Style:[/bold] minimal (fixed)",
                             title="Chat Status",
                             border_style="cyan",
                         )
+                    )
+                    continue
+                if cmd == "/attachments":
+                    if not pending_attachments:
+                        console.print("[dim]No pending attachments.[/dim]")
+                        continue
+                    rows = []
+                    for att in pending_attachments:
+                        rows.append(
+                            f"{_attachment_label(att)} id={att.local_id} state={att.state.value}"
+                        )
+                    console.print(Panel("\n".join(rows), title="Pending Attachments", border_style="blue"))
+                    continue
+                if cmd == "/export-transcript":
+                    path_arg = message.split(" ", 1)[1] if " " in message else ""
+                    _export_transcript(path_arg)
+                    continue
+                if cmd == "/attach":
+                    if len(parts) < 2:
+                        console.print("[red]Usage: /attach <path>[/red]")
+                        continue
+                    raw_path = message.split(" ", 1)[1] if " " in message else ""
+                    if _attach_file(raw_path):
+                        _render_attachment_status_row(force=True)
+                    continue
+                if cmd == "/paste":
+                    attached = _paste_from_clipboard()
+                    if attached <= 0:
+                        console.print(
+                            "[yellow]Clipboard did not contain attachable files/images. "
+                            "Use /attach <path> or paste full file paths.[/yellow]"
+                        )
+                    else:
+                        console.print(f"[green]Attached {attached} item(s) from clipboard.[/green]")
+                        _render_attachment_status_row(force=True)
+                    continue
+                if cmd == "/detach":
+                    if len(parts) < 2:
+                        console.print("[red]Usage: /detach <name|id>[/red]")
+                        continue
+                    token = message.split(" ", 1)[1] if " " in message else ""
+                    att = _find_attachment(token)
+                    if not att:
+                        console.print(f"[yellow]No attachment found for '{token.strip()}'.[/yellow]")
+                        continue
+                    pending_attachments.remove(att)
+                    _emit_attachment_event(
+                        "attachment_removed",
+                        {"id": att.local_id, "marker": _attachment_marker(att.name)},
+                    )
+                    _render_attachment_status_row(force=True)
+                    continue
+                if cmd == "/clear-attachments":
+                    if not pending_attachments:
+                        console.print("[dim]No pending attachments.[/dim]")
+                        continue
+                    for att in list(pending_attachments):
+                        _emit_attachment_event(
+                            "attachment_removed",
+                            {"id": att.local_id, "marker": _attachment_marker(att.name)},
+                        )
+                    pending_attachments.clear()
+                    console.print("[green]Cleared all pending attachments.[/green]")
+                    continue
+                if cmd == "/cancel-uploads":
+                    if not pending_attachments:
+                        console.print("[dim]No pending attachments.[/dim]")
+                        continue
+                    pending_attachments.clear()
+                    console.print("[green]Cancelled and cleared pending upload queue.[/green]")
+                    continue
+                if cmd == "/retry-failed":
+                    failed_count = 0
+                    for att in pending_attachments:
+                        if att.state == AttachmentState.FAILED:
+                            att.state = AttachmentState.ATTACHED
+                            att.error = None
+                            failed_count += 1
+                    if failed_count <= 0:
+                        console.print("[dim]No failed uploads to retry.[/dim]")
+                    else:
+                        console.print(f"[green]Reset {failed_count} failed attachment(s) for retry.[/green]")
+                    continue
+                if cmd == "/web":
+                    if len(parts) < 2:
+                        console.print("[red]Usage: /web <on|off>[/red]")
+                        continue
+                    state = parts[1].strip().lower()
+                    if state not in {"on", "off"}:
+                        console.print("[red]Usage: /web <on|off>[/red]")
+                        continue
+                    web_search_requested = state == "on"
+                    web_search_effective = bool(
+                        web_search_requested
+                        and resolve_capability(
+                            current_provider,
+                            current_model,
+                            "web_search",
+                        )
+                    )
+                    console.print(
+                        "[green]Web search "
+                        f"{'requested' if web_search_requested else 'disabled'}[/green] "
+                        f"[dim](effective={web_search_effective})[/dim]"
                     )
                     continue
                 if cmd == "/tooling":
@@ -5535,6 +7852,11 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         current_thread_id = None
                     current_provider = next_provider
                     current_model = next_model
+                    web_search_requested = (
+                        current_provider == "openai"
+                        and str(os.getenv("OPENVEGAS_CHAT_WEB_SEARCH_DEFAULT", "1")).strip().lower()
+                        in {"1", "true", "yes", "on"}
+                    )
                     console.print(f"[green]Provider/model set to {current_provider}/{current_model}.[/green]")
                     continue
                 if cmd == "/model":
@@ -5587,14 +7909,244 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 console.print("[red]Unknown slash command. Use /help.[/red]")
                 continue
 
-            render_user_input(console, message)
+            turn_is_workspace_intent = _has_workspace_tooling_intent(message)
+            auto_paths: list[str] = []
+            unresolved_inline: list[str] = []
+            auto_resolve_timed_out = False
+            if not turn_is_workspace_intent:
+                if not pending_attachments and _extract_filename_like_tokens(message):
+                    _render_capability_status("file_search", "resolving attachment mentions...")
+                auto_paths, unresolved_inline, auto_resolve_timed_out = await _detect_auto_attach_paths_with_deadline(
+                    message,
+                    workspace_root=workspace_root,
+                    max_candidates=max_attachments_per_turn,
+                    deadline_ms=auto_attach_deadline_ms,
+                )
+                for candidate in auto_paths:
+                    if len(pending_attachments) >= max_attachments_per_turn:
+                        break
+                    _attach_file(candidate)
+                # Continue-style UX parity: use clipboard contents automatically when message implies file/image analysis.
+                if (
+                    not pending_attachments
+                    and _message_requests_attachment_analysis(message)
+                    and len(pending_attachments) < max_attachments_per_turn
+                ):
+                    clip_text = _read_clipboard_text()
+                    if clip_text:
+                        for token in _extract_pasted_path_candidates(clip_text):
+                            if len(pending_attachments) >= max_attachments_per_turn:
+                                break
+                            resolved = _resolve_attachment_token_path(token, workspace_root=workspace_root)
+                            if resolved:
+                                _attach_file(resolved)
+                    if (
+                        not pending_attachments
+                        and auto_clipboard_image_attach
+                        and _clipboard_has_image()
+                    ):
+                        img_path = _save_clipboard_image_to_file()
+                        if img_path:
+                            _attach_file(img_path)
+            if not pending_attachments and not turn_is_workspace_intent:
+                if auto_resolve_timed_out:
+                    markers = " ".join(f"{{{_normalize_space_chars(name)}}}" for name in unresolved_inline[:5])
+                    console.print(
+                        "[yellow]Auto-attach search timed out; skipping this turn"
+                        f" (>{auto_attach_deadline_ms}ms).[/yellow] "
+                        + (
+                            f"{markers} [yellow]Use /attach <path> or paste the full file path.[/yellow]"
+                            if markers
+                            else "[yellow]Use /attach <path> or paste the full file path.[/yellow]"
+                        )
+                    )
+                elif unresolved_inline:
+                    markers = " ".join(f"{{{_normalize_space_chars(name)}}}" for name in unresolved_inline)
+                    console.print(
+                        "[yellow]Detected file names but could not auto-attach:[/yellow] "
+                        f"{markers} [yellow]Use /attach <path> or paste the full file path.[/yellow]"
+                    )
+                else:
+                    inline_mentions = _extract_inline_file_mentions(message, workspace_root=workspace_root)
+                    if inline_mentions:
+                        markers = " ".join(f"{{{name}}}" for name in inline_mentions)
+                        console.print(
+                            "[yellow]Detected file names in your prompt but they are not attached:[/yellow] "
+                            f"{markers} [yellow]Use /attach <path> before sending.[/yellow]"
+                        )
+
+            (
+                capability_filtered_pending,
+                dropped_image_count,
+                blocked_all_images,
+            ) = _preflight_filter_attachments_for_capabilities(
+                pending_attachments,
+                provider=current_provider,
+                model=current_model,
+            )
+            if dropped_image_count > 0:
+                if blocked_all_images:
+                    console.print(
+                        "[yellow]"
+                        f"{current_provider}/{current_model} does not support image input. "
+                        "Remove image attachments or switch to a vision-capable model."
+                        "[/yellow]"
+                    )
+                    emit_metric(
+                        "chat_attachment_blocked_capability_total",
+                        {
+                            "feature": "image_input",
+                            "provider": current_provider,
+                            "model": current_model,
+                            "had_uploaded": False,
+                        },
+                    )
+                    render_status_bar(console, _status_actor(), "image input unavailable", workspace_root)
+                    pending_attachments.clear()
+                    continue
+                pending_attachments[:] = capability_filtered_pending
+                console.print(
+                    "[yellow]"
+                    f"Dropped {dropped_image_count} image attachment(s) — "
+                    f"{current_provider}/{current_model} does not support image input. "
+                    f"Continuing with {len(capability_filtered_pending)} non-image file(s)."
+                    "[/yellow]"
+                )
+                emit_metric(
+                    "chat_attachment_dropped_capability_total",
+                    {
+                        "feature": "image_input",
+                        "provider": current_provider,
+                        "model": current_model,
+                        "dropped": dropped_image_count,
+                        "kept": len(capability_filtered_pending),
+                    },
+                )
+
+            if pending_attachments:
+                _render_attachment_status_row(force=True)
+                _render_upload_queue_preview()
+
+            (
+                _uploaded_for_turn,
+                attachment_markers_for_turn,
+                attachment_context_for_turn,
+                attachment_file_ids_for_turn,
+            ) = await _prepare_attachments_for_turn()
+            display_message = _inject_attachment_markers_into_message(message, _uploaded_for_turn)
+            if attachment_markers_for_turn and display_message == message:
+                display_message = f"{message} {' '.join(attachment_markers_for_turn)}".strip()
+            render_user_input(console, display_message)
+            chat_transcript.append(
+                {
+                    "role": "user",
+                    "text": display_message,
+                    "attachments": list(attachment_markers_for_turn),
+                    "ts": time.time(),
+                }
+            )
+            last_assistant_text_for_turn = ""
+            failed_for_turn = [
+                att for att in pending_attachments if att.state in {AttachmentState.FAILED, AttachmentState.UNSUPPORTED}
+            ]
+            mentioned_files = _extract_filename_like_tokens(message)
+            if (
+                _message_requests_attachment_analysis(message)
+                and mentioned_files
+                and not attachment_file_ids_for_turn
+            ):
+                if failed_for_turn:
+                    for att in failed_for_turn:
+                        reason = str(att.error or "upload failed").strip()
+                        console.print(
+                            f"[yellow]Attachment upload failed for {_attachment_marker(att.name)}: {reason}[/yellow]"
+                        )
+                    console.print(
+                        "[yellow]Skipped model request for this turn to avoid extra cost. "
+                        "Resolve upload issue and retry (use /retry-failed if needed).[/yellow]"
+                    )
+                else:
+                    markers = " ".join(_attachment_marker(name) for name in mentioned_files[:5])
+                    console.print(
+                        "[yellow]This looks like local file/image analysis but no attachment uploaded:[/yellow] "
+                        f"{markers}"
+                    )
+                render_status_bar(console, _status_actor(), "attachment upload required", workspace_root)
+                attachment_markers_for_turn = []
+                attachment_context_for_turn = ""
+                attachment_file_ids_for_turn = []
+                continue
+            has_image_attachment = any(
+                str(att.mime_type or "").lower().startswith("image/")
+                for att in _uploaded_for_turn
+            )
+            if has_image_attachment and not resolve_capability(current_provider, current_model, "image_input"):
+                emit_metric(
+                    "chat_attachment_blocked_capability_total",
+                    {
+                        "feature": "image_input",
+                        "provider": current_provider,
+                        "model": current_model,
+                        "had_uploaded": True,
+                        "bypass": "preflight_missed",
+                    },
+                )
+                emit_metric(
+                    "chat_attachment_preflight_bypass_total",
+                    {
+                        "feature": "image_input",
+                        "provider": current_provider,
+                        "model": current_model,
+                    },
+                )
+                _tool_debug(
+                    "unexpected capability preflight bypass: uploaded image attachment reached post-upload guard"
+                )
+                non_image_uploaded = [att for att in _uploaded_for_turn if not _attachment_is_image(att)]
+                if non_image_uploaded:
+                    dropped_after_upload = len(_uploaded_for_turn) - len(non_image_uploaded)
+                    _uploaded_for_turn = non_image_uploaded
+                    attachment_markers_for_turn = [_attachment_marker(att.name) for att in _uploaded_for_turn]
+                    attachment_file_ids_for_turn = [
+                        str(att.remote_file_id).strip()
+                        for att in _uploaded_for_turn
+                        if str(att.remote_file_id or "").strip()
+                    ]
+                    console.print(
+                        "[yellow]"
+                        f"Dropped {dropped_after_upload} uploaded image attachment(s) — "
+                        "model does not support image input."
+                        "[/yellow]"
+                    )
+                else:
+                    console.print(
+                        "[yellow]Image input is not supported for this provider/model. "
+                        "Switch model/provider or remove image attachments.[/yellow]"
+                    )
+                    render_status_bar(console, _status_actor(), "image input unavailable", workspace_root)
+                    continue
             try:
                 rendered = await _run_tool_loop(client, message)
                 if not rendered:
                     console.print("[dim](no final assistant response)[/dim]")
+                elif str(last_assistant_text_for_turn or "").strip():
+                    chat_transcript.append(
+                        {
+                            "role": "assistant",
+                            "text": str(last_assistant_text_for_turn),
+                            "ts": time.time(),
+                        }
+                    )
                 await _maybe_render_low_balance_hint(force=False)
+                pending_attachments.clear()
+                attachment_markers_for_turn = []
+                attachment_context_for_turn = ""
+                attachment_file_ids_for_turn = []
 
             except APIError as e:
+                attachment_markers_for_turn = []
+                attachment_context_for_turn = ""
+                attachment_file_ids_for_turn = []
                 body = e.data if isinstance(e.data, dict) else {}
                 code = str(body.get("error", ""))
                 if code in {"insufficient_balance", "balance_insufficient"}:
@@ -5689,6 +8241,285 @@ def models(provider: str | None):
             console.print(f"[red]{e.detail}[/red]")
 
     run_async(_models())
+
+
+# ---------------------------------------------------------------------------
+# Ops
+# ---------------------------------------------------------------------------
+
+
+@cli.group()
+def ops():
+    """Inspect runtime diagnostics, alerts, and rollback checklist."""
+    pass
+
+
+def _fmt_num(value: Any, *, pct: bool = False) -> str:
+    try:
+        number = float(value)
+    except Exception:
+        return str(value)
+    if pct:
+        return f"{number * 100.0:.2f}%"
+    if abs(number) >= 1000.0:
+        return f"{number:,.2f}"
+    return f"{number:.3f}"
+
+
+def _render_ops_recent_runs_table(runs: list[dict[str, Any]]) -> None:
+    table = Table(title="Recent Runs")
+    table.add_column("Run ID")
+    table.add_column("Provider/Model")
+    table.add_column("Latency ms", justify="right")
+    table.add_column("Tokens", justify="right")
+    table.add_column("Cost USD", justify="right")
+    table.add_column("Tool Fail", justify="right")
+    table.add_column("Fallbacks", justify="right")
+    for row in runs:
+        run_id = str(row.get("run_id", ""))
+        provider = str(row.get("provider", ""))
+        model = str(row.get("model", ""))
+        latency = _fmt_num(row.get("turn_latency_ms", 0.0))
+        tokens = int(row.get("input_tokens", 0) or 0) + int(row.get("output_tokens", 0) or 0)
+        cost = _fmt_num(row.get("cost_usd", 0.0))
+        table.add_row(
+            run_id[:12],
+            f"{provider}/{model}".strip("/"),
+            latency,
+            str(tokens),
+            f"${cost}",
+            str(int(row.get("tool_failures", 0) or 0)),
+            str(int(row.get("fallbacks", 0) or 0)),
+        )
+    console.print(table)
+
+
+@ops.command("diagnostics")
+@click.option("--json-output", is_flag=True, help="Print raw JSON payload.")
+def ops_diagnostics(json_output: bool):
+    """Show diagnostics summary, thresholds, alerts, and rollback owner."""
+
+    async def _diagnostics():
+        from openvegas.client import APIError, OpenVegasClient
+
+        try:
+            client = OpenVegasClient()
+            payload = await client.get_ops_diagnostics()
+        except APIError as e:
+            console.print(f"[red]{e.detail}[/red]")
+            return
+
+        if json_output:
+            console.print_json(json.dumps(payload))
+            return
+
+        run_summary = payload.get("run_summary", {}) if isinstance(payload, dict) else {}
+        thresholds = payload.get("thresholds", {}) if isinstance(payload, dict) else {}
+        alerts = payload.get("alerts", []) if isinstance(payload, dict) else []
+        rollback = payload.get("rollback", {}) if isinstance(payload, dict) else {}
+        recent_runs = payload.get("recent_runs", []) if isinstance(payload, dict) else []
+
+        summary_table = Table(title="Ops Run Summary")
+        summary_table.add_column("Metric")
+        summary_table.add_column("Value", justify="right")
+        summary_table.add_row("run_count", str(run_summary.get("run_count", 0)))
+        summary_table.add_row("turn_latency_ms_p50", _fmt_num(run_summary.get("turn_latency_ms_p50", 0.0)))
+        summary_table.add_row("turn_latency_ms_p95", _fmt_num(run_summary.get("turn_latency_ms_p95", 0.0)))
+        summary_table.add_row("turn_latency_ms_avg", _fmt_num(run_summary.get("turn_latency_ms_avg", 0.0)))
+        summary_table.add_row("tool_fail_rate", _fmt_num(run_summary.get("tool_fail_rate", 0.0), pct=True))
+        summary_table.add_row("fallback_rate", _fmt_num(run_summary.get("fallback_rate", 0.0), pct=True))
+        summary_table.add_row("avg_cost_usd", f"${_fmt_num(run_summary.get('avg_cost_usd', 0.0))}")
+        console.print(summary_table)
+
+        threshold_table = Table(title="Alert Thresholds")
+        threshold_table.add_column("Metric")
+        threshold_table.add_column("Threshold", justify="right")
+        for metric, threshold in thresholds.items():
+            threshold_table.add_row(str(metric), _fmt_num(threshold))
+        console.print(threshold_table)
+
+        if alerts:
+            alert_table = Table(title="Active Alerts")
+            alert_table.add_column("Metric")
+            alert_table.add_column("Severity")
+            alert_table.add_column("Observed", justify="right")
+            alert_table.add_column("Threshold", justify="right")
+            alert_table.add_column("Status")
+            for item in alerts:
+                observed = _fmt_num(item.get("observed", 0.0))
+                threshold = _fmt_num(item.get("threshold", 0.0))
+                alert_table.add_row(
+                    str(item.get("metric", "")),
+                    str(item.get("severity", "")),
+                    observed,
+                    threshold,
+                    str(item.get("status", "")),
+                )
+            console.print(alert_table)
+        else:
+            console.print("[green]No active alerts.[/green]")
+
+        if isinstance(recent_runs, list) and recent_runs:
+            _render_ops_recent_runs_table([r for r in recent_runs if isinstance(r, dict)])
+
+        owner = str(rollback.get("owner", "")).strip() or "unassigned"
+        checklist = rollback.get("checklist", [])
+        checklist_lines = "\n".join(f"{idx}. {item}" for idx, item in enumerate(checklist, start=1))
+        if not checklist_lines:
+            checklist_lines = "1. No rollback checklist configured."
+        console.print(Panel(checklist_lines, title=f"Rollback Owner: {owner}", border_style="yellow"))
+
+    run_async(_diagnostics())
+
+
+@ops.command("alerts")
+@click.option("--json-output", is_flag=True, help="Print raw JSON payload.")
+def ops_alerts(json_output: bool):
+    """Show current alerts and threshold comparisons."""
+
+    async def _alerts():
+        from openvegas.client import APIError, OpenVegasClient
+
+        try:
+            client = OpenVegasClient()
+            payload = await client.get_ops_alerts()
+        except APIError as e:
+            console.print(f"[red]{e.detail}[/red]")
+            return
+
+        if json_output:
+            console.print_json(json.dumps(payload))
+            return
+
+        alerts = payload.get("alerts", []) if isinstance(payload, dict) else []
+        if not alerts:
+            console.print("[green]No active alerts.[/green]")
+            return
+        table = Table(title="Ops Alerts")
+        table.add_column("Metric")
+        table.add_column("Severity")
+        table.add_column("Observed", justify="right")
+        table.add_column("Threshold", justify="right")
+        table.add_column("Status")
+        for item in alerts:
+            table.add_row(
+                str(item.get("metric", "")),
+                str(item.get("severity", "")),
+                _fmt_num(item.get("observed", 0.0)),
+                _fmt_num(item.get("threshold", 0.0)),
+                str(item.get("status", "")),
+            )
+        console.print(table)
+
+    run_async(_alerts())
+
+
+@ops.command("runs")
+@click.option("--limit", default=25, show_default=True, help="Number of recent runs to fetch (max 200).")
+@click.option("--json-output", is_flag=True, help="Print raw JSON payload.")
+def ops_runs(limit: int, json_output: bool):
+    """Show recent inference run metrics."""
+
+    async def _runs():
+        from openvegas.client import APIError, OpenVegasClient
+
+        try:
+            client = OpenVegasClient()
+            payload = await client.get_ops_runs(limit=limit)
+        except APIError as e:
+            console.print(f"[red]{e.detail}[/red]")
+            return
+
+        if json_output:
+            console.print_json(json.dumps(payload))
+            return
+        rows = payload.get("runs", []) if isinstance(payload, dict) else []
+        if not rows:
+            console.print("[dim]No run metrics available.[/dim]")
+            return
+        _render_ops_recent_runs_table([r for r in rows if isinstance(r, dict)])
+
+    run_async(_runs())
+
+
+@ops.command("watch")
+@click.option("--interval-sec", default=5.0, show_default=True, help="Refresh interval in seconds.")
+@click.option("--cycles", default=0, show_default=True, help="Number of refresh cycles (0 = until Ctrl+C).")
+def ops_watch(interval_sec: float, cycles: int):
+    """Watch alerts + summary in a polling loop."""
+
+    async def _watch():
+        from openvegas.client import APIError, OpenVegasClient
+
+        client = OpenVegasClient()
+        tick = 0
+        max_cycles = max(0, int(cycles))
+        interval = max(1.0, float(interval_sec))
+        while True:
+            tick += 1
+            try:
+                diag = await client.get_ops_diagnostics()
+            except APIError as e:
+                console.print(f"[red]{e.detail}[/red]")
+                return
+
+            summary = diag.get("run_summary", {}) if isinstance(diag, dict) else {}
+            alerts = diag.get("alerts", []) if isinstance(diag, dict) else []
+            latency = _fmt_num(summary.get("turn_latency_ms_p95", 0.0))
+            fallback = _fmt_num(summary.get("fallback_rate", 0.0), pct=True)
+            tool_fail = _fmt_num(summary.get("tool_fail_rate", 0.0), pct=True)
+            console.print(
+                f"[dim]tick={tick} p95_ms={latency} tool_fail={tool_fail} fallback={fallback} "
+                f"alerts={len(alerts) if isinstance(alerts, list) else 0}[/dim]"
+            )
+            if isinstance(alerts, list) and alerts:
+                for item in alerts:
+                    metric = str(item.get("metric", ""))
+                    observed = _fmt_num(item.get("observed", 0.0))
+                    threshold = _fmt_num(item.get("threshold", 0.0))
+                    severity = str(item.get("severity", "warning"))
+                    console.print(
+                        f"[yellow]{severity}[/yellow] {metric}: observed={observed} threshold={threshold}"
+                    )
+
+            if max_cycles > 0 and tick >= max_cycles:
+                return
+            await asyncio.sleep(interval)
+
+    try:
+        run_async(_watch())
+    except KeyboardInterrupt:
+        console.print("[dim]Stopped ops watch.[/dim]")
+
+
+@ops.command("rollback")
+@click.option("--json-output", is_flag=True, help="Print raw JSON payload.")
+def ops_rollback(json_output: bool):
+    """Show rollback owner and checklist."""
+
+    async def _rollback():
+        from openvegas.client import APIError, OpenVegasClient
+
+        try:
+            client = OpenVegasClient()
+            payload = await client.get_ops_alerts()
+        except APIError as e:
+            console.print(f"[red]{e.detail}[/red]")
+            return
+
+        rollback = payload.get("rollback", {}) if isinstance(payload, dict) else {}
+        if json_output:
+            console.print_json(json.dumps(rollback))
+            return
+        owner = str(rollback.get("owner", "")).strip() or "unassigned"
+        checklist = rollback.get("checklist", [])
+        if checklist:
+            body = "\n".join(f"{idx}. {item}" for idx, item in enumerate(checklist, start=1))
+        else:
+            body = "1. No rollback checklist configured."
+        console.print(Panel(body, title=f"Rollback Owner: {owner}", border_style="yellow"))
+
+    run_async(_rollback())
 
 
 # ---------------------------------------------------------------------------
@@ -5841,6 +8672,7 @@ def verify(game_id: str):
 )
 def interactive_ui(no_render: bool, render_timeout_sec: float):
     """Open guided terminal UI."""
+    _load_openvegas_env_defaults_from_dotenv()
     try:
         from openvegas.tui.prompt_ui import run_prompt_ui
     except Exception as e:  # pragma: no cover - runtime-only import fallback

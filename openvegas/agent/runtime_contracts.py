@@ -34,6 +34,7 @@ class ToolName(str, Enum):
     FS_APPLY_PATCH = "fs_apply_patch"
     SHELL_RUN = "shell_run"
     EDITOR_OPEN = "editor_open"
+    MCP_CALL = "mcp_call"
 
 
 class ToolReasonCode(str, Enum):

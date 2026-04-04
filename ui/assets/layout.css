@@ -70,6 +70,11 @@
   padding: 6px 10px;
 }
 
+.nav-auth-user {
+  color: var(--grey-light);
+  white-space: nowrap;
+}
+
 .page-shell {
   padding: 2.6rem 0 3.4rem;
 }

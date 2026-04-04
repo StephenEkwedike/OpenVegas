@@ -69,10 +69,13 @@
           </div>
           <div class="cta-row">
             <button id="createCheckout" class="btn btn-primary" type="button">Create checkout</button>
+            <button id="chargeSaved" class="btn" type="button">Use saved card</button>
+            <button id="manageSavedCard" class="btn" type="button">Manage card</button>
             <a class="btn" href="/ui/subscription">Go to subscription</a>
             <a class="btn" href="/ui/balance">Open balance</a>
           </div>
           <p id="checkoutMeta" class="text-mono-sm" style="margin-top:.8rem;">No checkout yet.</p>
+          <p id="savedCardMeta" class="text-mono-sm" style="margin-top:.4rem;">Checking saved card status...</p>
           <a id="checkoutUrl" class="checkout-link text-mono-sm" href="#" target="_blank" rel="noreferrer" hidden></a>
           <div id="checkoutQrWrap" class="qr-wrap" hidden>
             <div class="text-mono-xs" style="margin: 8px 0;">Scan QR to pay</div>
@@ -174,6 +177,84 @@
               if (checkoutTab && !checkoutTab.closed) {
                 try { checkoutTab.close(); } catch {}
               }
+              out.textContent = String(err);
+            }
+          });
+
+          const savedCardMeta = byId("savedCardMeta");
+          const chargeSavedBtn = byId("chargeSaved");
+          const manageSavedCardBtn = byId("manageSavedCard");
+
+          async function refreshSavedCardStatus() {
+            if (!savedCardMeta) return { available: false };
+            try {
+              const status = await apiJson("/billing/topups/saved-payment-method", { method: "GET" });
+              if (status?.available) {
+                const brand = String(status.brand || "card").toUpperCase();
+                const last4 = String(status.last4 || "****");
+                savedCardMeta.textContent = `Saved card ready: ${brand} ••••${last4}`;
+                if (chargeSavedBtn) chargeSavedBtn.disabled = false;
+              } else {
+                savedCardMeta.textContent = "No saved card on file yet. Complete one checkout to save card details.";
+                if (chargeSavedBtn) chargeSavedBtn.disabled = true;
+              }
+              return status || { available: false };
+            } catch (err) {
+              savedCardMeta.textContent = `Saved card status unavailable: ${String(err)}`;
+              if (chargeSavedBtn) chargeSavedBtn.disabled = true;
+              return { available: false };
+            }
+          }
+
+          await refreshSavedCardStatus();
+
+          chargeSavedBtn?.addEventListener("click", async () => {
+            const out = byId("checkoutMeta");
+            const amountInput = byId("topupAmount");
+            const rawAmount = String(amountInput?.value || "20.00").trim();
+            out.textContent = "charging saved card...";
+            try {
+              const parsed = Number(rawAmount);
+              if (!Number.isFinite(parsed) || parsed < MIN_BILLING_USD) {
+                throw new Error(`Minimum top-up is $${MIN_BILLING_USD.toFixed(2)}.`);
+              }
+              const preview = await apiJson("/billing/topups/preview", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ amount_usd: parsed.toFixed(2) }),
+              });
+              out.textContent = `preview: repay ${preview.repay_v} $V, net credit ${preview.net_credit_v} $V`;
+              const charged = await apiJson("/billing/topups/charge-saved", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ amount_usd: parsed.toFixed(2) }),
+              });
+              out.textContent = `saved-card charge complete · topup_id=${charged.topup_id} status=${charged.status}`;
+            } catch (err) {
+              out.textContent = String(err);
+            }
+          });
+
+          manageSavedCardBtn?.addEventListener("click", async () => {
+            const out = byId("checkoutMeta");
+            out.textContent = "opening card management...";
+            try {
+              const portal = await apiJson("/billing/topups/payment-method-portal-session", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+              });
+              if (portal?.url) {
+                const tab = window.open(portal.url, "_blank");
+                if (tab && !tab.closed) {
+                  try { tab.focus(); } catch {}
+                  out.textContent = "Opened card management.";
+                } else {
+                  out.textContent = "Popup blocked. Allow popups and retry.";
+                }
+              } else {
+                out.textContent = "No card management URL returned.";
+              }
+            } catch (err) {
               out.textContent = String(err);
             }
           });

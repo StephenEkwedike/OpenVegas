@@ -45,6 +45,7 @@ def test_startup_schema_requires_security_migrations():
     assert 'require_migration_min(db, "032_wallet_bootstrap_and_continuation")' in deps
     assert 'require_migration_min(db, "033_avatar_preferences")' in deps
     assert 'require_migration_min(db, "036_profile_theme_preferences")' in deps
+    assert 'require_migration_min(db, "037_chat_file_uploads")' in deps
     assert '"horse_quotes"' in deps
     assert '"horse_quote_idempotency"' in deps
     assert '"provider_credentials"' in deps
@@ -57,6 +58,7 @@ def test_startup_schema_requires_security_migrations():
     assert '"user_continuation_credit"' in deps
     assert '"continuation_claim_idempotency"' in deps
     assert '"continuation_accounting_events"' in deps
+    assert '"chat_file_uploads"' in deps
     assert '"profiles"' in deps
     assert '("fiat_topups", "mode")' in deps
     assert '("fiat_topups", "expires_at")' in deps
@@ -65,6 +67,9 @@ def test_startup_schema_requires_security_migrations():
     assert '("profiles", "avatar_palette")' in deps
     assert '("profiles", "dealer_skin_id")' in deps
     assert '("profiles", "theme")' in deps
+    assert '("chat_file_uploads", "content_bytes")' in deps
+    assert '("chat_file_uploads", "status")' in deps
+    assert '("chat_file_uploads", "expires_at")' in deps
     assert '"provider_threads"' in deps
     assert '"provider_thread_messages"' in deps
     assert '"agent_runs"' in deps
@@ -269,6 +274,16 @@ def test_profile_theme_preferences_migration_exists_and_enforces_theme_domain():
     assert "profiles_theme_allowed" in sql
     assert "theme IN ('light', 'dark')" in sql
     assert "036_profile_theme_preferences" in sql
+
+
+def test_chat_file_uploads_migration_exists_and_enforces_status_and_ownership_columns():
+    sql = _read("supabase/migrations/037_chat_file_uploads.sql")
+    assert "CREATE TABLE IF NOT EXISTS chat_file_uploads" in sql
+    assert "REFERENCES auth.users(id) ON DELETE CASCADE" in sql
+    assert "status IN ('pending', 'uploaded', 'expired', 'failed')" in sql
+    assert "content_bytes BYTEA" in sql
+    assert "idx_chat_file_uploads_user_status" in sql
+    assert "037_chat_file_uploads" in sql
 
 
 def test_callback_mutator_modules_do_not_touch_replay_helpers():

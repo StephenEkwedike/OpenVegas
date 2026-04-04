@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import difflib
 import json
+import os
+import time
 from pathlib import Path
 
 import pytest
 
+import openvegas.cli as cli_mod
 from openvegas.cli import _collect_tool_call_candidates
 from openvegas.cli import _canonical_tool_name
 from openvegas.cli import _build_completion_criteria
@@ -31,13 +34,27 @@ from openvegas.cli import _prepare_insert_at_end_patch
 from openvegas.cli import _promote_tool_call_for_patch_intent
 from openvegas.cli import _patch_recovery_payload
 from openvegas.cli import _diagnose_synth_write_skip_reason
+from openvegas.cli import _deep_find_keyed_string
 from openvegas.cli import RETRYABLE_MUTATION_ERRORS
 from openvegas.cli import _semantic_tool_signature
 from openvegas.cli import _search_pattern_hint_from_message
 from openvegas.cli import _shell_command_hint_from_message
 from openvegas.cli import _synth_patch_tool_req_for_intent
 from openvegas.cli import _synth_write_tool_req_from_model_edit
+from openvegas.cli import _is_scrape_request
+from openvegas.cli import _is_scrape_refusal_text
+from openvegas.cli import _rewrite_lookup_request_for_safe_web_search
+from openvegas.cli import _has_workspace_tooling_intent
+from openvegas.cli import _should_enable_web_search_for_turn
+from openvegas.cli import _augment_web_search_prompt
+from openvegas.cli import _attachment_search_roots
+from openvegas.cli import _detect_auto_attach_paths
+from openvegas.cli import _extract_filename_like_tokens
+from openvegas.cli import _split_compound_attachment_token
 from openvegas.cli import _merge_chat_prompt_and_buffered_lines
+from openvegas.cli import _coalesce_prompt_text
+from openvegas.cli import _normalize_live_chat_input_text
+from openvegas.cli import _coalesce_live_prompt_text
 from openvegas.cli import _maybe_prepend_synth_write
 from openvegas.cli import _should_synth_write_from_model_text
 from openvegas.cli import _extract_fenced_code_blocks
@@ -46,9 +63,396 @@ from openvegas.cli import _synthesize_patch_from_arguments
 from openvegas.cli import _tool_result_reason_code
 from openvegas.cli import _validate_patch_recovery_scope
 from openvegas.cli import _rewrite_shell_command_for_env
+from openvegas.cli import _resolve_attachment_token_path
+from openvegas.cli import _resolve_screenshot_stem_to_path
+from openvegas.cli import _message_requests_attachment_analysis
+from openvegas.cli import _format_composer_attachment_status_row
+from openvegas.cli import _format_live_composer_status_row
+from openvegas.cli import _preflight_filter_attachments_for_capabilities
+from openvegas.cli import _inject_attachment_markers_into_message
+from openvegas.cli import _is_chat_attachment_mime_allowed
+from openvegas.cli import AttachmentState
+from openvegas.cli import PendingAttachment
 from openvegas.agent.local_tools import ToolExecutionResult
 from openvegas.telemetry import get_metrics_snapshot
 from openvegas.telemetry import reset_metrics
+
+
+def test_scrape_request_detection():
+    assert _is_scrape_request("can you scrape zillow for houses") is True
+    assert _is_scrape_request("can you help find listings") is False
+
+
+def test_scrape_refusal_detection():
+    assert _is_scrape_refusal_text("Sorry, I can’t help scrape Zillow or bypass site restrictions.") is True
+    assert _is_scrape_refusal_text("Here are listings from public sources.") is False
+
+
+def test_rewrite_lookup_request_for_safe_web_search():
+    out = _rewrite_lookup_request_for_safe_web_search(
+        "can you scrape zillow for houses in austin tx under $500k"
+    )
+    assert "scrape" not in out.lower()
+    assert "find zillow" in out.lower()
+    assert "lawful web search" in out.lower()
+
+
+def test_workspace_tooling_intent_requires_action_or_path_for_code_filenames():
+    assert _has_workspace_tooling_intent("summarize notes.txt from our meeting") is False
+    assert _has_workspace_tooling_intent("open notes.txt and edit the intro") is True
+    assert _has_workspace_tooling_intent("read ./config.json") is True
+    assert _has_workspace_tooling_intent("search code for config.json") is True
+    assert _has_workspace_tooling_intent("what is in Color pallette.pdf") is False
+
+
+def test_web_search_turn_gate_skips_attachment_only_turns():
+    msg = "tell me what you see in this screenshot and pdf"
+    assert _should_enable_web_search_for_turn(msg, has_uploaded_attachments=True) is False
+    web_msg = "find latest Zillow listings in Austin under 500k"
+    assert _should_enable_web_search_for_turn(web_msg, has_uploaded_attachments=True) is True
+
+
+def test_augment_web_search_prompt_is_generic_not_domain_specific():
+    base = "find Python package updates this week"
+    out = _augment_web_search_prompt(base)
+    assert "prefer original source pages" in out.lower()
+    assert "source url" in out.lower()
+    assert "listing pages" not in out.lower()
+
+
+def test_web_request_signal_is_generic_not_domain_hardcoded():
+    assert cli_mod._has_web_request_signal("look up latest changes to React") is True
+    assert cli_mod._has_web_request_signal("zillow") is False
+
+
+def test_detect_auto_attach_paths_from_filename_and_screenshot_stem(tmp_path: Path):
+    pdf = tmp_path / "Color pallette.pdf"
+    pdf.write_text("palette", encoding="utf-8")
+    shot = tmp_path / "Screenshot 2026-02-02 at 12.39.11 PM.png"
+    shot.write_bytes(b"\x89PNG\r\n\x1a\n")
+    text = "review Color pallette.pdf and Screenshot 2026-02-02 at 12.39.11\u202fPM"
+    paths, unresolved = _detect_auto_attach_paths(text, workspace_root=str(tmp_path))
+    names = {Path(p).name for p in paths}
+    assert "Color pallette.pdf" in names
+    assert "Screenshot 2026-02-02 at 12.39.11 PM.png" in names
+    assert unresolved == []
+
+
+def test_attachment_search_roots_include_common_dirs_without_home_scan(monkeypatch, tmp_path: Path):
+    fake_home = tmp_path / "home"
+    downloads = fake_home / "Downloads"
+    desktop = fake_home / "Desktop"
+    documents = fake_home / "Documents"
+    for path in (downloads, desktop, documents):
+        path.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(cli_mod.Path, "home", staticmethod(lambda: fake_home))
+    monkeypatch.setenv("OPENVEGAS_CHAT_ATTACH_SEARCH_HOME", "0")
+    roots = _attachment_search_roots(str(tmp_path))
+    roots_str = {str(p) for p in roots}
+    assert str(downloads.resolve()) in roots_str
+    assert str(desktop.resolve()) in roots_str
+    assert str(documents.resolve()) in roots_str
+
+
+def test_detect_auto_attach_paths_finds_file_in_downloads_without_home_scan(monkeypatch, tmp_path: Path):
+    fake_home = tmp_path / "home"
+    downloads = fake_home / "Downloads"
+    downloads.mkdir(parents=True, exist_ok=True)
+    target = downloads / "Color pallette.pdf"
+    target.write_text("palette", encoding="utf-8")
+
+    monkeypatch.setattr(cli_mod.Path, "home", staticmethod(lambda: fake_home))
+    monkeypatch.setenv("OPENVEGAS_CHAT_ATTACH_SEARCH_HOME", "0")
+    paths, unresolved = _detect_auto_attach_paths(
+        "Can you see what's in {Color pallette.pdf}",
+        workspace_root=str(tmp_path / "workspace"),
+    )
+    assert str(target.resolve()) in {str(Path(p).resolve()) for p in paths}
+    assert unresolved == []
+
+
+@pytest.mark.asyncio
+async def test_detect_auto_attach_paths_with_deadline_times_out(monkeypatch, tmp_path: Path):
+    def _slow_detect(*args, **kwargs):
+        time.sleep(0.2)
+        return [], []
+
+    monkeypatch.setattr(cli_mod, "_detect_auto_attach_paths", _slow_detect)
+    paths, unresolved, timed_out = await cli_mod._detect_auto_attach_paths_with_deadline(
+        "Can you see what's in {Color pallette.pdf}",
+        workspace_root=str(tmp_path),
+        max_candidates=5,
+        deadline_ms=50,
+    )
+    assert paths == []
+    assert timed_out is True
+    assert "Color pallette.pdf" in unresolved
+
+
+def test_extract_filename_tokens_avoids_sentence_swallowing():
+    msg = "tell me what you see in these: Screenshot 2026-02-02 at 12.39.11 PM Color pallette.pdf"
+    tokens = _extract_filename_like_tokens(msg)
+    assert "Color pallette.pdf" in tokens
+    assert not any(token.startswith("tell me what you see") for token in tokens)
+
+
+def test_coalesce_prompt_text_keeps_multiline_input_as_one_turn():
+    msg = "Can you review\nColor pallette.pdf\nand screenshot"
+    out = _coalesce_prompt_text(msg)
+    assert out == "Can you review Color pallette.pdf and screenshot"
+
+
+def test_live_chat_input_text_wraps_inline_file_mentions_with_markers():
+    out = _normalize_live_chat_input_text(
+        "Can you see what's in Color pallette.pdf and Screenshot 2026-02-02 at 12.39.11 PM"
+    )
+    assert "{Color pallette.pdf}" in out
+    assert "{Screenshot 2026-02-02 at 12.39.11 PM}" in out
+
+
+def test_live_chat_input_text_skips_workspace_edit_prompts():
+    out = _normalize_live_chat_input_text("open ./notes.txt and add one line")
+    assert out == "open ./notes.txt and add one line"
+
+
+def test_live_chat_input_text_preserves_trailing_space_while_typing():
+    assert _normalize_live_chat_input_text("hello ") == "hello "
+
+
+def test_coalesce_live_prompt_text_merges_multiline_paste():
+    out = _coalesce_live_prompt_text("Can you review\nColor pallette.pdf\nand screenshot")
+    assert out == "Can you review Color pallette.pdf and screenshot"
+
+
+def test_split_compound_attachment_token_extracts_suffix_filename():
+    token = "Screenshot 2026-02-02 at 12.39.11 PM Color pallette.pdf"
+    pieces = _split_compound_attachment_token(token)
+    assert "Color pallette.pdf" in pieces
+
+
+def test_resolve_attachment_token_path_matches_filename_inside_phrase(tmp_path: Path):
+    target = tmp_path / "Color pallette.pdf"
+    target.write_text("palette", encoding="utf-8")
+    resolved = _resolve_attachment_token_path(
+        "Screenshot 2026-02-02 at 12.39.11 PM Color pallette.pdf",
+        workspace_root=str(tmp_path),
+    )
+    assert resolved is not None
+    assert Path(resolved).name == "Color pallette.pdf"
+
+
+def test_resolve_screenshot_stem_selects_latest_match(tmp_path: Path):
+    older = tmp_path / "Screenshot 2026-02-02 at 12.39.11 PM.png"
+    newer = tmp_path / "Screenshot 2026-02-02 at 12.39.11 PM (1).png"
+    older.write_bytes(b"\x89PNG\r\n\x1a\nold")
+    newer.write_bytes(b"\x89PNG\r\n\x1a\nnew")
+    os.utime(older, (1_700_000_000, 1_700_000_000))
+    os.utime(newer, (1_800_000_000, 1_800_000_000))
+    resolved = _resolve_screenshot_stem_to_path(
+        "Screenshot 2026-02-02 at 12.39.11 PM",
+        workspace_root=str(tmp_path),
+    )
+    assert resolved is not None
+    assert Path(resolved).name == newer.name
+
+
+def test_message_requests_attachment_analysis_detection():
+    assert _message_requests_attachment_analysis("tell me what you see in this screenshot") is True
+    assert _message_requests_attachment_analysis("can you analyze this pdf") is True
+    assert _message_requests_attachment_analysis("find latest homes in austin") is False
+
+
+def test_live_composer_status_shows_candidates_without_attached_files():
+    status = _format_live_composer_status_row(
+        draft_text="Can you review Color pallette.pdf",
+        attachments=[],
+        provider="openai",
+        model="gpt-5",
+    )
+    assert status is not None
+    assert "candidates" in status
+    assert "{Color pallette.pdf}" in status
+
+
+def test_inject_attachment_markers_into_message_replaces_inline_names():
+    att = PendingAttachment(
+        local_id="a1",
+        path="/tmp/Color pallette.pdf",
+        name="Color pallette.pdf",
+        mime_type="application/pdf",
+        size_bytes=123,
+        sha256="abc",
+        state=AttachmentState.UPLOADED,
+        remote_file_id="f1",
+    )
+    out = _inject_attachment_markers_into_message(
+        "Can you see what's in Color pallette.pdf?",
+        [att],
+    )
+    assert "{Color pallette.pdf}" in out
+    assert "Color pallette.pdf?" not in out
+
+
+def test_format_composer_attachment_status_row_for_empty_list():
+    assert _format_composer_attachment_status_row([]) is None
+
+
+def test_chat_attachment_mime_allowlist(monkeypatch):
+    monkeypatch.setenv("OPENVEGAS_CHAT_ALLOWED_MIME", "image/*,application/pdf")
+    assert _is_chat_attachment_mime_allowed("image/png") is True
+    assert _is_chat_attachment_mime_allowed("application/pdf") is True
+    assert _is_chat_attachment_mime_allowed("text/plain") is False
+
+
+def test_preprocess_mcp_call_aliases_and_object_arguments():
+    prepared, err = _preprocess_tool_request_for_runtime(
+        tool_req={"tool_name": "mcp_call", "arguments": {"server": "srv-1", "name": "ping", "args": {"x": 1}}},
+        user_message="call MCP tool",
+        model_text="",
+        workspace_root=str(Path.cwd()),
+        tool_observations=[],
+    )
+    assert err is None
+    assert prepared is not None
+    assert prepared["tool_name"] == "mcp_call"
+    assert prepared["arguments"]["server_id"] == "srv-1"
+    assert prepared["arguments"]["tool"] == "ping"
+    assert prepared["arguments"]["arguments"] == {"x": 1}
+
+
+def test_format_composer_attachment_status_row_compacts_long_lists():
+    attachments = [
+        PendingAttachment(
+            local_id=f"a{i}",
+            path=f"/tmp/file-{i}.txt",
+            name=f"file-{i}.txt",
+            mime_type="text/plain",
+            size_bytes=10,
+            sha256=f"hash-{i}",
+            state=AttachmentState.ATTACHED,
+        )
+        for i in range(6)
+    ]
+    out = _format_composer_attachment_status_row(attachments, max_markers=4)
+    assert "📄 6 file(s)" in str(out)
+
+
+def test_format_composer_attachment_status_row_shows_unsupported_images(monkeypatch):
+    monkeypatch.setenv("OPENVEGAS_ENABLE_VISION", "0")
+    attachments = [
+        PendingAttachment(
+            local_id="a1",
+            path="/tmp/image.png",
+            name="image.png",
+            mime_type="image/png",
+            size_bytes=10,
+            sha256="hash-image",
+            state=AttachmentState.ATTACHED,
+        )
+    ]
+    out = _format_composer_attachment_status_row(
+        attachments,
+        provider="openai",
+        model="gpt-5",
+    )
+    assert "unsupported" in str(out)
+
+
+def test_preflight_drops_images_when_vision_unsupported(monkeypatch):
+    monkeypatch.setenv("OPENVEGAS_ENABLE_VISION", "0")
+    pending = [
+        PendingAttachment(
+            local_id="i1",
+            path="/tmp/shot.png",
+            name="shot.png",
+            mime_type="image/png",
+            size_bytes=10,
+            sha256="hash-i1",
+            state=AttachmentState.ATTACHED,
+        ),
+        PendingAttachment(
+            local_id="f1",
+            path="/tmp/report.pdf",
+            name="report.pdf",
+            mime_type="application/pdf",
+            size_bytes=10,
+            sha256="hash-f1",
+            state=AttachmentState.ATTACHED,
+        ),
+    ]
+    kept, dropped, blocked = _preflight_filter_attachments_for_capabilities(
+        pending,
+        provider="openai",
+        model="gpt-5",
+    )
+    assert dropped == 1
+    assert blocked is False
+    assert len(kept) == 1
+    assert kept[0].name == "report.pdf"
+
+
+def test_preflight_blocks_when_all_attachments_are_images(monkeypatch):
+    monkeypatch.setenv("OPENVEGAS_ENABLE_VISION", "0")
+    pending = [
+        PendingAttachment(
+            local_id="i1",
+            path="/tmp/shot.png",
+            name="shot.png",
+            mime_type="image/png",
+            size_bytes=10,
+            sha256="hash-i1",
+            state=AttachmentState.ATTACHED,
+        ),
+        PendingAttachment(
+            local_id="i2",
+            path="/tmp/photo.jpg",
+            name="photo.jpg",
+            mime_type="image/jpeg",
+            size_bytes=10,
+            sha256="hash-i2",
+            state=AttachmentState.ATTACHED,
+        ),
+    ]
+    kept, dropped, blocked = _preflight_filter_attachments_for_capabilities(
+        pending,
+        provider="openai",
+        model="gpt-5",
+    )
+    assert dropped == 2
+    assert blocked is True
+    assert kept == []
+
+
+def test_preflight_passes_all_when_vision_supported(monkeypatch):
+    monkeypatch.delenv("OPENVEGAS_ENABLE_VISION", raising=False)
+    pending = [
+        PendingAttachment(
+            local_id="i1",
+            path="/tmp/shot.png",
+            name="shot.png",
+            mime_type="image/png",
+            size_bytes=10,
+            sha256="hash-i1",
+            state=AttachmentState.ATTACHED,
+        ),
+        PendingAttachment(
+            local_id="f1",
+            path="/tmp/report.pdf",
+            name="report.pdf",
+            mime_type="application/pdf",
+            size_bytes=10,
+            sha256="hash-f1",
+            state=AttachmentState.ATTACHED,
+        ),
+    ]
+    kept, dropped, blocked = _preflight_filter_attachments_for_capabilities(
+        pending,
+        provider="openai",
+        model="gpt-5",
+    )
+    assert dropped == 0
+    assert blocked is False
+    assert len(kept) == 2
 
 
 def test_search_pattern_hint_prefers_quoted_token():
@@ -539,6 +943,29 @@ def test_has_patch_intent_detects_add_fix_and_implement_verbs():
     assert _has_patch_intent("implement divide in tests/fixtures/diff_accept_demo/calc.py")
 
 
+def test_has_patch_intent_defaults_true_for_file_targets_unless_read_only():
+    assert _has_patch_intent("tests/fixtures/diff_accept_demo/calc.py")
+    assert _has_patch_intent("please update tests/fixtures/diff_accept_demo/calc.py")
+    assert _has_patch_intent("show tests/fixtures/diff_accept_demo/calc.py") is False
+
+
+def test_deep_find_keyed_string_emits_metric_for_nested_fallback():
+    reset_metrics()
+    payload = {
+        "arguments": {
+            "path": {
+                "nested": {
+                    "filepath": "demo.py",
+                }
+            }
+        }
+    }
+    out = _deep_find_keyed_string(payload, ("filepath", "path"))
+    assert out == "demo.py"
+    snapshot = get_metrics_snapshot()
+    assert any(key.startswith("tool_argument_deep_fallback_total|") for key in snapshot.keys())
+
+
 def test_synth_write_does_not_trigger_without_explicit_file_target_or_read_observation():
     req = _synth_write_tool_req_from_model_edit(
         user_message="Edit this and add divide with guard",
@@ -571,7 +998,7 @@ def test_merge_chat_prompt_and_buffered_lines_keeps_real_multiline():
         "Line 1",
         ["Line 2", "Line 3"],
     )
-    assert merged == "Line 1\nLine 2\nLine 3"
+    assert merged == "Line 1 Line 2 Line 3"
 
 
 def test_maybe_prepend_synth_write_triggers_on_zero_tool_calls_with_code_block():
@@ -977,6 +1404,16 @@ def test_has_patch_intent_detects_create_file_intent():
     assert _is_file_create_intent(msg)
 
 
+def test_file_scan_cache_is_bounded(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(cli_mod, "_FILE_SCAN_CACHE_MAX_ENTRIES", 2)
+    cli_mod._FILE_SCAN_CACHE.clear()
+    cli_mod._set_file_scan_cache("a", 1.0, [Path("/tmp/a")])
+    cli_mod._set_file_scan_cache("b", 2.0, [Path("/tmp/b")])
+    cli_mod._set_file_scan_cache("c", 3.0, [Path("/tmp/c")])
+    assert len(cli_mod._FILE_SCAN_CACHE) == 2
+    assert "a" not in cli_mod._FILE_SCAN_CACHE
+
+
 def test_promote_tool_call_for_create_file_intent_upgrades_fs_read():
     name, args = _promote_tool_call_for_patch_intent(
         user_message="Create a temp file named .openvegas_audit.md in repo root with sections: Summary, Findings",
@@ -1086,6 +1523,27 @@ def test_preprocess_write_existing_file_requires_explicit_replace_intent(tmp_pat
     assert prepared is None
     assert err is not None
     assert err["error"] == "existing_file_replace_requires_explicit_intent"
+
+
+def test_preprocess_write_existing_file_allows_patch_file_with_wording(tmp_path: Path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    target = root / "a.md"
+    target.write_text("old\n", encoding="utf-8")
+    prepared, err = _preprocess_tool_request_for_runtime(
+        tool_req={"tool_name": "Write", "arguments": {"filepath": "a.md", "content": "new\n"}},
+        user_message="Patch `a.md` with final findings",
+        model_text="",
+        workspace_root=str(root),
+        tool_observations=[],
+    )
+    assert err is None
+    assert prepared is not None
+    assert prepared["tool_name"] == "fs_apply_patch"
+    assert "--- a.md" in prepared["arguments"]["patch"]
+    assert "+new" in prepared["arguments"]["patch"]
+    assert prepared["_write_meta"]["existing_file"] is True
+    assert prepared["_write_meta"]["explicit_replace_intent"] is True
 
 
 def test_preprocess_find_and_replace_generates_patch(tmp_path: Path):

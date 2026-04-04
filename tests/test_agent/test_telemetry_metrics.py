@@ -6,7 +6,13 @@ import pytest
 
 from openvegas.agent.tool_cas import claim_started_tx
 from openvegas.cli import _preprocess_tool_request_for_runtime
-from openvegas.telemetry import get_dashboard_slices, get_metrics_snapshot, reset_metrics
+from openvegas.telemetry import (
+    emit_run_metrics,
+    get_dashboard_slices,
+    get_metrics_snapshot,
+    get_run_metrics_summary,
+    reset_metrics,
+)
 from openvegas.telemetry import emit_metric
 
 
@@ -77,3 +83,67 @@ def test_dashboard_slices_include_topup_telemetry_groups():
     assert slices["topup_suggest_suppressed_total_by_reason"] == {"already_pending_topup": 2}
     assert slices["topup_checkout_created_total_by_mode"] == {"simulated": 1}
     assert slices["topup_status_transition_total"] == {"checkout_created->paid|simulated": 1}
+
+
+def test_emit_run_metrics_requires_canonical_fields():
+    reset_metrics()
+    with pytest.raises(ValueError):
+        emit_run_metrics("r-1", {"provider": "openai"})
+
+
+def test_emit_run_metrics_emits_counter():
+    reset_metrics()
+    emit_run_metrics(
+        "r-2",
+        {
+            "provider": "openai",
+            "model": "gpt-5.4",
+            "turn_latency_ms": 1200,
+            "input_tokens": 10,
+            "output_tokens": 20,
+            "tool_calls": 1,
+            "tool_failures": 0,
+            "fallbacks": 0,
+            "cost_usd": "0.0012",
+        },
+    )
+    snap = get_metrics_snapshot()
+    assert any(key.startswith("inference.run.metrics|") for key in snap)
+
+
+def test_run_metrics_summary_exposes_percentiles_and_rates():
+    reset_metrics()
+    emit_run_metrics(
+        "r-1",
+        {
+            "provider": "openai",
+            "model": "gpt-5.4",
+            "turn_latency_ms": 100,
+            "input_tokens": 10,
+            "output_tokens": 20,
+            "tool_calls": 1,
+            "tool_failures": 0,
+            "fallbacks": 1,
+            "cost_usd": 0.01,
+        },
+    )
+    emit_run_metrics(
+        "r-2",
+        {
+            "provider": "openai",
+            "model": "gpt-5.4",
+            "turn_latency_ms": 300,
+            "input_tokens": 11,
+            "output_tokens": 22,
+            "tool_calls": 2,
+            "tool_failures": 1,
+            "fallbacks": 0,
+            "cost_usd": 0.03,
+        },
+    )
+    summary = get_run_metrics_summary()
+    assert summary["run_count"] == 2
+    assert summary["turn_latency_ms_p50"] >= 100
+    assert summary["turn_latency_ms_p95"] >= summary["turn_latency_ms_p50"]
+    assert summary["tool_fail_rate"] > 0
+    assert summary["avg_cost_usd"] > 0

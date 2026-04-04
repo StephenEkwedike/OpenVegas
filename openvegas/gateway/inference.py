@@ -5,12 +5,15 @@ from __future__ import annotations
 import json
 import os
 import hashlib
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
 from typing import Any
+
+import httpx
 
 from openvegas.contracts.errors import APIErrorCode, ContractError
 from openvegas.gateway.catalog import ModelDisabled, ProviderCatalog
@@ -34,6 +37,7 @@ class InferenceRequest:
     max_tokens: int = 1024
     idempotency_key: str | None = None
     enable_tools: bool = False
+    enable_web_search: bool = False
 
 
 @dataclass
@@ -45,6 +49,9 @@ class InferenceResult:
     actual_cost_usd: Decimal = Decimal("0")
     provider_request_id: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
+    web_search_used: bool = False
+    web_search_sources: list[str] | None = None
+    web_search_retry_without_tool: bool = False
 
 
 class AIGateway:
@@ -627,7 +634,7 @@ class AIGateway:
         import openai
 
         client = openai.AsyncOpenAI(api_key=api_key)
-        if self._prefers_openai_responses_api(req.model):
+        if self._prefers_openai_responses_api(req.model) or self._messages_include_multimodal_content(req.messages):
             return await self._call_openai_responses(client=client, req=req)
         return await self._call_openai_chat_completions(client=client, req=req)
 
@@ -724,8 +731,9 @@ class AIGateway:
             "input": self._messages_to_openai_responses_input(req.messages),
             "max_output_tokens": req.max_tokens,
         }
+        tools: list[dict[str, Any]] = []
         if req.enable_tools:
-            kwargs["tools"] = [
+            tools.append(
                 {
                     "type": "function",
                     "name": "call_local_tool",
@@ -752,13 +760,35 @@ class AIGateway:
                         "required": ["tool_name", "arguments"],
                     },
                 }
-            ]
+            )
+        if req.enable_web_search and os.getenv("OPENVEGAS_OPENAI_WEB_SEARCH_ENABLED", "1").strip() in {"1", "true", "yes", "on"}:
+            tools.append({"type": "web_search_preview"})
+        if tools:
+            kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
 
+        web_search_retry_without_tool = False
         try:
             resp = await client.responses.create(**kwargs)
         except Exception as exc:
-            self._raise_openai_request_error(exc)
+            if req.enable_web_search and self._should_retry_without_web_tool(exc):
+                retry = dict(kwargs)
+                retry_tools = [
+                    t for t in list(retry.get("tools", []))
+                    if str((t or {}).get("type") or "").strip().lower() != "web_search_preview"
+                ]
+                if retry_tools:
+                    retry["tools"] = retry_tools
+                else:
+                    retry.pop("tools", None)
+                    retry.pop("tool_choice", None)
+                web_search_retry_without_tool = True
+                try:
+                    resp = await client.responses.create(**retry)
+                except Exception as retry_exc:
+                    self._raise_openai_request_error(retry_exc)
+            else:
+                self._raise_openai_request_error(exc)
         parsed_tool_calls: list[dict[str, Any]] = []
         if req.enable_tools:
             for item in list(getattr(resp, "output", []) or []):
@@ -774,12 +804,18 @@ class AIGateway:
                     parsed_tool_calls.append(parsed)
 
         usage = getattr(resp, "usage", None)
+        web_sources_max = self._web_sources_max_from_env()
+        web_search_sources = self._extract_openai_web_sources(resp, max_sources=web_sources_max)
+        web_search_used = self._response_includes_web_search(resp) or bool(web_search_sources)
         return InferenceResult(
             text=self._extract_openai_responses_text(resp),
             input_tokens=int(getattr(usage, "input_tokens", 0) or 0),
             output_tokens=int(getattr(usage, "output_tokens", 0) or 0),
             provider_request_id=getattr(resp, "id", None),
             tool_calls=parsed_tool_calls or None,
+            web_search_used=web_search_used,
+            web_search_sources=web_search_sources or None,
+            web_search_retry_without_tool=web_search_retry_without_tool,
         )
 
     @staticmethod
@@ -791,26 +827,134 @@ class AIGateway:
     @staticmethod
     def _messages_to_openai_responses_input(messages: list[dict]) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
+        allowed_roles = {"user", "assistant", "system", "developer"}
         for msg in messages:
-            role = str((msg or {}).get("role") or "user")
+            role = str((msg or {}).get("role") or "user").strip().lower()
+            if role not in allowed_roles:
+                continue
             content = (msg or {}).get("content", "")
-            text = ""
+            normalized_parts: list[dict[str, Any]] = []
+
+            def _append_text(raw: Any) -> None:
+                text = str(raw or "")
+                if not text.strip():
+                    return
+                normalized_parts.append(
+                    {
+                        "type": "output_text" if role == "assistant" else "input_text",
+                        "text": text,
+                    }
+                )
+
             if isinstance(content, str):
-                text = content
+                _append_text(content)
             elif isinstance(content, list):
-                parts: list[str] = []
                 for part in content:
                     if not isinstance(part, dict):
                         continue
-                    if str(part.get("type", "")).lower() in {"text", "input_text", "output_text"}:
-                        value = part.get("text", "")
-                        if value:
-                            parts.append(str(value))
-                text = "\n".join(parts)
+                    ptype = str(part.get("type", "")).strip().lower()
+                    if ptype in {"text", "input_text", "output_text"}:
+                        _append_text(part.get("text", ""))
+                        continue
+                    if ptype == "input_image" and role in {"user", "system", "developer"}:
+                        image_url = str(part.get("image_url") or "").strip()
+                        image_b64 = str(part.get("image_base64") or "").strip()
+                        if image_url:
+                            normalized_parts.append({"type": "input_image", "image_url": image_url})
+                            continue
+                        if image_b64:
+                            # OpenAI Responses expects input_image.image_url.
+                            mime_type = str(part.get("mime_type") or "").strip()
+                            mime_clean = str(mime_type.split(";", 1)[0] or "").strip() or "image/png"
+                            normalized_parts.append(
+                                {
+                                    "type": "input_image",
+                                    "image_url": f"data:{mime_clean};base64,{image_b64}",
+                                }
+                            )
             elif content is not None:
-                text = str(content)
-            out.append({"role": role, "content": [{"type": "input_text", "text": text}]})
+                _append_text(content)
+
+            if not normalized_parts:
+                continue
+            out.append({"role": role, "content": normalized_parts})
         return out
+
+    @staticmethod
+    def _messages_include_multimodal_content(messages: list[dict]) -> bool:
+        for msg in list(messages or []):
+            content = (msg or {}).get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                ptype = str(part.get("type", "")).strip().lower()
+                if ptype in {"input_image", "input_file"}:
+                    return True
+        return False
+
+    @staticmethod
+    def _response_includes_web_search(resp: Any) -> bool:
+        for item in list(getattr(resp, "output", []) or []):
+            item_type = str(getattr(item, "type", "") or "").strip().lower()
+            if item_type in {"web_search_call", "web_search_preview"}:
+                return True
+        return False
+
+    @staticmethod
+    def _web_sources_max_from_env() -> int:
+        raw = str(os.getenv("OPENVEGAS_CHAT_WEB_SEARCH_SOURCES_MAX", "8")).strip()
+        try:
+            return max(1, min(50, int(raw)))
+        except Exception:
+            return 8
+
+    @staticmethod
+    def _extract_openai_web_sources(resp: Any, *, max_sources: int = 8) -> list[str]:
+        urls: list[str] = []
+        seen: set[str] = set()
+
+        def _collect_url(candidate: Any) -> bool:
+            url = str(candidate or "").strip()
+            if not url or url in seen:
+                return False
+            seen.add(url)
+            urls.append(url)
+            return len(urls) >= max_sources
+
+        for item in list(getattr(resp, "output", []) or []):
+            for attr_name in ("url", "source", "source_url"):
+                if _collect_url(getattr(item, attr_name, "")):
+                    return urls
+            for part in list(getattr(item, "content", []) or []):
+                for attr_name in ("url", "source", "source_url"):
+                    if _collect_url(getattr(part, attr_name, "")):
+                        return urls
+                annotations = getattr(part, "annotations", None) or []
+                for ann in annotations:
+                    if _collect_url(getattr(ann, "url", "")):
+                        return urls
+        return urls
+
+    @staticmethod
+    def _should_retry_without_web_tool(exc: Exception) -> bool:
+        err_obj = getattr(exc, "error", None)
+        err: dict[str, Any] = err_obj if isinstance(err_obj, dict) else {}
+
+        code = str(getattr(exc, "code", "") or err.get("code", "")).strip().lower()
+        param = str(getattr(exc, "param", "") or err.get("param", "")).strip().lower()
+        message = str(getattr(exc, "message", "") or err.get("message", "") or exc).strip().lower()
+
+        if "web_search" in param:
+            return True
+        if code in {"invalid_tool", "unsupported_tool"} and "web_search" in message:
+            return True
+        if code == "invalid_request_error" and "web_search" in message:
+            return True
+        if "web_search_preview" in message and "unsupported" in message:
+            return True
+        return False
 
     @staticmethod
     def _parse_local_tool_call(*, function_name: str, raw_arguments: str) -> dict[str, Any] | None:
@@ -881,6 +1025,87 @@ class AIGateway:
             provider_request_id=getattr(resp, "response_id", None),
         )
 
+    async def generate_image(
+        self,
+        *,
+        account_id: str,
+        provider: str,
+        model: str,
+        prompt: str,
+        size: str = "1024x1024",
+    ) -> dict[str, Any]:
+        del account_id  # Reserved for future billing tie-in.
+        if str(provider or "").strip().lower() != "openai":
+            raise ContractError(APIErrorCode.INVALID_TRANSITION, "Image generation currently supports openai only.")
+        api_key = await self._resolve_provider_api_key("openai")
+        from openai import AsyncOpenAI
+
+        client = AsyncOpenAI(api_key=api_key)
+        started = time.perf_counter()
+        resp = await client.images.generate(
+            model=str(model or "gpt-image-1"),
+            prompt=str(prompt or ""),
+            size=str(size or "1024x1024"),
+        )
+        latency_ms = float((time.perf_counter() - started) * 1000.0)
+        item = (getattr(resp, "data", None) or [None])[0]
+        image_url = getattr(item, "url", None) if item is not None else None
+        image_b64 = getattr(item, "b64_json", None) if item is not None else None
+        revised_prompt = getattr(item, "revised_prompt", None) if item is not None else None
+        usage_obj = getattr(resp, "usage", None)
+        usage = {
+            "input_tokens": int(getattr(usage_obj, "input_tokens", 0) or 0),
+            "output_tokens": int(getattr(usage_obj, "output_tokens", 0) or 0),
+            "total_tokens": int(getattr(usage_obj, "total_tokens", 0) or 0),
+            "image_count": int(len(getattr(resp, "data", None) or [])),
+        }
+        provider_request_id = str(getattr(resp, "_request_id", "") or getattr(resp, "id", "") or "").strip() or None
+        return {
+            "provider": "openai",
+            "model": str(model or "gpt-image-1"),
+            "image_url": str(image_url or "") or None,
+            "image_base64": str(image_b64 or "") or None,
+            "revised_prompt": str(revised_prompt or "") or None,
+            "usage": usage,
+            "diagnostics": {
+                "provider_request_id": provider_request_id,
+                "latency_ms": latency_ms,
+                "size": str(size or "1024x1024"),
+            },
+        }
+
+    async def create_realtime_session(
+        self,
+        *,
+        provider: str,
+        model: str,
+        voice: str,
+    ) -> dict[str, Any]:
+        if str(provider or "").strip().lower() != "openai":
+            raise ContractError(APIErrorCode.INVALID_TRANSITION, "Realtime sessions currently support openai only.")
+        api_key = await self._resolve_provider_api_key("openai")
+        payload = {
+            "model": str(model or "gpt-4o-realtime-preview"),
+            "voice": str(voice or "alloy"),
+        }
+        timeout_sec = float(os.getenv("OPENVEGAS_REALTIME_TIMEOUT_SEC", "8"))
+        async with httpx.AsyncClient(timeout=max(1.0, timeout_sec)) as client:
+            resp = await client.post(
+                "https://api.openai.com/v1/realtime/sessions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+        if resp.status_code >= 400:
+            detail = resp.text
+            raise ContractError(APIErrorCode.PROVIDER_UNAVAILABLE, f"Realtime session failed: {detail[:500]}")
+        body = resp.json() if resp.content else {}
+        if not isinstance(body, dict):
+            body = {"raw": body}
+        return body
+
     async def _resolve_provider_api_key(self, provider: str) -> str:
         """Resolve provider credentials with registry-first precedence."""
         runtime_env = os.getenv("OPENVEGAS_RUNTIME_ENV", os.getenv("ENV", "local")).strip() or "local"
@@ -948,6 +1173,7 @@ class AIGateway:
                 "messages": req.messages,
                 "max_tokens": req.max_tokens,
                 "enable_tools": bool(req.enable_tools),
+                "enable_web_search": bool(req.enable_web_search),
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -966,6 +1192,9 @@ class AIGateway:
                 "reward_v": str(reward_v),
                 "provider_request_id": result.provider_request_id,
                 "tool_calls": result.tool_calls or [],
+                "web_search_used": bool(result.web_search_used),
+                "web_search_sources": list(result.web_search_sources or []),
+                "web_search_retry_without_tool": bool(result.web_search_retry_without_tool),
             },
             separators=(",", ":"),
             ensure_ascii=False,
@@ -988,6 +1217,9 @@ class AIGateway:
             actual_cost_usd=Decimal(str(payload.get("actual_cost_usd", "0"))).quantize(V_SCALE),
             provider_request_id=payload.get("provider_request_id"),
             tool_calls=payload.get("tool_calls") if isinstance(payload.get("tool_calls"), list) else None,
+            web_search_used=bool(payload.get("web_search_used", False)),
+            web_search_sources=payload.get("web_search_sources") if isinstance(payload.get("web_search_sources"), list) else None,
+            web_search_retry_without_tool=bool(payload.get("web_search_retry_without_tool", False)),
         )
 
     @staticmethod

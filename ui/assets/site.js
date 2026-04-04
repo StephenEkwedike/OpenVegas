@@ -16,6 +16,8 @@ const PROFILE_PREFS_ENDPOINT = "/ui/profile/preferences";
 let assetGuardInstalled = false;
 let storageListenerInstalled = false;
 let profileThemeSyncAttempted = false;
+let navAuthHydrationInFlight = false;
+let navAuthListenerBound = false;
 
 function normalizeTheme(value) {
   return String(value || "").toLowerCase() === "dark" ? "dark" : "light";
@@ -208,6 +210,75 @@ function buildNavAuthButtons(nextPath) {
   return wrap;
 }
 
+function shortenEmailForNav(email) {
+  const value = String(email || "").trim();
+  if (!value) return "unknown";
+  return value.length > 8 ? `${value.slice(0, 8)}...` : value;
+}
+
+function renderSignedOutNav(authNode, nextPath) {
+  const next = encodeURIComponent(nextPath || "/ui");
+  authNode.innerHTML = `
+    <a class="btn btn-primary" href="/ui/login?next=${next}">OpenVegas login</a>
+    <a class="btn" href="/ui/login?mode=signup&next=${next}">OpenVegas signup</a>
+  `;
+}
+
+function renderSignedInNav(authNode, summary) {
+  const email = shortenEmailForNav(summary?.email || "");
+  authNode.innerHTML = `
+    <span class="nav-auth-user text-mono-sm">Signed in as ${email}</span>
+    <button type="button" class="btn" data-ov-logout="1">Logout</button>
+  `;
+}
+
+async function hydrateNavAuthNode(authNode, nextPath) {
+  if (!authNode || navAuthHydrationInFlight) return;
+  navAuthHydrationInFlight = true;
+  try {
+    const auth = await import("/ui/assets/page-auth.js?v=20260330");
+    const summary = await auth.resolveSessionSummary({ refresh: true });
+    if (summary?.signed_in) {
+      renderSignedInNav(authNode, summary);
+      const logoutBtn = authNode.querySelector("[data-ov-logout='1']");
+      if (logoutBtn && logoutBtn.dataset.bound !== "1") {
+        logoutBtn.addEventListener("click", async () => {
+          await auth.logoutBrowserSession();
+          renderSignedOutNav(authNode, nextPath);
+          window.location.reload();
+        });
+        logoutBtn.dataset.bound = "1";
+      }
+    } else {
+      renderSignedOutNav(authNode, nextPath);
+    }
+    if (!navAuthListenerBound && typeof auth.subscribeAuthState === "function") {
+      auth.subscribeAuthState(async () => {
+        const latest = await auth.resolveSessionSummary({ refresh: false });
+        if (latest?.signed_in) {
+          renderSignedInNav(authNode, latest);
+          const logoutBtn = authNode.querySelector("[data-ov-logout='1']");
+          if (logoutBtn && logoutBtn.dataset.bound !== "1") {
+            logoutBtn.addEventListener("click", async () => {
+              await auth.logoutBrowserSession();
+              renderSignedOutNav(authNode, nextPath);
+              window.location.reload();
+            });
+            logoutBtn.dataset.bound = "1";
+          }
+        } else {
+          renderSignedOutNav(authNode, nextPath);
+        }
+      });
+      navAuthListenerBound = true;
+    }
+  } catch {
+    renderSignedOutNav(authNode, nextPath);
+  } finally {
+    navAuthHydrationInFlight = false;
+  }
+}
+
 function ensureNavRightCluster(nav) {
   const topNav = nav?.closest?.(".top-nav");
   if (!topNav) return null;
@@ -235,9 +306,8 @@ function renderNavAuthButtons(nav) {
   if (!existing) {
     rightCluster.appendChild(authNode);
   }
-  const links = authNode.querySelectorAll("a[href]");
-  if (links[0]) links[0].setAttribute("href", `/ui/login?next=${encodeURIComponent(nextPath)}`);
-  if (links[1]) links[1].setAttribute("href", `/ui/login?mode=signup&next=${encodeURIComponent(nextPath)}`);
+  renderSignedOutNav(authNode, nextPath);
+  void hydrateNavAuthNode(authNode, nextPath);
   const themeToggle = document.getElementById(THEME_TOGGLE_ID);
   if (themeToggle && authNode.nextElementSibling !== themeToggle) {
     rightCluster.insertBefore(authNode, themeToggle);

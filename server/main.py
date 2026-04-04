@@ -26,6 +26,12 @@ from server.routes import agent_orchestration as agent_orchestration_routes
 from server.routes import ide_bridge as ide_bridge_routes
 from server.routes import payments as payment_routes
 from server.routes import profile_preferences as profile_preferences_routes
+from server.routes import files as file_upload_routes
+from server.routes import mcp as mcp_routes
+from server.routes import code_exec as code_exec_routes
+from server.routes import image_gen as image_gen_routes
+from server.routes import realtime as realtime_routes
+from server.routes import ops_diagnostics as ops_diagnostics_routes
 from server.services.dependencies import (
     assert_db_ready,
     assert_redis_ready,
@@ -160,6 +166,12 @@ app.include_router(agent_orchestration_routes.router, tags=["agent-orchestration
 app.include_router(ide_bridge_routes.router, tags=["ide-bridge"])
 app.include_router(payment_routes.router, tags=["billing"])
 app.include_router(profile_preferences_routes.router, tags=["profile"])
+app.include_router(file_upload_routes.router, tags=["files"])
+app.include_router(mcp_routes.router, tags=["mcp"])
+app.include_router(code_exec_routes.router, tags=["code-exec"])
+app.include_router(image_gen_routes.router, tags=["image-gen"])
+app.include_router(realtime_routes.router, tags=["realtime"])
+app.include_router(ops_diagnostics_routes.router, tags=["ops"])
 
 
 @app.get("/health")

@@ -1400,6 +1400,16 @@ class AgentOrchestrationService:
                 if inferred:
                     args["command"] = inferred
             return args
+        if tool_name == ToolName.MCP_CALL.value:
+            _alias("server_id", ("server", "mcp_server_id"))
+            _alias("tool", ("tool_name", "name"))
+            if not isinstance(args.get("arguments"), dict):
+                nested = args.get("args")
+                if isinstance(nested, dict):
+                    args["arguments"] = nested
+                else:
+                    args["arguments"] = {}
+            return args
 
         return args
 
@@ -1411,6 +1421,8 @@ class AgentOrchestrationService:
             return 30
         if tool_name == ToolName.SHELL_RUN.value:
             return int(os.getenv("OPENVEGAS_TOOL_SHELL_TIMEOUT_SEC", "30"))
+        if tool_name == ToolName.MCP_CALL.value:
+            return int(os.getenv("OPENVEGAS_TOOL_MCP_TIMEOUT_SEC", "20"))
         return 30
 
     @staticmethod
@@ -1434,6 +1446,15 @@ class AgentOrchestrationService:
             return
         if tool_name == ToolName.SHELL_RUN.value:
             _require_string("command")
+            return
+        if tool_name == ToolName.MCP_CALL.value:
+            _require_string("server_id")
+            _require_string("tool")
+            if "arguments" in arguments and not isinstance(arguments.get("arguments"), dict):
+                raise ContractError(
+                    APIErrorCode.INVALID_TRANSITION,
+                    f"{tool_name} requires object field: arguments",
+                )
 
     async def _fetch_run(self, *, user_id: str, run_id: str) -> Any:
         row = await self.db.fetchrow(

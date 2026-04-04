@@ -55,7 +55,7 @@
         <p class="text-mono-sm page-lead">Track available funds, monitor usage, and act before work stalls.</p>
       </header>
 
-      <section id="authState" class="auth-state">
+      <section id="authState" class="auth-state" hidden>
         <div class="text-mono-xs">AUTH REQUIRED</div>
         <h2 class="card-title">Sign in to view billing data</h2>
         <p class="text-mono-sm">This page is available after authentication.</p>
@@ -88,6 +88,7 @@
               <div class="text-mono-xs">PAYMENTS</div>
               <h2 class="card-title">Funding flows built for AI usage.</h2>
               <p class="card-copy">OpenVegas makes it easier to add funds, review payment state, and move from one-off checkout events to a more continuous operating balance.</p>
+              <p class="text-mono-sm" style="margin:0 0 .9rem 0; color:var(--grey-light);">Final repayment is computed at settlement.</p>
               <div class="cta-row">
                 <button id="createCheckout" class="btn btn-primary" type="button">Top up now</button>
                 <button id="openSubscription" class="btn" type="button">Monthly subscription</button>
@@ -121,7 +122,7 @@
 
     <script type="module">
       import { renderTopNav, renderFounderLinks, installAssetGuard, byId } from "/ui/assets/site.js?v=20260330";
-      import { apiJson, authProbe, clearBrowserToken, getLoginHref, getSignupHref, showAuthedContent, showSignedOutPanel } from "/ui/assets/page-auth.js?v=20260330";
+      import { apiJson, bootstrapBrowserSession, clearBrowserToken, getBrowserToken, getLoginHref, getSignupHref, showAuthedContent, showSignedOutPanel } from "/ui/assets/page-auth.js?v=20260330";
 
       installAssetGuard();
       renderTopNav("siteNav");
@@ -195,7 +196,7 @@
 
       async function initAuthContent() {
         showAuthedContent();
-        await loadWallet();
+        const loadPromise = loadWallet();
 
         byId("refreshAll")?.addEventListener("click", async () => {
           await loadWallet();
@@ -222,12 +223,14 @@
         byId("openSubscription")?.addEventListener("click", () => {
           window.location.assign("/ui/subscription");
         });
+
+        await loadPromise;
       }
 
       (async () => {
         try {
-          const probe = await authProbe();
-          if (!probe.ok) {
+          await bootstrapBrowserSession();
+          if (!getBrowserToken()) {
             showSignedOutPanel();
           } else {
             await initAuthContent();

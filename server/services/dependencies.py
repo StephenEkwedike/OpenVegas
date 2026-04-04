@@ -20,8 +20,12 @@ from openvegas.payments.service import BillingService
 from openvegas.payments.stripe_gateway import StripeGateway
 from openvegas.telemetry import emit_metric
 from openvegas.wallet.ledger import WalletService
+from server.services.file_uploads import FileUploadService
 from server.services.llm_mode import LLMModeService
+from server.services.code_exec import CodeExecService
+from server.services.mcp_registry import MCPRegistryService
 from server.services.provider_threads import ProviderThreadService
+from server.services.realtime_relay import RealtimeRelayService
 
 
 class _Placeholder:
@@ -132,6 +136,7 @@ class FeatureFlags:
     mint_audit_enabled: bool
     context_enabled: bool
     trusted_proxy_headers_enabled: bool
+    files_enabled: bool
 
 
 _db: Any = _Placeholder()
@@ -150,6 +155,7 @@ def current_flags() -> FeatureFlags:
         mint_audit_enabled=env("MINT_AUDIT_ENABLED", "1") == "1",
         context_enabled=env("OPENVEGAS_CONTEXT_ENABLED", "0") == "1",
         trusted_proxy_headers_enabled=env("OPENVEGAS_TRUSTED_PROXY_HEADERS", "0") == "1",
+        files_enabled=env("OPENVEGAS_ENABLE_FILES", "0") == "1",
     )
 
 
@@ -229,6 +235,7 @@ async def assert_schema_compatible(db: Any, flags: FeatureFlags) -> None:
     await require_migration_min(db, "032_wallet_bootstrap_and_continuation")
     await require_migration_min(db, "033_avatar_preferences")
     await require_migration_min(db, "036_profile_theme_preferences")
+    await require_migration_min(db, "037_chat_file_uploads")
 
     await require_tables(
         db,
@@ -248,6 +255,7 @@ async def assert_schema_compatible(db: Any, flags: FeatureFlags) -> None:
             "user_continuation_credit",
             "continuation_claim_idempotency",
             "continuation_accounting_events",
+            "chat_file_uploads",
         },
     )
     await require_columns(
@@ -266,9 +274,12 @@ async def assert_schema_compatible(db: Any, flags: FeatureFlags) -> None:
             ("profiles", "avatar_id"),
             ("profiles", "avatar_palette"),
             ("profiles", "dealer_skin_id"),
-            ("profiles", "theme"),
-        },
-    )
+                ("profiles", "theme"),
+                ("chat_file_uploads", "content_bytes"),
+                ("chat_file_uploads", "status"),
+                ("chat_file_uploads", "expires_at"),
+            },
+        )
 
     if flags.store_enabled:
         await require_migration_min(db, "009_inference_grant_usages_and_preauth")
@@ -432,6 +443,25 @@ def get_llm_mode_service() -> LLMModeService:
 
 def get_provider_thread_service() -> ProviderThreadService:
     return ProviderThreadService(get_db())
+
+
+def get_file_upload_service() -> FileUploadService:
+    return FileUploadService(get_db())
+
+
+@lru_cache(maxsize=1)
+def get_mcp_registry_service() -> MCPRegistryService:
+    return MCPRegistryService()
+
+
+@lru_cache(maxsize=1)
+def get_code_exec_service() -> CodeExecService:
+    return CodeExecService()
+
+
+@lru_cache(maxsize=1)
+def get_realtime_relay_service() -> RealtimeRelayService:
+    return RealtimeRelayService()
 
 
 def get_mint_service() -> MintService:

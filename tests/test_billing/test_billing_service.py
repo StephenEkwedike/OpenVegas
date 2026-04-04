@@ -60,12 +60,20 @@ class _FakeTx:
             return self.mode.get("existing_event")
         if "SELECT *" in query and "WHERE stripe_checkout_session_id" in query:
             return self.mode.get("checkout_row")
+        if "SELECT *" in query and "WHERE id = $1" in query and "FOR UPDATE" in query:
+            return self.mode.get("topup_row_for_update")
+        if "SELECT * FROM fiat_topups WHERE id = $1" in query:
+            return self.mode.get("topup_row_latest")
+        if "WHERE user_id = $1 AND idempotency_key = $2" in query:
+            return self.mode.get("existing_topup_by_idem")
         if "WHERE user_id = $1" in query and "status IN ('created', 'checkout_created')" in query:
             return self.mode.get("pending_row")
         if "UPDATE fiat_topups" in query and "RETURNING id, user_id, v_credit, status" in query:
             return self.mode.get("paid_update_row")
         if "SELECT org_id FROM org_sponsorships WHERE stripe_subscription_id" in query:
             return self.mode.get("org_from_subscription")
+        if "FROM user_subscriptions" in query and "stripe_customer_id" in query:
+            return self.mode.get("subscription_customer_row")
         if "SELECT id" in query and "WHERE stripe_payment_intent_id" in query:
             return self.mode.get("provider_conflict_row")
         return None
@@ -403,6 +411,82 @@ async def test_create_user_subscription_checkout_uses_user_endpoint_flow(monkeyp
     assert gateway.calls[0]["user_id"] == "u-sub-1"
     assert gateway.calls[0]["monthly_amount_usd"] == Decimal("20.00")
     assert any("INSERT INTO user_subscriptions" in q for q, _ in tx.execute_calls)
+
+
+@pytest.mark.asyncio
+async def test_get_saved_payment_method_status_returns_card_details():
+    tx = _FakeTx()
+    tx.mode["subscription_customer_row"] = {"stripe_customer_id": "cus_saved_1"}
+    gateway = types.SimpleNamespace(
+        mode="stripe",
+        retrieve_customer=lambda **kwargs: {"id": kwargs["customer_id"], "invoice_settings": {"default_payment_method": "pm_saved_1"}},
+        retrieve_payment_method=lambda **kwargs: {
+            "id": kwargs["payment_method_id"],
+            "card": {"brand": "visa", "last4": "4242", "exp_month": 12, "exp_year": 2030},
+        },
+        list_customer_card_payment_methods=lambda **kwargs: {"data": []},
+    )
+    svc = BillingService(_FakeDB(tx=tx), _DummyWallet(), gateway)
+
+    out = await svc.get_saved_payment_method_status(user_id="u1")
+
+    assert out["available"] is True
+    assert out["payment_method_id"] == "pm_saved_1"
+    assert out["brand"] == "visa"
+    assert out["last4"] == "4242"
+
+
+@pytest.mark.asyncio
+async def test_charge_saved_topup_settles_paid_topup(monkeypatch):
+    monkeypatch.setenv("TOPUP_MIN_USD", "1")
+    monkeypatch.setenv("TOPUP_MAX_USD", "500")
+    monkeypatch.setenv("V_PER_USD", "100")
+    wallet = _DummyWallet()
+    tx = _FakeTx()
+    tx.mode["subscription_customer_row"] = {"stripe_customer_id": "cus_saved_1"}
+    tx.mode["topup_row_for_update"] = {
+        "id": "top_saved_1",
+        "user_id": "u1",
+        "v_credit": "1200.000000",
+        "status": "created",
+        "mode": "stripe",
+        "expires_at": None,
+    }
+    tx.mode["paid_update_row"] = {"id": "top_saved_1", "user_id": "u1", "v_credit": "1200.000000", "status": "paid"}
+    tx.mode["topup_row_latest"] = {
+        "id": "top_saved_1",
+        "user_id": "u1",
+        "status": "paid",
+        "mode": "stripe",
+        "amount_usd": Decimal("12.00"),
+        "v_credit": Decimal("1200.000000"),
+        "stripe_checkout_session_id": None,
+        "stripe_checkout_url": None,
+        "stripe_payment_intent_id": "pi_saved_1",
+        "updated_at": datetime.now(timezone.utc),
+    }
+
+    gateway = types.SimpleNamespace(
+        mode="stripe",
+        retrieve_customer=lambda **kwargs: {"id": kwargs["customer_id"], "invoice_settings": {"default_payment_method": "pm_saved_1"}},
+        retrieve_payment_method=lambda **kwargs: {
+            "id": kwargs["payment_method_id"],
+            "card": {"brand": "visa", "last4": "4242", "exp_month": 12, "exp_year": 2030},
+        },
+        list_customer_card_payment_methods=lambda **kwargs: {"data": []},
+        create_saved_card_topup_payment_intent=lambda **kwargs: {"id": "pi_saved_1", "status": "succeeded"},
+    )
+    svc = BillingService(_FakeDB(tx=tx), wallet, gateway)
+
+    out = await svc.charge_saved_topup(
+        user_id="u1",
+        amount_usd=Decimal("12.00"),
+        idempotency_key="idem-saved-1",
+    )
+
+    assert out["status"] == "paid"
+    assert wallet.calls
+    assert wallet.calls[0][0] == "user:u1"
 
 
 @pytest.mark.asyncio

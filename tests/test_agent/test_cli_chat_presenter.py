@@ -28,6 +28,45 @@ def test_render_assistant_uses_bullet_prefix_and_plain_text():
     assert "• ### Header **bold** `code`" in out
 
 
+def test_render_assistant_formats_markdown_table():
+    console = Console(record=True, width=120, force_terminal=False)
+    render_assistant(
+        console,
+        "\n".join(
+            [
+                "Top matches:",
+                "| Address | Price | Beds | Baths |",
+                "|---|---:|---:|---:|",
+                "| 11711 W Rydalwater Ln | $322,900 | 3 | 2 |",
+                "| 5806 Breezewood Dr | $374,900 | 3 | 1 |",
+            ]
+        ),
+    )
+    out = console.export_text()
+    assert "Top matches:" in out
+    assert "Address" in out
+    assert "Price" in out
+    assert "11711 W Rydalwater Ln" in out
+
+
+def test_render_assistant_formats_markdown_table_narrow_fallback():
+    console = Console(record=True, width=70, force_terminal=False)
+    render_assistant(
+        console,
+        "\n".join(
+            [
+                "Top matches:",
+                "| Address | Price | Beds | Baths |",
+                "|---|---:|---:|---:|",
+                "| 11711 W Rydalwater Ln | $322,900 | 3 | 2 |",
+            ]
+        ),
+    )
+    out = console.export_text()
+    assert "Table (compact view)" in out
+    assert "Address=11711 W Rydalwater Ln" in out
+
+
 def test_render_status_bar_compact_line():
     console = Console(record=True, width=80, force_terminal=False)
     render_status_bar(console, "openai/gpt-4o-mini", "cost 0.01 $V", "~/repo")

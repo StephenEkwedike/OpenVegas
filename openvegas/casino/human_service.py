@@ -717,9 +717,27 @@ class HumanCasinoService:
             "expires_at": row["expires_at"].isoformat() if row["expires_at"] else None,
         }
 
-    def _autoplay_actions(self, game_code: str, state: dict) -> list[tuple[str, dict]]:
+    def _autoplay_actions(
+        self,
+        game_code: str,
+        state: dict,
+        *,
+        preferred_action: str | None = None,
+        preferred_payload: dict | None = None,
+    ) -> list[tuple[str, dict]]:
         if game_code == "roulette":
-            return [("bet_red", {}), ("spin", {})]
+            allowed = {"bet_red", "bet_black", "bet_odd", "bet_even", "bet_number"}
+            action = "bet_red"
+            payload: dict = {}
+            if preferred_action in allowed:
+                action = str(preferred_action)
+                if action == "bet_number":
+                    raw_number = ((preferred_payload or {}).get("number", 7))
+                    try:
+                        payload["number"] = max(0, min(36, int(raw_number)))
+                    except Exception:
+                        payload["number"] = 7
+            return [(action, payload), ("spin", {})]
         if game_code == "slots":
             return [("spin", {})]
         if game_code == "baccarat":
@@ -754,6 +772,8 @@ class HumanCasinoService:
         game_code: str,
         wager_v: Decimal,
         idempotency_key: str,
+        preferred_action: str | None = None,
+        preferred_payload: dict | None = None,
     ) -> SerializedHTTPResponse:
         if game_code not in HUMAN_CASINO_GAMES:
             raise ValueError(f"Unknown game: {game_code}")
@@ -762,6 +782,8 @@ class HumanCasinoService:
             "session_id": session_id,
             "game_code": game_code,
             "wager_v": str(Decimal(str(wager_v))),
+            "preferred_action": preferred_action or "",
+            "preferred_payload": preferred_payload or {},
         }
         payload_hash = _canonical_hash(payload)
         scope = f"human_demo_autoplay:{session_id}:{game_code}"
@@ -810,7 +832,12 @@ class HumanCasinoService:
                 nonce = attempt * 1000
                 state = game.initial_state(rng, client_seed, nonce)
                 state["_server_seed"] = rng.server_seed
-                moves = self._autoplay_actions(game_code, _parse_state(state))
+                moves = self._autoplay_actions(
+                    game_code,
+                    _parse_state(state),
+                    preferred_action=preferred_action,
+                    preferred_payload=preferred_payload or {},
+                )
                 working = _parse_state(state)
                 move_nonce = nonce + 100
                 for action, move_payload in moves:

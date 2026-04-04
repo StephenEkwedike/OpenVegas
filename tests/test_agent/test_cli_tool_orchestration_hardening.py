@@ -66,7 +66,8 @@ def test_write_patch_failure_has_regen_retry_path():
     assert "regen_args = dict(regen.get(\"arguments\", {}))" in src
     assert "_validate_patch_recovery_scope(" in src
     assert "patch_recovery_scope_expansion" in src
-    assert "if await _finalize_or_continue_with_intercept(" in src
+    assert "loop_action = await _finalize_or_continue_with_intercept(" in src
+    assert "LoopAction.FINALIZED" in src
 
 
 def test_fs_apply_patch_patch_recovery_from_alias_payload():
@@ -238,3 +239,107 @@ def test_bootstrap_write_fallback_is_narrow_and_present():
     assert "_attempt_bootstrap_write_fallback(" in src
     assert "_is_artifact_whole_file_fallback_target(" in src
     assert "bootstrap_whole_file" in src
+
+
+def test_no_tool_branch_exits_without_second_finalize_when_completion_inactive():
+    src = Path("openvegas/cli.py").read_text(encoding="utf-8")
+    assert "if step == 0 and not completion_criteria.active and not edit_intent and not tool_observations:" in src
+    assert "return True" in src
+    assert "finalizing/continuing with text-only answer after synth/fallback checks" in src
+
+
+def test_inline_attachment_warning_only_for_non_workspace_turns():
+    src = Path("openvegas/cli.py").read_text(encoding="utf-8")
+    assert "turn_is_workspace_intent = _has_workspace_tooling_intent(message)" in src
+    assert "_detect_auto_attach_paths(" in src
+    assert "if not pending_attachments and not turn_is_workspace_intent:" in src
+
+
+def test_direct_one_shot_renders_warning_and_web_diagnostics():
+    src = Path("openvegas/cli.py").read_text(encoding="utf-8")
+    assert "warning_text = str(one_shot.get(\"warning\") or \"\").strip()" in src
+    assert "ws_req = bool(one_shot.get(\"web_search_requested\", ws_req_default))" in src
+
+
+def test_chat_attachment_commands_and_transcript_export_present():
+    src = Path("openvegas/cli.py").read_text(encoding="utf-8")
+    assert "if cmd == \"/attach\":" in src
+    assert "if cmd == \"/detach\":" in src
+    assert "if cmd == \"/clear-attachments\":" in src
+    assert "if cmd == \"/cancel-uploads\":" in src
+    assert "if cmd == \"/retry-failed\":" in src
+    assert "if cmd == \"/export-transcript\":" in src
+    assert "chat_transcript.append(" in src
+
+
+def test_chat_legend_command_present():
+    src = Path("openvegas/cli.py").read_text(encoding="utf-8")
+    assert "/legend - show icon/status legend" in src
+    assert "if cmd == \"/legend\":" in src
+    assert "web: requested=" in src
+    assert "_should_enable_web_search_for_turn(" in src
+
+
+def test_pre_dispatch_image_input_capability_block_present():
+    src = Path("openvegas/cli.py").read_text(encoding="utf-8")
+    assert "has_image_attachment = any(" in src
+    assert "resolve_capability(current_provider, current_model, \"image_input\")" in src
+    assert "image input unavailable" in src
+
+
+def test_context_disabled_warning_is_one_time_and_explicit():
+    src = Path("openvegas/cli.py").read_text(encoding="utf-8")
+    assert "context_warning_emitted" in src
+    assert "thread_status" in src
+    assert "context_enabled" in src
+    assert "server context is disabled" in src
+
+
+def test_chat_web_command_and_status_diagnostics_present():
+    src = Path("openvegas/cli.py").read_text(encoding="utf-8")
+    assert "/web <on|off>" in src
+    assert "if cmd == \"/web\":" in src
+    assert "Web Search Requested" in src
+    assert "Web Search Effective" in src
+
+
+def test_chat_web_capability_unavailable_pre_dispatch_message_present():
+    src = Path("openvegas/cli.py").read_text(encoding="utf-8")
+    assert "Web search is not available for this provider/model." in src
+    assert "resolve_capability(" in src
+    assert "enable_web_search=web_search_effective_turn" in src
+
+
+def test_chat_scrape_request_rewrite_and_refusal_retry_present():
+    src = Path("openvegas/cli.py").read_text(encoding="utf-8")
+    assert "def _is_scrape_request(" in src
+    assert "def _is_scrape_refusal_text(" in src
+    assert "def _rewrite_lookup_request_for_safe_web_search(" in src
+    assert "web_search_preview (live web lookup)" in src
+    assert "chat-ask-retry-" in src
+
+
+def test_chat_attachment_commands_and_lifecycle_present():
+    src = Path("openvegas/cli.py").read_text(encoding="utf-8")
+    assert "class AttachmentState" in src
+    assert "class PendingAttachment" in src
+    assert "if cmd == \"/attach\":" in src
+    assert "if cmd == \"/detach\":" in src
+    assert "if cmd == \"/clear-attachments\":" in src
+    assert "if cmd == \"/cancel-uploads\":" in src
+    assert "if cmd == \"/retry-failed\":" in src
+    assert "if cmd == \"/attachments\":" in src
+    assert "upload_started" in src
+    assert "upload_succeeded" in src
+    assert "client.upload_init(" in src
+    assert "client.upload_complete(" in src
+    assert "uploaded_attachment_cache[file_key]" in src
+    assert "attachments=attachment_file_ids_for_turn" in src
+    assert "Detected file names in your prompt but they are not attached" in src
+
+
+def test_chat_non_workspace_queries_use_direct_no_tool_path():
+    src = Path("openvegas/cli.py").read_text(encoding="utf-8")
+    assert "def _has_workspace_tooling_intent(" in src
+    assert "idempotency_key=f\"chat-direct-" in src
+    assert "enable_tools=False" in src
