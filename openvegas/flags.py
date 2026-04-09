@@ -19,4 +19,5 @@ def features() -> dict[str, bool]:
         "code_exec": flag("OPENVEGAS_ENABLE_CODE_EXEC", "0"),
         "image_gen": flag("OPENVEGAS_ENABLE_IMAGE_GEN", "0"),
         "realtime_voice": flag("OPENVEGAS_ENABLE_REALTIME_VOICE", "0"),
+        "speech_to_text": flag("OPENVEGAS_ENABLE_SPEECH_TO_TEXT", "1"),
     }

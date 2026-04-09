@@ -78,12 +78,12 @@ class FileUploadService:
         raw = str(
             os.getenv(
                 "OPENVEGAS_FILE_UPLOAD_ALLOWED_MIME",
-                "text/*,image/*,application/pdf,application/json,application/xml,application/octet-stream",
+                "text/*,image/*,audio/*,application/pdf,application/json,application/xml,application/octet-stream",
             )
         ).strip()
         tokens = [part.strip().lower() for part in raw.split(",") if part.strip()]
         if not tokens:
-            return ("text/*", "image/*", "application/pdf", "application/octet-stream")
+            return ("text/*", "image/*", "audio/*", "application/pdf", "application/octet-stream")
         return tuple(tokens)
 
     @staticmethod

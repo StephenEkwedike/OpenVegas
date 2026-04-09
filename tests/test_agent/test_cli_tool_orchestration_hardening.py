@@ -297,7 +297,7 @@ def test_context_disabled_warning_is_one_time_and_explicit():
 
 def test_chat_web_command_and_status_diagnostics_present():
     src = Path("openvegas/cli.py").read_text(encoding="utf-8")
-    assert "/web <on|off>" in src
+    assert "/web - show effective web search status (always on)" in src
     assert "if cmd == \"/web\":" in src
     assert "Web Search Requested" in src
     assert "Web Search Effective" in src
@@ -305,7 +305,7 @@ def test_chat_web_command_and_status_diagnostics_present():
 
 def test_chat_web_capability_unavailable_pre_dispatch_message_present():
     src = Path("openvegas/cli.py").read_text(encoding="utf-8")
-    assert "Web search is not available for this provider/model." in src
+    assert "Web search is always on in chat." in src
     assert "resolve_capability(" in src
     assert "enable_web_search=web_search_effective_turn" in src
 

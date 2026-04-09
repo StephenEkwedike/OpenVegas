@@ -7,14 +7,20 @@ import pytest
 from openvegas.agent.tool_cas import claim_started_tx
 from openvegas.cli import _preprocess_tool_request_for_runtime
 from openvegas.telemetry import (
+    ack_alert,
     emit_run_metrics,
+    get_alert_audit,
     get_dashboard_slices,
+    get_alert_workflow_state,
     get_metrics_snapshot,
     get_ops_alerts,
     get_http_request_summary,
+    get_run_metric_by_id,
+    get_run_metrics_trend,
     record_http_request,
     get_run_metrics_summary,
     reset_metrics,
+    silence_alert,
 )
 from openvegas.telemetry import emit_metric
 
@@ -186,3 +192,41 @@ def test_ops_alerts_include_http_upload_auth_and_payment_rates(monkeypatch):
 
     http_summary = get_http_request_summary()
     assert float(http_summary["http_5xx_rate"]) > 0.0
+
+
+def test_ops_alert_workflow_ack_and_silence_state():
+    reset_metrics()
+    ack = ack_alert("turn_latency_ms_p95")
+    assert ack["acked"] is True
+    silenced = silence_alert("turn_latency_ms_p95", duration_sec=120, reason="maint")
+    assert silenced["silenced"] is True
+    state = get_alert_workflow_state()
+    assert "turn_latency_ms_p95" in set(state.get("acked", []))
+    assert "turn_latency_ms_p95" in dict(state.get("silenced", {}))
+    audit_rows = get_alert_audit(limit=10)
+    assert audit_rows
+    assert {str(row.get("action")) for row in audit_rows} >= {"ack", "silence"}
+
+
+def test_run_metric_trend_and_drilldown():
+    reset_metrics()
+    emit_run_metrics(
+        "run-trend-1",
+        {
+            "provider": "openai",
+            "model": "gpt-5",
+            "turn_latency_ms": 88.0,
+            "input_tokens": 10,
+            "output_tokens": 15,
+            "tool_calls": 1,
+            "tool_failures": 0,
+            "fallbacks": 0,
+            "cost_usd": 0.02,
+        },
+    )
+    trend = get_run_metrics_trend(limit=5)
+    assert trend
+    assert trend[0]["run_id"] == "run-trend-1"
+    row = get_run_metric_by_id("run-trend-1")
+    assert row is not None
+    assert row["run_id"] == "run-trend-1"

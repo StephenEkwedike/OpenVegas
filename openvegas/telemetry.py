@@ -7,6 +7,7 @@ deterministic counter surface.
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import datetime, timezone
 import json
 import os
 from statistics import median
@@ -21,6 +22,28 @@ _RUN_METRICS: list[dict[str, object]] = []
 _RUN_METRICS_MAX = 2000
 _HTTP_REQUESTS: list[dict[str, object]] = []
 _HTTP_REQUESTS_MAX = 5000
+_ALERT_ACKED: set[str] = set()
+_ALERT_SILENCED_UNTIL: dict[str, float] = {}
+_ALERT_SILENCE_REASON: dict[str, str] = {}
+_ALERT_AUDIT: list[dict[str, object]] = []
+_ALERT_AUDIT_MAX = 2000
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _append_alert_audit(*, action: str, metric: str, detail: str = "") -> None:
+    row = {
+        "ts": _utc_now_iso(),
+        "action": str(action or ""),
+        "metric": str(metric or ""),
+        "detail": str(detail or ""),
+    }
+    with _LOCK:
+        _ALERT_AUDIT.append(row)
+        if len(_ALERT_AUDIT) > _ALERT_AUDIT_MAX:
+            del _ALERT_AUDIT[0 : len(_ALERT_AUDIT) - _ALERT_AUDIT_MAX]
 
 
 def _key(name: str, tags: dict[str, object] | None = None) -> str:
@@ -80,7 +103,13 @@ def emit_run_metrics(run_id: str, data: dict[str, object]) -> None:
     tags.update({k: data[k] for k in required})
     emit_metric("inference.run.metrics", tags)
     with _LOCK:
-        _RUN_METRICS.append({"run_id": str(run_id or ""), **{k: data[k] for k in required}})
+        _RUN_METRICS.append(
+            {
+                "run_id": str(run_id or ""),
+                "recorded_at": _utc_now_iso(),
+                **{k: data[k] for k in required},
+            }
+        )
         if len(_RUN_METRICS) > _RUN_METRICS_MAX:
             del _RUN_METRICS[0 : len(_RUN_METRICS) - _RUN_METRICS_MAX]
 
@@ -256,6 +285,102 @@ def get_recent_run_metrics(*, limit: int = 25) -> list[dict[str, object]]:
     return recent
 
 
+def get_run_metrics_trend(*, limit: int = 100) -> list[dict[str, object]]:
+    """Return bounded run trend rows (newest-first) for dashboards."""
+    max_limit = max(1, min(500, int(limit)))
+    with _LOCK:
+        recent = list(_RUN_METRICS[-max_limit:])
+    recent.reverse()
+    trend: list[dict[str, object]] = []
+    for row in recent:
+        trend.append(
+            {
+                "run_id": str(row.get("run_id", "")),
+                "recorded_at": str(row.get("recorded_at", "")),
+                "provider": str(row.get("provider", "")),
+                "model": str(row.get("model", "")),
+                "turn_latency_ms": float(row.get("turn_latency_ms", 0.0) or 0.0),
+                "tool_failures": int(row.get("tool_failures", 0) or 0),
+                "fallbacks": int(row.get("fallbacks", 0) or 0),
+                "cost_usd": float(row.get("cost_usd", 0.0) or 0.0),
+            }
+        )
+    return trend
+
+
+def get_run_metric_by_id(run_id: str) -> dict[str, object] | None:
+    token = str(run_id or "").strip()
+    if not token:
+        return None
+    with _LOCK:
+        for row in reversed(_RUN_METRICS):
+            if str(row.get("run_id", "")) == token:
+                return dict(row)
+    return None
+
+
+def ack_alert(metric: str) -> dict[str, object]:
+    token = str(metric or "").strip()
+    if not token:
+        raise ValueError("metric_required")
+    with _LOCK:
+        _ALERT_ACKED.add(token)
+    _append_alert_audit(action="ack", metric=token, detail="manual_ack")
+    emit_metric("ops_alert_ack_total", {"metric": token})
+    return {"metric": token, "acked": True}
+
+
+def silence_alert(metric: str, *, duration_sec: int, reason: str = "") -> dict[str, object]:
+    import time
+
+    token = str(metric or "").strip()
+    if not token:
+        raise ValueError("metric_required")
+    ttl = max(30, min(7 * 24 * 3600, int(duration_sec)))
+    until_epoch = time.time() + float(ttl)
+    with _LOCK:
+        _ALERT_SILENCED_UNTIL[token] = float(until_epoch)
+        _ALERT_SILENCE_REASON[token] = str(reason or "").strip()
+    _append_alert_audit(action="silence", metric=token, detail=f"duration_sec={ttl};reason={str(reason or '').strip()}")
+    emit_metric("ops_alert_silence_total", {"metric": token})
+    return {
+        "metric": token,
+        "silenced": True,
+        "duration_sec": ttl,
+        "silenced_until_epoch": until_epoch,
+        "reason": str(reason or "").strip(),
+    }
+
+
+def get_alert_workflow_state() -> dict[str, object]:
+    import time
+
+    now = time.time()
+    with _LOCK:
+        # Drop expired silence entries lazily.
+        expired = [k for k, until in _ALERT_SILENCED_UNTIL.items() if float(until) <= now]
+        for key in expired:
+            _ALERT_SILENCED_UNTIL.pop(key, None)
+            _ALERT_SILENCE_REASON.pop(key, None)
+        silenced = {
+            k: {
+                "silenced_until_epoch": float(v),
+                "reason": str(_ALERT_SILENCE_REASON.get(k, "")),
+            }
+            for k, v in _ALERT_SILENCED_UNTIL.items()
+        }
+        acked = sorted(_ALERT_ACKED)
+    return {"acked": acked, "silenced": silenced}
+
+
+def get_alert_audit(*, limit: int = 100) -> list[dict[str, object]]:
+    max_limit = max(1, min(500, int(limit)))
+    with _LOCK:
+        rows = list(_ALERT_AUDIT[-max_limit:])
+    rows.reverse()
+    return rows
+
+
 def _env_float(name: str, default: float, *, min_value: float = 0.0, max_value: float = 1_000_000.0) -> float:
     raw = str(os.getenv(name, str(default))).strip()
     try:
@@ -285,6 +410,9 @@ def get_ops_alerts() -> dict[str, object]:
     http_summary = get_http_request_summary()
     thresholds = get_alert_thresholds()
     alerts: list[dict[str, object]] = []
+    workflow = get_alert_workflow_state()
+    acked_metrics = set(str(x) for x in (workflow.get("acked") or []))
+    silenced_map = dict(workflow.get("silenced") or {})
 
     upload_success = _sum_counter(snapshot, "file_upload_request_total", match_tags={"outcome": "success"})
     upload_failure = _sum_counter(snapshot, "file_upload_request_total", match_tags={"outcome": "failure"})
@@ -315,13 +443,22 @@ def get_ops_alerts() -> dict[str, object]:
         threshold = float(thresholds.get(metric, 0.0))
         fired = bool(observed > threshold)
         if fired:
+            is_silenced = metric in silenced_map
+            is_acked = metric in acked_metrics
             alerts.append(
                 {
                     "metric": metric,
                     "severity": severity,
                     "observed": observed,
                     "threshold": threshold,
-                    "status": "fired",
+                    "status": "silenced" if is_silenced else "fired",
+                    "acked": is_acked,
+                    "silenced_until_epoch": (
+                        float((silenced_map.get(metric) or {}).get("silenced_until_epoch", 0.0))
+                        if is_silenced
+                        else None
+                    ),
+                    "silence_reason": str((silenced_map.get(metric) or {}).get("reason", "")) if is_silenced else "",
                 }
             )
 
@@ -341,6 +478,7 @@ def get_ops_alerts() -> dict[str, object]:
         "run_summary": summary,
         "http_summary": http_summary,
         "derived": derived,
+        "workflow": workflow,
     }
 
 
@@ -375,6 +513,10 @@ def reset_metrics() -> None:
         _EMITTED_ONCE_KEYS.clear()
         _RUN_METRICS.clear()
         _HTTP_REQUESTS.clear()
+        _ALERT_ACKED.clear()
+        _ALERT_SILENCED_UNTIL.clear()
+        _ALERT_SILENCE_REASON.clear()
+        _ALERT_AUDIT.clear()
 
 
 def _reset_emit_once_cache_for_tests() -> None:

@@ -95,7 +95,28 @@ def _pad_or_crop_line(value: Text, width: int) -> Text:
 
 
 def _target_frame_width(console: Console) -> int:
-    return max(20, console.width - 2)
+    widths: list[int] = []
+    try:
+        private_w = int(getattr(console, "_width", 0) or 0)
+        if private_w > 0:
+            widths.append(private_w)
+    except Exception:
+        pass
+    try:
+        w = int(getattr(console, "width", 0) or 0)
+        if w > 0:
+            widths.append(w)
+    except Exception:
+        pass
+    try:
+        size = getattr(console, "size", None)
+        w2 = int(getattr(size, "width", 0) or 0)
+        if w2 > 0:
+            widths.append(w2)
+    except Exception:
+        pass
+    effective = min(widths) if widths else 80
+    return max(20, effective - 2)
 
 
 def _compute_layout(
@@ -184,7 +205,8 @@ def render_panel_with_confetti(
 ) -> None:
     panel = _build_panel(content, title, panel_width)
 
-    if not console.is_terminal or console.is_dumb_terminal:
+    force_terminal = bool(getattr(console, "_force_terminal", False))
+    if not console.is_terminal or (console.is_dumb_terminal and not force_terminal):
         console.print(panel)
         return
 

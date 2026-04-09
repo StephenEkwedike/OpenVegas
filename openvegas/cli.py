@@ -7,10 +7,12 @@ import base64
 import difflib
 import hashlib
 import json
+import logging
 import mimetypes
 import os
 import re
 import select
+import shlex
 import shutil
 import subprocess
 import sys
@@ -34,10 +36,14 @@ try:  # Optional: richer in-line composer for chat input.
     from prompt_toolkit import PromptSession
     from prompt_toolkit.history import InMemoryHistory
     from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.mouse_events import MouseEventType
+    from prompt_toolkit.styles import Style as PromptStyle
 except Exception:  # pragma: no cover - exercised by runtime envs without prompt_toolkit
     PromptSession = None
     InMemoryHistory = None
     KeyBindings = None
+    MouseEventType = None
+    PromptStyle = None
 
 from openvegas import __version__
 from openvegas.agent.local_tools import (
@@ -94,6 +100,8 @@ from openvegas.tui.diff_reviewer import (
 )
 from openvegas.tui.hints import verify_hint_for_result
 from openvegas.tui.tool_event_renderer import describe_tool_action
+from openvegas.tui.voice_button import VoiceButton
+from openvegas.tui.icons import mic_icon
 
 console = Console()
 
@@ -392,6 +400,41 @@ def _coalesce_live_prompt_text(raw: str) -> str:
         return ""
     return _merge_chat_prompt_and_buffered_lines(lines[0], lines[1:])
 
+
+
+def _insert_or_queue_voice_transcript(
+    *,
+    transcript: str,
+    chat_prompt_session: Any | None,
+    prompt_active: bool,
+    pending_prefill: str | None,
+) -> tuple[str | None, str, int]:
+    token = str(transcript or "").strip()
+    if not token:
+        return pending_prefill, "none", 0
+
+    if prompt_active and chat_prompt_session is not None:
+        try:
+            buf = chat_prompt_session.default_buffer
+            current = str(getattr(buf, "text", "") or "")
+            cursor = int(getattr(buf, "cursor_position", 0) or 0)
+            cursor = max(0, min(len(current), cursor))
+            prefix = current[:cursor]
+            suffix = current[cursor:]
+            needs_space = bool(prefix) and not prefix.endswith((" ", "\n", "\t"))
+            inserted = f" {token}" if needs_space else token
+            buf.text = f"{prefix}{inserted}{suffix}"
+            buf.cursor_position = len(prefix) + len(inserted)
+            app = getattr(chat_prompt_session, "app", None)
+            if app is not None and hasattr(app, "invalidate"):
+                app.invalidate()
+            return pending_prefill, "live", len(token)
+        except Exception:
+            pass
+
+    base = str(pending_prefill or "").strip()
+    merged = f"{base} {token}".strip() if base else token
+    return merged, "prefill", len(token)
 
 def _wrap_token_with_attachment_marker(text: str, token: str) -> str:
     msg = str(text or "")
@@ -1090,6 +1133,11 @@ def _message_requests_attachment_analysis(text: str) -> bool:
         "in this screenshot",
         "in this pdf",
         "from this file",
+        "transcribe this",
+        "transcribe these",
+        "speech to text",
+        "audio",
+        "voice note",
     )
     return any(token in msg for token in markers)
 
@@ -1102,12 +1150,12 @@ def _extract_filename_like_tokens(text: str) -> list[str]:
     seen: set[str] = set()
     patterns = [
         r"\{([^{}]+)\}",
-        r'"([^"\n]+\.(?:pdf|png|jpe?g|gif|webp|svg|heic|bmp|tiff|txt|md|json|csv|docx?|pptx?|xlsx?))"',
-        r"'([^'\n]+\.(?:pdf|png|jpe?g|gif|webp|svg|heic|bmp|tiff|txt|md|json|csv|docx?|pptx?|xlsx?))'",
+        r'"([^"\n]+\.(?:pdf|png|jpe?g|gif|webp|svg|heic|bmp|tiff|txt|md|json|csv|docx?|pptx?|xlsx?|wav|mp3|m4a|ogg|flac|aac|webm))"',
+        r"'([^'\n]+\.(?:pdf|png|jpe?g|gif|webp|svg|heic|bmp|tiff|txt|md|json|csv|docx?|pptx?|xlsx?|wav|mp3|m4a|ogg|flac|aac|webm))'",
         # Local paths with extension (absolute, relative, or home-prefixed).
-        r"((?:~|/|\./|\.\./)[A-Za-z0-9 _./\\\-]{1,220}\.(?:pdf|png|jpe?g|gif|webp|svg|heic|bmp|tiff|txt|md|json|csv|docx?|pptx?|xlsx?))",
+        r"((?:~|/|\./|\.\./)[A-Za-z0-9 _./\\\-]{1,220}\.(?:pdf|png|jpe?g|gif|webp|svg|heic|bmp|tiff|txt|md|json|csv|docx?|pptx?|xlsx?|wav|mp3|m4a|ogg|flac|aac|webm))",
         # Basename with extension, capped token count to avoid swallowing full sentences.
-        r"([A-Za-z0-9_.-]+(?:[ \t][A-Za-z0-9_.-]+){0,7}\.(?:pdf|png|jpe?g|gif|webp|svg|heic|bmp|tiff|txt|md|json|csv|docx?|pptx?|xlsx?))",
+        r"([A-Za-z0-9_.-]+(?:[ \t][A-Za-z0-9_.-]+){0,7}\.(?:pdf|png|jpe?g|gif|webp|svg|heic|bmp|tiff|txt|md|json|csv|docx?|pptx?|xlsx?|wav|mp3|m4a|ogg|flac|aac|webm))",
     ]
     for pat in patterns:
         for match in re.findall(pat, msg, flags=re.IGNORECASE):
@@ -1268,6 +1316,10 @@ def _is_local_attachment_analysis_request(text: str) -> bool:
         "summarize",
         "analyze",
         "extract",
+        "transcribe",
+        "speech to text",
+        "audio",
+        "voice note",
         "this pdf",
         "this image",
         "screenshot",
@@ -1279,6 +1331,8 @@ def _is_local_attachment_analysis_request(text: str) -> bool:
 
 def _should_enable_web_search_for_turn(text: str, *, has_uploaded_attachments: bool) -> bool:
     if not str(text or "").strip():
+        return False
+    if _has_workspace_tooling_intent(text):
         return False
     if has_uploaded_attachments and _is_local_attachment_analysis_request(text) and not _has_web_request_signal(text):
         return False
@@ -1299,6 +1353,63 @@ def _augment_web_search_prompt(text: str) -> str:
             "Mark stale or unavailable pages explicitly."
         ).strip()
     return msg
+
+
+def _parse_mcp_call_command(message: str) -> tuple[str, str, dict[str, Any], str | None]:
+    raw = str(message or "").strip()
+    prefix = "/mcp call"
+    if not raw.lower().startswith(prefix):
+        return "", "", {}, "usage: /mcp call <server_id> <tool> [json_args|k=v ...]"
+    rest = raw[len(prefix):].strip()
+    if not rest:
+        return "", "", {}, "usage: /mcp call <server_id> <tool> [json_args|k=v ...]"
+
+    parts = rest.split(maxsplit=2)
+    if len(parts) < 2:
+        return "", "", {}, "usage: /mcp call <server_id> <tool> [json_args|k=v ...]"
+
+    server_id = str(parts[0] or "").strip()
+    tool_name = str(parts[1] or "").strip()
+    if not server_id or not tool_name:
+        return "", "", {}, "usage: /mcp call <server_id> <tool> [json_args|k=v ...]"
+
+    if len(parts) <= 2:
+        return server_id, tool_name, {}, None
+
+    args_raw = str(parts[2] or "").strip()
+    if not args_raw:
+        return server_id, tool_name, {}, None
+
+    if args_raw.startswith("{"):
+        try:
+            parsed = json.loads(args_raw)
+        except Exception:
+            return "", "", {}, "invalid JSON args; expected object"
+        if not isinstance(parsed, dict):
+            return "", "", {}, "invalid JSON args; expected object"
+        return server_id, tool_name, parsed, None
+
+    out: dict[str, Any] = {}
+    for token in shlex.split(args_raw):
+        if "=" not in token:
+            return "", "", {}, "invalid args; use JSON object or key=value pairs"
+        key, value = token.split("=", 1)
+        key = str(key or "").strip()
+        if not key:
+            return "", "", {}, "invalid args; empty key"
+        val = value.strip()
+        if val.lower() in {"true", "false"}:
+            coerced: Any = val.lower() == "true"
+        else:
+            try:
+                coerced = int(val)
+            except Exception:
+                try:
+                    coerced = float(val)
+                except Exception:
+                    coerced = val
+        out[key] = coerced
+    return server_id, tool_name, out, None
 
 
 def _coerce_nonempty_text(v: Any) -> str | None:
@@ -1976,7 +2087,8 @@ def _format_composer_attachment_status_row(
     if not attachments:
         return None
     image_count = sum(1 for att in attachments if _attachment_is_image(att))
-    file_count = max(0, len(attachments) - image_count)
+    audio_count = sum(1 for att in attachments if _attachment_is_audio(att))
+    file_count = max(0, len(attachments) - image_count - audio_count)
     parts: list[str] = []
     if image_count > 0:
         image_supported = True
@@ -1986,6 +2098,14 @@ def _format_composer_attachment_status_row(
             parts.append(f"🖼 {image_count} image(s)")
         else:
             parts.append(f"⚠ {image_count} image(s) unsupported")
+    if audio_count > 0:
+        stt_supported = True
+        if provider and model:
+            stt_supported = resolve_capability(provider, model, "speech_to_text")
+        if stt_supported:
+            parts.append(f"◉ {audio_count} audio file(s)")
+        else:
+            parts.append(f"⚠ {audio_count} audio file(s) unsupported")
     if file_count > 0:
         parts.append(f"📄 {file_count} file(s)")
     if not parts:
@@ -2023,6 +2143,11 @@ def _format_live_composer_status_row(
 def _attachment_is_image(att: PendingAttachment) -> bool:
     mime = str(att.mime_type or _sniff_mime_type(att.path)).strip().lower()
     return mime.startswith("image/")
+
+
+def _attachment_is_audio(att: PendingAttachment) -> bool:
+    mime = str(att.mime_type or _sniff_mime_type(att.path)).strip().lower()
+    return mime.startswith("audio/")
 
 
 def _preflight_filter_attachments_for_capabilities(
@@ -2067,6 +2192,8 @@ def _attachment_icon(mime_type: str, *, unicode_ok: bool) -> str:
     token = str(mime_type or "").lower()
     if token.startswith("image/"):
         return "🖼" if unicode_ok else "[IMG]"
+    if token.startswith("audio/"):
+        return mic_icon() if unicode_ok else "[AUDIO]"
     if token in {"application/pdf"}:
         return "📄" if unicode_ok else "[FILE]"
     return "📎" if unicode_ok else "[FILE]"
@@ -2096,7 +2223,7 @@ def _chat_allowed_mime_patterns() -> list[str]:
     raw = str(
         os.getenv(
             "OPENVEGAS_CHAT_ALLOWED_MIME",
-            "text/*,image/*,application/pdf,application/json,application/xml,application/octet-stream",
+            "text/*,image/*,audio/*,application/pdf,application/json,application/xml,application/octet-stream",
         )
     ).strip()
     if not raw:
@@ -3250,7 +3377,10 @@ def _tool_debug_enabled() -> bool:
 
 
 def _tool_debug(message: str) -> None:
-    if _tool_debug_enabled():
+    if not _tool_debug_enabled():
+        return
+    logging.getLogger("openvegas.tool_debug").debug(str(message))
+    if os.getenv("OPENVEGAS_TOOL_DEBUG_CONSOLE", "").strip().lower() in {"1", "true", "yes", "on"}:
         console.print(f"[dim][tool-debug][/dim] {message}")
 
 
@@ -3259,8 +3389,36 @@ def _ide_bridge_trace_enabled() -> bool:
 
 
 def _ide_bridge_debug(message: str) -> None:
-    if _ide_bridge_trace_enabled():
+    if not _ide_bridge_trace_enabled():
+        return
+    logging.getLogger("openvegas.ide_bridge").debug(str(message))
+    if os.getenv("OPENVEGAS_IDE_BRIDGE_TRACE_CONSOLE", "").strip().lower() in {"1", "true", "yes", "on"}:
         console.print(f"[dim][ide-bridge][/dim] {message}")
+
+
+_INTERNAL_RESPONSE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^\s*prepended synthesized write tool call", re.IGNORECASE),
+    re.compile(r"^\s*synth-write skipped;", re.IGNORECASE),
+    re.compile(r"^\s*text-only gate pre-fallback:", re.IGNORECASE),
+    re.compile(r"^\s*post-finalize intercept skipped;", re.IGNORECASE),
+    re.compile(r"^\s*finalizing/continuing with text-only answer", re.IGNORECASE),
+    re.compile(r"^\s*last_successful_tool=", re.IGNORECASE),
+    re.compile(r"^\s*web:\s*requested=", re.IGNORECASE),
+    re.compile(r"^\s*tokens:\s*in=", re.IGNORECASE),
+)
+
+
+def _sanitize_user_visible_response_text(text: str) -> str:
+    raw = str(text or "")
+    if not raw.strip():
+        return ""
+    out_lines: list[str] = []
+    for line in raw.splitlines():
+        token = str(line or "").strip()
+        if token and any(p.search(token) for p in _INTERNAL_RESPONSE_PATTERNS):
+            continue
+        out_lines.append(line)
+    return "\n".join(out_lines).strip()
 
 
 def _extension_is_ready() -> bool:
@@ -4225,13 +4383,47 @@ def cli():
 @click.option("--otp", is_flag=True, help="Use magic link (OTP) login")
 def login(otp: bool):
     """Log in to OpenVegas."""
+    _load_openvegas_env_defaults_from_dotenv()
     from openvegas.auth import SupabaseAuth, AuthError
+    from openvegas.config import (
+        get_session,
+        load_refresh_from_platform_store,
+        request_touchid_unlock,
+        require_touchid_unlock_for_refresh_storage,
+        touchid_enabled,
+        touchid_supported,
+    )
 
     try:
         auth = SupabaseAuth()
     except AuthError as e:
         console.print(f"[red]{e}[/red]")
         return
+
+    if not otp:
+        try:
+            session = get_session()
+            refresh_storage = str(session.get("refresh_storage", "") or "")
+            has_keychain_refresh = bool(str(load_refresh_from_platform_store() or "").strip())
+            should_try_touchid = bool(touchid_enabled() and touchid_supported() and (
+                require_touchid_unlock_for_refresh_storage(refresh_storage) or has_keychain_refresh
+            ))
+            if should_try_touchid:
+                console.print("[dim]Attempting Touch ID unlock...[/dim]")
+                if request_touchid_unlock():
+                    try:
+                        auth.refresh_token()
+                        console.print("[green]Unlocked with Touch ID.[/green]")
+                        return
+                    except Exception as e:
+                        console.print(f"[yellow]Touch ID unlock failed ({e}); falling back to email/password.[/yellow]")
+                else:
+                    console.print("[yellow]Touch ID was unavailable or declined; falling back to email/password.[/yellow]")
+            elif touchid_enabled() and not touchid_supported():
+                console.print("[yellow]Touch ID enabled but unavailable on this setup (Keychain/keyring/LocalAuthentication unavailable); falling back to email/password.[/yellow]")
+        except Exception:
+            # Never block login on Touch ID preflight problems.
+            pass
 
     email = Prompt.ask("Email")
 
@@ -4248,6 +4440,79 @@ def login(otp: bool):
             )
         except Exception as e:
             console.print(f"[red]Login failed: {e}[/red]")
+
+
+@cli.command("doctor-auth")
+def doctor_auth():
+    """Print one-line auth readiness diagnostics."""
+    _load_openvegas_env_defaults_from_dotenv()
+    import sys as _sys
+    from openvegas.config import (
+        get_session,
+        load_refresh_from_platform_store,
+        platform_keychain_available,
+        touchid_enabled,
+        touchid_supported,
+    )
+
+    session = get_session()
+    refresh_storage = str(session.get("refresh_storage", "") or "")
+    has_keychain_token = bool(str(load_refresh_from_platform_store() or "").strip())
+    enabled = bool(touchid_enabled())
+    keychain_ok = bool(platform_keychain_available())
+    supported = bool(touchid_supported())
+    ready = bool(enabled and supported and keychain_ok and has_keychain_token)
+
+    console.print(
+        "doctor-auth: "
+        f"ready={'1' if ready else '0'} "
+        f"touchid_enabled={'1' if enabled else '0'} "
+        f"touchid_supported={'1' if supported else '0'} "
+        f"keychain_available={'1' if keychain_ok else '0'} "
+        f"keychain_token={'1' if has_keychain_token else '0'} "
+        f"refresh_storage={refresh_storage or 'none'} "
+        f"python={_sys.executable}"
+    )
+
+
+@cli.command("whoami")
+def whoami():
+    """Show current authenticated user from local session token."""
+    _load_openvegas_env_defaults_from_dotenv()
+    import base64
+    import json as _json
+    from openvegas.config import get_session
+
+    session = get_session() or {}
+    token = str(session.get("access_token", "") or "").strip()
+    if not token:
+        console.print("[yellow]Not logged in.[/yellow]")
+        return
+
+    email = ""
+    user_id = ""
+    try:
+        parts = token.split(".")
+        if len(parts) >= 2:
+            payload = parts[1]
+            payload += "=" * ((4 - len(payload) % 4) % 4)
+            decoded = base64.urlsafe_b64decode(payload.encode("utf-8")).decode("utf-8", errors="ignore")
+            claims = _json.loads(decoded)
+            if isinstance(claims, dict):
+                email = str(claims.get("email", "") or "")
+                user_id = str(claims.get("sub", "") or "")
+    except Exception:
+        pass
+
+    refresh_storage = str(session.get("refresh_storage", "") or "none")
+    if not email and not user_id:
+        console.print(f"whoami: refresh_storage={refresh_storage} email=unknown user_id=unknown")
+        return
+
+    console.print(
+        f"whoami: refresh_storage={refresh_storage} "
+        f"email={email or 'unknown'} user_id={user_id or 'unknown'}"
+    )
 
 
 @cli.command()
@@ -4285,6 +4550,20 @@ def logout():
         from openvegas.config import clear_session
         clear_session()
     console.print("Logged out.")
+
+
+@cli.command("quit")
+def quit_session():
+    """Quick-lock local session but keep refresh/keychain for Touch ID unlock."""
+    from openvegas.config import clear_access_token_keep_refresh
+
+    try:
+        clear_access_token_keep_refresh()
+    except Exception as e:
+        console.print(f"[red]Unable to lock session: {e}[/red]")
+        return
+
+    console.print("Session locked. Use `openvegas login` to unlock with Touch ID.")
 
 
 @cli.command()
@@ -4887,20 +5166,27 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
     approval_mode = "ask"
     conversation_mode = "persistent"
     context_warning_emitted = False
-    web_search_requested = (
-        current_provider == "openai"
-        and str(os.getenv("OPENVEGAS_CHAT_WEB_SEARCH_DEFAULT", "1")).strip().lower() in {"1", "true", "yes", "on"}
-    )
+    web_search_requested = True
     last_web_search_effective = False
     last_web_search_used = False
     last_web_search_retry_without_tool = False
+    voice_transcribe_requested = True
+    last_voice_transcribe_effective = False
+    last_voice_transcribe_used = False
+    voice_transcribe_model = str(os.getenv("OPENVEGAS_CHAT_SPEECH_MODEL", "gpt-4o-mini-transcribe")).strip() or "gpt-4o-mini-transcribe"
+    voice_transcribe_language = str(os.getenv("OPENVEGAS_CHAT_SPEECH_LANGUAGE", "")).strip() or None
     pending_attachments: list[PendingAttachment] = []
     uploaded_attachment_cache: dict[str, str] = {}
     attachment_event_sequence = 0
     rendered_ui_event_keys: set[tuple[str, str, str, int]] = set()
     attachment_context_for_turn = ""
+    voice_transcript_context_for_turn = ""
     attachment_markers_for_turn: list[str] = []
     attachment_file_ids_for_turn: list[str] = []
+    voice_button = VoiceButton(console)
+    pending_voice_prefill: str | None = None
+    pending_voice_meta: dict[str, Any] | None = None
+    prompt_input_active = False
     max_attachments_per_turn = max(1, min(20, int(os.getenv("OPENVEGAS_CHAT_MAX_ATTACHMENTS", "3"))))
     max_attachment_bytes = max(1024, int(os.getenv("OPENVEGAS_CHAT_MAX_ATTACHMENT_BYTES", str(20 * 1024 * 1024))))
     attachment_preview_max_chars = max(512, int(os.getenv("OPENVEGAS_CHAT_ATTACHMENT_PREVIEW_MAX_CHARS", "6000")))
@@ -4934,7 +5220,12 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
     def _env_flag(name: str, default: str = "0") -> bool:
         return str(os.getenv(name, default)).strip().lower() in {"1", "true", "yes", "on"}
 
-    show_model_meta = _env_flag("OPENVEGAS_CHAT_SHOW_MODEL_META", "0")
+    show_user_diagnostics = _env_flag("OPENVEGAS_CHAT_USER_DIAGNOSTICS", "0")
+    show_model_meta = show_user_diagnostics and _env_flag("OPENVEGAS_CHAT_SHOW_MODEL_META", "0")
+    show_token_usage = show_user_diagnostics and _env_flag("OPENVEGAS_CHAT_SHOW_TOKEN_USAGE", "0")
+    show_web_diagnostics = show_user_diagnostics and _env_flag("OPENVEGAS_CHAT_SHOW_WEB_DIAGNOSTICS", "0")
+    show_stream_status = show_user_diagnostics and _env_flag("OPENVEGAS_CHAT_SHOW_STREAM_STATUS", "0")
+    show_user_echo = _env_flag("OPENVEGAS_CHAT_SHOW_USER_ECHO", "1")
     allow_model_switch = _env_flag("OPENVEGAS_CHAT_ALLOW_MODEL_SWITCH", "0")
     preferred_openai_models = [
         "gpt-5.4",
@@ -4988,7 +5279,9 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
         console.print("/verbose-tools <on|off> - detailed tool event output")
         console.print("/approvals - show session approval overrides")
         console.print("/status - show current chat context")
-        console.print("/web <on|off> - toggle web search for supported provider/models")
+        console.print("/web - show effective web search status (always on)")
+        console.print("/voice - start/stop voice capture mode")
+        console.print("/mcp <list|health|call> - MCP server list/health/tool call")
         console.print("/attach <path> - attach a file for the next turn")
         console.print("/paste - attach paths/images from clipboard")
         console.print("/detach <name|id> - remove one pending attachment")
@@ -5002,12 +5295,64 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
         console.print("/ui - jump into game UI (blocked on pending orchestration state)")
         console.print("/exit - exit chat")
 
+    def _mcp_feature_enabled() -> bool:
+        return str(os.getenv("OPENVEGAS_ENABLE_MCP", "0")).strip().lower() in {"1", "true", "yes", "on"}
+
+    def _icon(name: str) -> str:
+        nerd_font = str(os.getenv("OPENVEGAS_CHAT_NERD_FONT", "auto")).strip().lower()
+        use_nerd = nerd_font in {"1", "true", "yes", "on"}
+        if nerd_font == "auto":
+            term_program = str(os.getenv("TERM_PROGRAM", "")).lower()
+            use_nerd = "warp" in term_program or "wezterm" in term_program
+        if unicode_ok:
+            if name == "voice":
+                return mic_icon()
+            if name == "actions":
+                return "+"
+            if name == "send":
+                return "➤"
+            if name == "attach":
+                return "📎"
+            if name == "paste":
+                return "📋"
+            if name == "web":
+                return "🌐"
+            if name == "mcp":
+                return "🔌"
+            if name == "quit":
+                return "⏻"
+            return "⚙"
+        return {
+            "voice": "[mic]",
+            "actions": "[+]",
+            "send": "[send]",
+            "attach": "[attach]",
+            "paste": "[paste]",
+            "web": "[web]",
+            "mcp": "[mcp]",
+            "quit": "[quit]",
+        }.get(name, "[tool]")
+
+    def _prompt_action_row() -> str:
+        voice_chip = f"◖{_icon('voice')}◗"
+        if voice_button.is_recording:
+            status = voice_button.label(include_hint=False)
+            icon_token = _icon('voice')
+            status_tail = str(status).replace(icon_token, "", 1).strip()
+            if status_tail:
+                voice_chip = f"{voice_chip} {status_tail}"
+        return f"{voice_chip}  {_icon('actions')} Actions"
+
+    def _render_action_hint() -> None:
+        console.print(f"[dim]{_prompt_action_row()}[/dim]")
+
     def _show_legend() -> None:
         if unicode_ok:
             lines = [
                 "🌐 web search",
                 "📚 file search/retrieval",
                 "🖼 image attachment/input",
+                "mic speech-to-text (audio attachments)",
                 "📄 file attachment/input",
                 "📎 attachment status row",
                 "⚙ tool lifecycle",
@@ -5017,6 +5362,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 "[WEB] web search",
                 "[FILES] file search/retrieval",
                 "[IMG] image attachment/input",
+                "[AUDIO] speech-to-text (audio attachments)",
                 "[FILE] file attachment/input",
                 "[ATTACH] attachment status row",
                 "[TOOL] tool lifecycle",
@@ -5130,9 +5476,6 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
         if row == last_attachment_status_row:
             return
         last_attachment_status_row = row
-        if attachment_status_style in {"white", "bar"}:
-            console.print(f"[black on white]{row}[/black on white]")
-            return
         console.print(f"  [dim]{row}[/dim]")
 
     def _human_bytes(num: int) -> str:
@@ -5358,25 +5701,226 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             attachment_context = "\n\nAttached file context:\n\n" + "\n\n---\n\n".join(context_parts)
         return uploaded, markers, attachment_context, file_ids
 
+    async def _transcribe_audio_attachments_for_turn(
+        uploaded: list[PendingAttachment],
+    ) -> tuple[str, int, bool]:
+        audio_items = [
+            att
+            for att in list(uploaded or [])
+            if _attachment_is_audio(att) and str(att.remote_file_id or "").strip()
+        ]
+        if not audio_items:
+            return "", 0, False
+
+        stt_effective = bool(
+            voice_transcribe_requested
+            and resolve_capability(current_provider, current_model, "speech_to_text")
+        )
+        if not stt_effective:
+            _render_capability_status("speech_to_text", "audio attached but speech-to-text unavailable")
+            return "", 0, False
+
+        transcript_blocks: list[str] = []
+        used_count = 0
+        for att in audio_items:
+            marker = _attachment_marker(att.name)
+            _render_capability_status("speech_to_text", f"transcribing {marker}...")
+            try:
+                emit_metric("voice_capture_phase_total", {"phase": "transcribe_started"})
+                payload = await asyncio.wait_for(
+                    client.speech_transcribe(
+                        file_id=str(att.remote_file_id or ""),
+                        provider=current_provider,
+                        model=voice_transcribe_model,
+                        language=voice_transcribe_language,
+                    ),
+                    timeout=_voice_timeout("OPENVEGAS_CHAT_VOICE_TRANSCRIBE_TIMEOUT_SEC", 90.0),
+                )
+                emit_metric("voice_capture_phase_total", {"phase": "transcribe_succeeded"})
+            except APIError as exc:
+                emit_metric("voice_capture_phase_total", {"phase": "transcribe_failed"})
+                detail = str(exc.detail or "speech transcription failed").strip()
+                console.print(f"[yellow]Speech-to-text failed {marker}: {detail}[/yellow]")
+                continue
+            except asyncio.TimeoutError:
+                emit_metric("voice_capture_phase_total", {"phase": "transcribe_failed"})
+                console.print(f"[yellow]Speech-to-text failed {marker}: timeout[/yellow]")
+                continue
+            except Exception as exc:
+                emit_metric("voice_capture_phase_total", {"phase": "transcribe_failed"})
+                console.print(f"[yellow]Speech-to-text failed {marker}: {exc}[/yellow]")
+                continue
+
+            text = str(payload.get("text") or "").strip()
+            if not text:
+                console.print(f"[yellow]Speech-to-text returned empty transcript for {marker}[/yellow]")
+                continue
+            used_count += 1
+            console.print(f"[dim]Transcribed {marker} ({len(text)} chars)[/dim]")
+            transcript_blocks.append(f"[Speech transcript {marker}]\n{text}")
+
+        if not transcript_blocks:
+            return "", 0, stt_effective
+        return "\n\n".join(transcript_blocks), used_count, stt_effective
+
     def _capability_label(name: str) -> str:
         if unicode_ok:
             return {
                 "web_search": "🌐",
                 "file_search": "📚",
                 "image_analyze": "🖼",
+                "speech_to_text": mic_icon(),
+                "mcp": "🔌",
                 "file_read": "📄",
             }.get(name, "⚙")
         return {
             "web_search": "[WEB]",
             "file_search": "[FILES]",
             "image_analyze": "[IMG]",
+            "speech_to_text": "[AUDIO]",
+            "mcp": "[MCP]",
             "file_read": "[FILE]",
         }.get(name, "[TOOL]")
 
     def _render_capability_status(name: str, detail: str) -> None:
         console.print(f"[dim]{_capability_label(name)} {detail}[/dim]")
 
+    def _insert_voice_transcript_text(transcript: str) -> tuple[str, int]:
+        nonlocal pending_voice_prefill, pending_voice_meta, prompt_input_active
+        pending_voice_prefill, mode, chars = _insert_or_queue_voice_transcript(
+            transcript=transcript,
+            chat_prompt_session=chat_prompt_session,
+            prompt_active=bool(prompt_input_active),
+            pending_prefill=pending_voice_prefill,
+        )
+        if chars <= 0:
+            return "none", 0
+        pending_voice_meta = {"chars": chars, "mode": mode, "at": time.time()}
+        if mode == "live":
+            emit_metric("voice_capture_phase_total", {"phase": "transcript_inserted_live"})
+        elif mode == "prefill":
+            emit_metric("voice_capture_phase_total", {"phase": "transcript_queued_prefill"})
+        return mode, chars
+
+    def _voice_timeout(name: str, default_sec: float) -> float:
+        raw = str(os.getenv(name, str(default_sec))).strip()
+        try:
+            return max(3.0, min(180.0, float(raw)))
+        except Exception:
+            return float(default_sec)
+
+    async def _transcribe_voice_wav(wav_path: str, duration_sec: float) -> str:
+        file_path = Path(str(wav_path or "").strip())
+        if not file_path.exists() or not file_path.is_file():
+            raise RuntimeError("voice capture file missing")
+        marker = _attachment_marker(file_path.name)
+        try:
+            size_bytes = int(file_path.stat().st_size)
+        except Exception as exc:
+            raise RuntimeError(f"voice metadata unavailable: {exc}")
+        if size_bytes <= 0:
+            raise RuntimeError("voice capture is empty")
+        try:
+            digest = _file_sha256(file_path)
+        except Exception as exc:
+            raise RuntimeError(f"voice hash failed: {exc}")
+
+        mime_type = _sniff_mime_type(str(file_path)).strip().lower()
+        if mime_type in {"audio/x-wav", "audio/wave", "audio/vnd.wave"}:
+            mime_type = "audio/wav"
+        if not mime_type:
+            mime_type = "audio/wav"
+
+        _render_capability_status("speech_to_text", f"transcribing {marker} ({duration_sec:.1f}s)...")
+
+        phase = "upload_init"
+        try:
+            emit_metric("voice_capture_phase_total", {"phase": "upload_init_started"})
+            init_resp = await asyncio.wait_for(
+                client.upload_init(
+                    filename=file_path.name,
+                    size_bytes=size_bytes,
+                    mime_type=mime_type,
+                    sha256_hex=digest,
+                ),
+                timeout=_voice_timeout("OPENVEGAS_CHAT_VOICE_UPLOAD_TIMEOUT_SEC", 30.0),
+            )
+            upload_id = str(init_resp.get("upload_id") or "").strip()
+            if not upload_id:
+                raise RuntimeError("upload init did not return upload_id")
+            file_bytes = file_path.read_bytes()
+            phase = "upload_complete"
+            emit_metric("voice_capture_phase_total", {"phase": "upload_complete_started"})
+            complete_resp = await asyncio.wait_for(
+                client.upload_complete(
+                    upload_id=upload_id,
+                    content_base64=base64.b64encode(file_bytes).decode("ascii"),
+                ),
+                timeout=_voice_timeout("OPENVEGAS_CHAT_VOICE_UPLOAD_TIMEOUT_SEC", 30.0),
+            )
+            remote_file_id = str(
+                complete_resp.get("file_id")
+                or complete_resp.get("upload_id")
+                or upload_id
+            ).strip()
+            if not remote_file_id:
+                raise RuntimeError("upload complete did not return file_id")
+
+            uploaded_attachment_cache[_attachment_key(str(file_path), size_bytes, digest)] = remote_file_id
+            emit_metric("voice_capture_phase_total", {"phase": "upload_succeeded"})
+
+            phase = "transcribe"
+            emit_metric("voice_capture_phase_total", {"phase": "transcribe_started"})
+            stt = await asyncio.wait_for(
+                client.speech_transcribe(
+                    file_id=remote_file_id,
+                    provider=current_provider,
+                    model=voice_transcribe_model,
+                    language=voice_transcribe_language,
+                    prompt="Transcribe exactly; keep punctuation concise.",
+                ),
+                timeout=_voice_timeout("OPENVEGAS_CHAT_VOICE_TRANSCRIBE_TIMEOUT_SEC", 90.0),
+            )
+            emit_metric("voice_capture_phase_total", {"phase": "transcribe_succeeded"})
+            transcript = str((stt or {}).get("text") or "").strip()
+            if not transcript:
+                raise RuntimeError("speech-to-text returned empty transcript")
+            return transcript
+        except asyncio.TimeoutError:
+            if phase in {"upload_init", "upload_complete"}:
+                emit_metric("voice_capture_phase_total", {"phase": "upload_timeout"})
+                raise RuntimeError("voice upload timed out")
+            emit_metric("voice_capture_phase_total", {"phase": "transcribe_failed"})
+            raise RuntimeError("speech transcription timed out")
+        except APIError as exc:
+            if phase in {"upload_init", "upload_complete"}:
+                emit_metric("voice_capture_phase_total", {"phase": "upload_failed"})
+            else:
+                emit_metric("voice_capture_phase_total", {"phase": "transcribe_failed"})
+            detail = str(exc.detail or "speech transcription failed").strip()
+            raise RuntimeError(detail or "speech transcription failed")
+        except Exception:
+            if phase in {"upload_init", "upload_complete"}:
+                emit_metric("voice_capture_phase_total", {"phase": "upload_failed"})
+            else:
+                emit_metric("voice_capture_phase_total", {"phase": "transcribe_failed"})
+            raise
+
+    def _erase_prompt_line_if_possible() -> None:
+        if not use_prompt_toolkit_chat:
+            return
+        try:
+            if not bool(getattr(sys.stdout, "isatty", lambda: False)()):
+                return
+            stream = getattr(console, "file", None) or sys.stdout
+            stream.write("\x1b[1A\x1b[2K\r")
+            stream.flush()
+        except Exception:
+            return
+
     def _render_usage_summary(payload: dict[str, Any]) -> None:
+        if not show_token_usage:
+            return
         in_tok = int(payload.get("input_tokens") or 0)
         out_tok = int(payload.get("output_tokens") or 0)
         total = in_tok + out_tok
@@ -5601,7 +6145,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     payload_dict = payload if isinstance(payload, dict) else {}
 
                     if event_name in {"response.started", "stream_start"}:
-                        _render_capability_status("stream_events", "streaming response...")
+                        if show_stream_status:
+                            _render_capability_status("stream_events", "streaming response...")
                         continue
                     if event_name in {"tool.call", "tool_start"}:
                         tool = payload_dict.get("tool")
@@ -5611,7 +6156,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         elif isinstance(tool, str):
                             tool_name = tool.strip()
                         status_text = f"tool_start {tool_name}".strip()
-                        _render_capability_status("stream_events", status_text)
+                        if show_stream_status:
+                            _render_capability_status("stream_events", status_text)
                         continue
                     if event_name in {"tool_progress"}:
                         tool = payload_dict.get("tool")
@@ -5622,7 +6168,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                             tool_name = tool.strip()
                         phase = str(payload_dict.get("phase") or "progress").strip()
                         status_text = f"tool_progress {tool_name} {phase}".strip()
-                        _render_capability_status("stream_events", status_text)
+                        if show_stream_status:
+                            _render_capability_status("stream_events", status_text)
                         continue
                     if event_name in {"tool.result", "tool_result"}:
                         tool = payload_dict.get("tool")
@@ -5632,7 +6179,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         elif isinstance(tool, str):
                             tool_name = tool.strip()
                         status_text = f"tool_result {tool_name}".strip()
-                        _render_capability_status("stream_events", status_text)
+                        if show_stream_status:
+                            _render_capability_status("stream_events", status_text)
                         continue
                     if event_name in {"response.delta", "stream_delta"}:
                         delta = str(payload_dict.get("text") or "")
@@ -5697,7 +6245,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             nonlocal last_assistant_text_for_turn
             emit_metric("tool_loop_finalize_reason", {"reason": str(reason or "completed")})
             dealer_panel.render(map_lifecycle_event_to_state("finalize"), "finalized")
-            final_text = str(final_res.get("text", "")).strip()
+            final_text = _sanitize_user_visible_response_text(str(final_res.get("text", "")).strip())
             if final_text:
                 render_assistant(console, final_text)
                 last_assistant_text_for_turn = final_text
@@ -5995,7 +6543,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             edit_intent: bool,
         ) -> LoopAction:
             final_res = await _request_final_response(tool_observations)
-            final_text = str(final_res.get("text", "")).strip()
+            final_text = _sanitize_user_visible_response_text(str(final_res.get("text", "")).strip())
             intercepted, blocked_reason = await _maybe_intercept_final_text_for_mutation(
                 final_text=final_text,
                 edit_intent=edit_intent,
@@ -6003,6 +6551,11 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             if intercepted:
                 return LoopAction.INTERCEPT
             if blocked_reason and completion_criteria.requires_mutation and not _mutation_observed_for_completion():
+                if not _has_workspace_tooling_intent(user_message):
+                    return await _force_finalize(
+                        final_res,
+                        reason="spurious_mutation_block_ignored",
+                    )
                 emit_metric(
                     "tool_loop_finalize_reason",
                     {"reason": "mutation_required_but_unavailable"},
@@ -6018,7 +6571,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 last_assistant_text_for_turn = f"edit blocked: {blocked_reason}"
                 render_status_bar(
                     console,
-                    f"{current_provider}/{current_model}",
+                    _status_actor(),
                     f"cost {final_res.get('v_cost', '?')} $V",
                     workspace_root,
                 )
@@ -6228,6 +6781,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         "web_search",
                     )
                 )
+                web_search_activity_turn = bool(web_search_effective_turn)
                 attachments_effective_turn = bool(
                     attachment_file_ids_for_turn
                     and resolve_capability(
@@ -6237,33 +6791,27 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     )
                 )
                 if web_search_requested and not web_search_effective_turn:
-                    if not web_search_requested_turn:
-                        console.print(
-                            "[dim]Web search skipped for attachment-focused turn.[/dim]"
-                        )
-                    else:
-                        console.print(
-                            "[yellow]Web search is not available for this provider/model. "
-                            "Use /web off or switch to a supported model.[/yellow]"
-                        )
                     last_web_search_effective = False
                     last_web_search_used = False
                     last_web_search_retry_without_tool = False
-                if web_search_effective_turn:
-                    _render_capability_status("web_search", "searching...")
                 prompt_user_message = user_message
                 if web_search_effective_turn and _is_scrape_request(prompt_user_message):
                     prompt_user_message = _rewrite_lookup_request_for_safe_web_search(prompt_user_message)
                 if web_search_effective_turn:
                     prompt_user_message = _augment_web_search_prompt(prompt_user_message)
+                combined_attachment_context = "\n\n".join(
+                    [part for part in [attachment_context_for_turn, voice_transcript_context_for_turn] if str(part or "").strip()]
+                )
                 prompt_attachment_context = (
                     ""
-                    if attachments_effective_turn and current_provider == "openai"
-                    else attachment_context_for_turn
+                    if attachments_effective_turn and current_provider == "openai" and not voice_transcript_context_for_turn
+                    else combined_attachment_context
                 )
 
                 enable_local_tools_turn = bool(_has_workspace_tooling_intent(user_message))
                 if not enable_local_tools_turn:
+                    if web_search_activity_turn:
+                        _render_capability_status("web_search", "searching...")
                     direct_prompt = (
                         f"{prompt_user_message}\n\n{prompt_attachment_context}".strip()
                         if prompt_attachment_context
@@ -6282,7 +6830,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     last_web_search_effective = bool(one_shot.get("web_search_effective", web_search_effective_turn))
                     last_web_search_used = bool(one_shot.get("web_search_used", False))
                     last_web_search_retry_without_tool = bool(one_shot.get("web_search_retry_without_tool", False))
-                    final_text = str(one_shot.get("text", "")).strip()
+                    final_text = _sanitize_user_visible_response_text(str(one_shot.get("text", "")).strip())
                     if web_search_effective_turn and _is_scrape_request(user_message) and _is_scrape_refusal_text(final_text):
                         one_shot_retry = await _ask_direct_one_shot(
                             _rewrite_lookup_request_for_safe_web_search(direct_prompt),
@@ -6294,7 +6842,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         if retry_thread:
                             current_thread_id = str(retry_thread)
                         _maybe_warn_context_disabled(one_shot_retry if isinstance(one_shot_retry, dict) else {})
-                        final_text = str(one_shot_retry.get("text", "")).strip()
+                        final_text = _sanitize_user_visible_response_text(str(one_shot_retry.get("text", "")).strip())
                         last_web_search_effective = bool(one_shot_retry.get("web_search_effective", True))
                         last_web_search_used = bool(one_shot_retry.get("web_search_used", False))
                         last_web_search_retry_without_tool = bool(
@@ -6312,14 +6860,15 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         console.print(f"[yellow]{warning_text}[/yellow]")
                     if ws_req:
                         source_count = len(ws_sources) if isinstance(ws_sources, list) else 0
-                        _render_capability_status(
-                            "web_search",
-                            f"requested={ws_req} effective={ws_eff} used={ws_used} sources={source_count}",
-                        )
-                        console.print(
-                            f"[dim]web: requested={ws_req} effective={ws_eff} used={ws_used} sources={source_count}[/dim]"
-                        )
-                        _render_web_source_table(one_shot if isinstance(one_shot, dict) else {})
+                        if show_web_diagnostics:
+                            _render_capability_status(
+                                "web_search",
+                                f"requested={ws_req} effective={ws_eff} used={ws_used} sources={source_count}",
+                            )
+                            console.print(
+                                f"[dim]web: requested={ws_req} effective={ws_eff} used={ws_used} sources={source_count}[/dim]"
+                            )
+                            _render_web_source_table(one_shot if isinstance(one_shot, dict) else {})
                     if final_text:
                         render_assistant(console, final_text)
                         last_assistant_text_for_turn = final_text
@@ -6339,6 +6888,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     web_search_effective=web_search_effective_turn,
                     attachment_context=prompt_attachment_context,
                 )
+                if web_search_activity_turn:
+                    _render_capability_status("web_search", "searching...")
                 ask_idem = f"chat-ask-{uuid.uuid4()}"
                 result = await client.ask(
                     prompt,
@@ -6359,7 +6910,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 last_web_search_effective = bool(result.get("web_search_effective", web_search_effective_turn))
                 last_web_search_used = bool(result.get("web_search_used", False))
                 last_web_search_retry_without_tool = bool(result.get("web_search_retry_without_tool", False))
-                model_text = str(result.get("text", "")).strip()
+                model_text = _sanitize_user_visible_response_text(str(result.get("text", "")).strip())
                 cleaned_text = model_text
                 candidate_tool_calls = _collect_tool_call_candidates(result.get("tool_calls"), model_text)
                 if (
@@ -6391,7 +6942,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     if retry_thread:
                         current_thread_id = str(retry_thread)
                     _maybe_warn_context_disabled(retry_result if isinstance(retry_result, dict) else {})
-                    model_text = str(retry_result.get("text", "")).strip()
+                    model_text = _sanitize_user_visible_response_text(str(retry_result.get("text", "")).strip())
                     cleaned_text = model_text
                     candidate_tool_calls = _collect_tool_call_candidates(
                         retry_result.get("tool_calls"),
@@ -6405,7 +6956,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 if cleaned_text:
                     render_assistant(console, cleaned_text)
                     last_assistant_text_for_turn = cleaned_text
-                if web_search_effective_turn:
+                if web_search_effective_turn and show_web_diagnostics:
                     ws_sources = result.get("web_search_sources") or []
                     source_count = len(ws_sources) if isinstance(ws_sources, list) else 0
                     _render_capability_status(
@@ -7428,16 +7979,23 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
         action = await _force_finalize(final_res, reason="max_iterations")
         return action == LoopAction.FINALIZED
 
+    fullscreen_handoff_message: str | None = None
+
     async def _run_chat() -> str:
         nonlocal current_provider, current_model, current_thread_id
         nonlocal current_run_id, current_run_version, current_signature
         nonlocal plan_mode, conversation_mode, workspace_root, workspace_fp, approval_mode
         nonlocal verbose_tool_events
+        nonlocal fullscreen_handoff_message
         nonlocal web_search_requested
         nonlocal last_web_search_effective
         nonlocal last_web_search_used
         nonlocal last_web_search_retry_without_tool
+        nonlocal voice_transcribe_requested
+        nonlocal last_voice_transcribe_effective
+        nonlocal last_voice_transcribe_used
         nonlocal attachment_context_for_turn
+        nonlocal voice_transcript_context_for_turn
         nonlocal attachment_markers_for_turn
         nonlocal attachment_file_ids_for_turn
         low_floor_usd = Decimal(os.getenv("TOPUP_LOW_BALANCE_FLOOR_USD", "5.00"))
@@ -7504,7 +8062,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 return
 
         async def _read_chat_message() -> str:
-            nonlocal prompt_toolkit_unavailable_warned, chat_prompt_session, chat_prompt_bindings
+            nonlocal prompt_toolkit_unavailable_warned, chat_prompt_session, chat_prompt_bindings, pending_voice_prefill, pending_voice_meta, prompt_input_active
             if use_prompt_toolkit_chat:
                 if PromptSession is None:
                     if not prompt_toolkit_unavailable_warned:
@@ -7521,6 +8079,75 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                             pasted = _read_clipboard_text()
                             if pasted:
                                 event.current_buffer.insert_text(pasted)
+
+                        @chat_prompt_bindings.add("escape", "v")
+                        def _chat_toggle_voice(event) -> None:
+                            buf = event.current_buffer
+                            saved_text = str(buf.text or "")
+                            saved_cursor = int(getattr(buf, "cursor_position", 0) or 0)
+                            loop = asyncio.get_event_loop()
+
+                            def _insert_from_voice(transcript: str) -> None:
+                                token = str(transcript or "").strip()
+                                if not token:
+                                    emit_metric("voice_capture_phase_total", {"phase": "transcript_empty"})
+                                    return
+                                inserted = False
+                                try:
+                                    current = str(buf.text or "")
+                                    if current == saved_text:
+                                        cursor = max(0, min(len(saved_text), saved_cursor))
+                                        prefix = saved_text[:cursor]
+                                        suffix = saved_text[cursor:]
+                                        needs_space = bool(prefix) and not prefix.endswith((" ", "\n", "\t"))
+                                        injected = f" {token}" if needs_space else token
+                                        buf.text = f"{prefix}{injected}{suffix}"
+                                        buf.cursor_position = len(prefix) + len(injected)
+                                        inserted = True
+                                    else:
+                                        if current and not current.endswith((" ", "\n", "\t")):
+                                            buf.insert_text(" ")
+                                        buf.insert_text(token)
+                                        inserted = True
+                                    app = getattr(chat_prompt_session, "app", None)
+                                    if app is not None and hasattr(app, "invalidate"):
+                                        app.invalidate()
+                                except Exception:
+                                    inserted = False
+                                if inserted:
+                                    emit_metric("voice_capture_phase_total", {"phase": "transcript_inserted_live"})
+
+
+                            async def _do_toggle() -> None:
+                                voice_effective = bool(
+                                    resolve_capability(
+                                        current_provider,
+                                        current_model,
+                                        "speech_to_text",
+                                    )
+                                )
+                                if not voice_effective:
+                                    console.print("[yellow]Voice capture unavailable for current provider/model.[/yellow]")
+                                    return
+                                was_listening = voice_button.is_recording
+                                await voice_button.toggle(
+                                    insert_text=_insert_from_voice,
+                                    transcribe_wav=_transcribe_voice_wav,
+                                )
+                                if not was_listening and voice_button.is_recording:
+                                    console.print("[dim]Listening... click Voice again to stop.[/dim]")
+
+                            loop.create_task(_do_toggle())
+
+                        @chat_prompt_bindings.add("escape", "m")
+                        def _chat_mcp_list(event) -> None:
+                            event.current_buffer.text = "/mcp list"
+                            event.current_buffer.validate_and_handle()
+
+                        @chat_prompt_bindings.add("escape", "a")
+                        def _chat_actions_help(event) -> None:
+                            event.current_buffer.text = "/help"
+                            event.current_buffer.validate_and_handle()
 
                     if chat_prompt_session is None:
                         kwargs: dict[str, Any] = {}
@@ -7558,13 +8185,107 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                             )
                             or ""
                         )
-                        raw = await chat_prompt_session.prompt_async(
-                            "chat: ",
-                            key_bindings=chat_prompt_bindings,
-                            multiline=False,
-                            wrap_lines=True,
-                            rprompt=composer_rprompt,
-                        )
+
+                        _mouse_default = "1"
+                        mouse_actions_enabled = str(os.getenv("OPENVEGAS_CHAT_MOUSE_ACTIONS", _mouse_default)).strip().lower() in {
+                            "1",
+                            "true",
+                            "yes",
+                            "on",
+                        }
+                        actions_menu_expanded = {"value": False}
+
+                        def _toolbar_click(command: str | None = None, *, submit: bool = False, toggle_actions: bool = False):
+                            def _handler(mouse_event) -> None:
+                                try:
+                                    event_type = getattr(mouse_event, "event_type", None)
+                                    if MouseEventType is not None and event_type != MouseEventType.MOUSE_UP:
+                                        return
+                                except Exception:
+                                    pass
+                                if toggle_actions:
+                                    actions_menu_expanded["value"] = not actions_menu_expanded["value"]
+                                    try:
+                                        app = getattr(chat_prompt_session, "app", None)
+                                        if app is not None:
+                                            app.invalidate()
+                                    except Exception:
+                                        pass
+                                    return
+                                buf = chat_prompt_session.default_buffer
+                                if command is None:
+                                    if submit:
+                                        buf.validate_and_handle()
+                                    return
+                                if submit:
+                                    buf.text = command
+                                    buf.validate_and_handle()
+                                else:
+                                    if str(buf.text or "").strip():
+                                        buf.insert_text(" ")
+                                    buf.insert_text(command)
+                            return _handler
+
+                        prompt_style = None
+                        if PromptStyle is not None:
+                            prompt_style = PromptStyle.from_dict({
+                                "bottom-toolbar": "bg:#202020 #d0d0d0",
+                                "bottom-toolbar.voice-chip": "bg:#2b2f36 #f5f7fa bold",
+                                "bottom-toolbar.voice-chip-active": "bg:#123a24 #caffdb bold",
+                            })
+
+                        def _composer_bottom_toolbar():
+                            if not mouse_actions_enabled:
+                                return ""
+                            voice_chip = f"◖{_icon('voice')}◗"
+                            if voice_button.is_recording:
+                                status = voice_button.label(include_hint=False)
+                                icon_token = _icon('voice')
+                                status_tail = str(status).replace(icon_token, "", 1).strip()
+                                if status_tail:
+                                    voice_chip = f"{voice_chip} {status_tail}"
+                            voice_style = "class:bottom-toolbar.voice-chip-active" if voice_button.is_recording else "class:bottom-toolbar.voice-chip"
+                            row = [
+                                ("class:bottom-toolbar", " "),
+                                (voice_style, f" {voice_chip} ", _toolbar_click("/voice", submit=True)),
+                                ("class:bottom-toolbar", "  "),
+                                ("class:bottom-toolbar", f"{_icon('actions')} Actions ", _toolbar_click(toggle_actions=True)),
+                            ]
+                            if actions_menu_expanded["value"]:
+                                row.extend([
+                                    ("class:bottom-toolbar", "  "),
+                                    ("class:bottom-toolbar", f"{_icon('attach')} Attach ", _toolbar_click("/attach")),
+                                    ("class:bottom-toolbar", "  "),
+                                    ("class:bottom-toolbar", f"{_icon('paste')} Paste ", _toolbar_click("/paste", submit=True)),
+                                    ("class:bottom-toolbar", "  "),
+                                    ("class:bottom-toolbar", f"{_icon('mcp')} MCP ", _toolbar_click("/mcp list", submit=True)),
+                                    ("class:bottom-toolbar", "  "),
+                                    ("class:bottom-toolbar", f"{_icon('quit')} Quit ", _toolbar_click("/exit", submit=True)),
+                                ])
+                            row.append(("class:bottom-toolbar", " "))
+                            return row
+
+                        toolbar_fn = _composer_bottom_toolbar if mouse_actions_enabled else None
+                        prefill_default = str(pending_voice_prefill or "")
+                        if prefill_default:
+                            pending_voice_prefill = None
+                            pending_voice_meta = None
+                        prompt_input_active = True
+                        try:
+                            raw = await chat_prompt_session.prompt_async(
+                                "chat: ",
+                                key_bindings=chat_prompt_bindings,
+                                multiline=False,
+                                wrap_lines=True,
+                                rprompt=composer_rprompt,
+                                mouse_support=mouse_actions_enabled,
+                                bottom_toolbar=toolbar_fn,
+                                style=prompt_style,
+                                refresh_interval=0.15,
+                                default=prefill_default,
+                            )
+                        finally:
+                            prompt_input_active = False
                     except EOFError:
                         return "/exit"
                     merged = _normalize_live_chat_input_text(raw)
@@ -7644,10 +8365,16 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 "Recommended default is 0.[/yellow]"
             )
         render_status_bar(console, _status_actor(), "ready", workspace_root)
+        _render_action_hint()
         dealer_panel.render("idle", "ready")
 
         while True:
-            message = await _read_chat_message()
+            if str(fullscreen_handoff_message or "").strip():
+                message = str(fullscreen_handoff_message or "").strip()
+                fullscreen_handoff_message = None
+                console.print(f"[dim]chat: {message}[/dim]")
+            else:
+                message = await _read_chat_message()
             if not message:
                 continue
 
@@ -7656,6 +8383,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 cmd = parts[0].lower()
 
                 if cmd == "/exit":
+                    voice_button.stop_if_recording()
                     console.print("[dim]Exiting chat.[/dim]")
                     return "exit"
                 if cmd == "/help":
@@ -7692,6 +8420,10 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                             f"[bold]Web Search Effective:[/bold] {web_search_effective}\n"
                             f"[bold]Last Web Search Used:[/bold] {last_web_search_used}\n"
                             f"[bold]Last Web Search Retry:[/bold] {last_web_search_retry_without_tool}\n"
+                            f"[bold]Voice STT Requested:[/bold] {voice_transcribe_requested}\n"
+                            f"[bold]Voice STT Effective:[/bold] {last_voice_transcribe_effective}\n"
+                            f"[bold]Last Voice STT Used:[/bold] {last_voice_transcribe_used}\n"
+                            f"[bold]MCP Feature Enabled:[/bold] {_mcp_feature_enabled()}\n"
                             f"[bold]Pending Attachments:[/bold] {len(pending_attachments)}\n"
                             "[bold]Style:[/bold] minimal (fixed)",
                             title="Chat Status",
@@ -7781,27 +8513,178 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         console.print(f"[green]Reset {failed_count} failed attachment(s) for retry.[/green]")
                     continue
                 if cmd == "/web":
-                    if len(parts) < 2:
-                        console.print("[red]Usage: /web <on|off>[/red]")
-                        continue
-                    state = parts[1].strip().lower()
-                    if state not in {"on", "off"}:
-                        console.print("[red]Usage: /web <on|off>[/red]")
-                        continue
-                    web_search_requested = state == "on"
                     web_search_effective = bool(
-                        web_search_requested
-                        and resolve_capability(
+                        resolve_capability(
                             current_provider,
                             current_model,
                             "web_search",
                         )
                     )
                     console.print(
-                        "[green]Web search "
-                        f"{'requested' if web_search_requested else 'disabled'}[/green] "
-                        f"[dim](effective={web_search_effective})[/dim]"
+                        "[dim]Web search is always on in chat. "
+                        f"effective={web_search_effective}[/dim]"
                     )
+                    continue
+                if cmd == "/voice":
+                    voice_effective = bool(
+                        resolve_capability(
+                            current_provider,
+                            current_model,
+                            "speech_to_text",
+                        )
+                    )
+                    if not voice_effective:
+                        console.print("[yellow]Voice capture unavailable for current provider/model.[/yellow]")
+                        continue
+                    if chat_prompt_session is None:
+                        console.print("[yellow]Voice capture requires prompt-toolkit chat mode.[/yellow]")
+                        continue
+                    was_listening = str(getattr(voice_button.state, "value", "")) == "listening"
+                    insert_observed = {"mode": "none", "chars": 0}
+
+                    def _insert_for_slash(transcript: str) -> None:
+                        mode, chars = _insert_voice_transcript_text(transcript)
+                        insert_observed["mode"] = mode
+                        insert_observed["chars"] = chars
+
+                    await voice_button.toggle(
+                        insert_text=_insert_for_slash,
+                        transcribe_wav=_transcribe_voice_wav,
+                    )
+                    if not was_listening and str(getattr(voice_button.state, "value", "")) == "listening":
+                        console.print("[dim]Listening... click Voice again to stop.[/dim]")
+                    elif was_listening:
+                        if int(insert_observed.get("chars") or 0) > 0:
+                            console.print(
+                                f"[green]Voice captured: transcript ready in input ({int(insert_observed.get('chars') or 0)} chars).[/green]"
+                            )
+                        elif not voice_button.last_error:
+                            console.print("[yellow]Voice error: empty transcript returned.[/yellow]")
+                    continue
+                if cmd == "/mcp":
+                    if len(parts) < 2:
+                        console.print("[red]Usage: /mcp <list|health|call> ...[/red]")
+                        console.print("[dim]Examples: /mcp list | /mcp health <server_id> | /mcp call <server_id> <tool> {\"k\":\"v\"}[/dim]")
+                        continue
+                    sub = parts[1].strip().lower()
+                    if sub == "list":
+                        _render_capability_status("mcp", "listing servers...")
+                        try:
+                            payload = await client.mcp_list_servers()
+                        except APIError as exc:
+                            console.print(f"[red]mcp list failed: {exc.detail}[/red]")
+                            continue
+                        servers = payload.get("servers") if isinstance(payload, dict) else []
+                        if not isinstance(servers, list) or not servers:
+                            console.print("[dim]No MCP servers registered.[/dim]")
+                            continue
+                        catalog_timeout = max(2, min(30, int(os.getenv("OPENVEGAS_MCP_CATALOG_TIMEOUT_SEC", "6"))))
+                        table = Table(title="MCP Servers")
+                        table.add_column("ID")
+                        table.add_column("Name")
+                        table.add_column("Transport")
+                        table.add_column("Health")
+                        table.add_column("Tools", justify="right")
+                        table.add_column("Target")
+                        for row in servers[:20]:
+                            if not isinstance(row, dict):
+                                continue
+                            server_id = str(row.get("id") or "").strip()
+                            health_label = "unknown"
+                            tool_count = "-"
+                            if server_id:
+                                try:
+                                    health = await client.mcp_server_health(server_id=server_id)
+                                    health_label = str((health or {}).get("status") or "unknown")
+                                except Exception:
+                                    health_label = "error"
+                                try:
+                                    tools_payload = await client.mcp_list_tools(server_id=server_id, timeout_sec=catalog_timeout)
+                                    tools = tools_payload.get("tools") if isinstance(tools_payload, dict) else []
+                                    if isinstance(tools, list):
+                                        tool_count = str(len(tools))
+                                except Exception:
+                                    tool_count = "?"
+                            table.add_row(
+                                server_id[:12],
+                                str(row.get("name") or ""),
+                                str(row.get("transport") or ""),
+                                health_label,
+                                tool_count,
+                                str(row.get("target") or "")[:64],
+                            )
+                        console.print(table)
+                        continue
+                    if sub == "health":
+                        if len(parts) < 3:
+                            console.print("[red]Usage: /mcp health <server_id>[/red]")
+                            continue
+                        server_id = str(parts[2] or "").strip()
+                        _render_capability_status("mcp", f"health {server_id}...")
+                        try:
+                            health = await client.mcp_server_health(server_id=server_id)
+                        except APIError as exc:
+                            console.print(f"[red]mcp health failed: {exc.detail}[/red]")
+                            continue
+                        status = str((health or {}).get("status") or "unknown")
+                        detail = str((health or {}).get("detail") or "")
+                        style = "green" if status == "ok" else "yellow"
+                        console.print(f"[{style}]MCP {server_id}: {status}[/{style}] [dim]{detail}[/dim]")
+                        continue
+                    if sub == "call":
+                        server_id, tool_name, tool_args, parse_err = _parse_mcp_call_command(message)
+                        if parse_err:
+                            console.print(f"[red]{parse_err}[/red]")
+                            continue
+                        event_label = f"mcp {server_id}::{tool_name}"
+                        render_tool_event(console, event_label, "start")
+                        _render_capability_status("mcp", f"tool_start {tool_name}")
+                        dealer_panel.render(
+                            map_lifecycle_event_to_state("tool_start", tool_name="mcp_call", status="running"),
+                            event_label,
+                        )
+                        try:
+                            result_payload = await client.mcp_call_tool(
+                                server_id=server_id,
+                                tool=tool_name,
+                                arguments=tool_args,
+                                timeout_sec=max(1, min(120, int(os.getenv("OPENVEGAS_MCP_CALL_TIMEOUT_SEC", "20")))),
+                            )
+                        except APIError as exc:
+                            dealer_panel.render(
+                                map_lifecycle_event_to_state("tool_result", tool_name="mcp_call", status="failed"),
+                                "mcp call failed",
+                            )
+                            _render_capability_status("mcp", f"tool_result {tool_name} failed")
+                            render_tool_result(console, event_label, "failed")
+                            console.print(f"[red]mcp call failed: {exc.detail}[/red]")
+                            continue
+                        dealer_panel.render(
+                            map_lifecycle_event_to_state("tool_result", tool_name="mcp_call", status="succeeded"),
+                            "mcp call succeeded",
+                        )
+                        _render_capability_status("mcp", f"tool_result {tool_name} succeeded")
+                        render_tool_result(console, event_label, "succeeded")
+                        if isinstance(result_payload, dict):
+                            lifecycle = result_payload.get("events")
+                            if isinstance(lifecycle, list):
+                                for evt in lifecycle[:20]:
+                                    if not isinstance(evt, dict):
+                                        continue
+                                    etype = str(evt.get("type") or "event")
+                                    detail = str(evt.get("detail") or "").strip()
+                                    _render_capability_status("mcp", f"{etype} {detail}".strip())
+                        result_value = result_payload.get("result") if isinstance(result_payload, dict) else result_payload
+                        pretty = json.dumps(result_value, indent=2, ensure_ascii=False, sort_keys=True)
+                        console.print(
+                            Panel(
+                                pretty[:8000] if pretty else "{}",
+                                title=f"MCP Result · {server_id} · {tool_name}",
+                                border_style="cyan",
+                            )
+                        )
+                        continue
+                    console.print("[red]Usage: /mcp <list|health|call> ...[/red]")
                     continue
                 if cmd == "/tooling":
                     console.print(
@@ -7937,6 +8820,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                                     f"[red]UI handoff blocked:[/red] {body.get('handoff_block_reason', 'unknown')}"
                                 )
                                 continue
+                    voice_button.stop_if_recording()
                     return "ui"
 
                 console.print("[red]Unknown slash command. Use /help.[/red]")
@@ -7947,8 +8831,11 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             unresolved_inline: list[str] = []
             auto_resolve_timed_out = False
             if not turn_is_workspace_intent:
-                if not pending_attachments and _extract_filename_like_tokens(message):
-                    _render_capability_status("file_search", "resolving attachment mentions...")
+                if not pending_attachments:
+                    if _extract_filename_like_tokens(message):
+                        _render_capability_status("file_read", "parsing files...")
+                    elif _message_requests_attachment_analysis(message):
+                        _render_capability_status("file_read", "parsing attachments...")
                 auto_paths, unresolved_inline, auto_resolve_timed_out = await _detect_auto_attach_paths_with_deadline(
                     message,
                     workspace_root=workspace_root,
@@ -8066,10 +8953,30 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 attachment_context_for_turn,
                 attachment_file_ids_for_turn,
             ) = await _prepare_attachments_for_turn()
+            voice_transcript_context_for_turn = ""
+            last_voice_transcribe_used = False
+            last_voice_transcribe_effective = bool(
+                voice_transcribe_requested
+                and resolve_capability(
+                    current_provider,
+                    current_model,
+                    "speech_to_text",
+                )
+            )
+            if _uploaded_for_turn:
+                (
+                    voice_transcript_context_for_turn,
+                    transcript_count_for_turn,
+                    stt_effective_for_turn,
+                ) = await _transcribe_audio_attachments_for_turn(_uploaded_for_turn)
+                last_voice_transcribe_effective = bool(stt_effective_for_turn)
+                last_voice_transcribe_used = transcript_count_for_turn > 0
             display_message = _inject_attachment_markers_into_message(message, _uploaded_for_turn)
             if attachment_markers_for_turn and display_message == message:
                 display_message = f"{message} {' '.join(attachment_markers_for_turn)}".strip()
-            render_user_input(console, display_message)
+            if show_user_echo:
+                _erase_prompt_line_if_possible()
+                render_user_input(console, display_message)
             chat_transcript.append(
                 {
                     "role": "user",
@@ -8107,6 +9014,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 render_status_bar(console, _status_actor(), "attachment upload required", workspace_root)
                 attachment_markers_for_turn = []
                 attachment_context_for_turn = ""
+                voice_transcript_context_for_turn = ""
                 attachment_file_ids_for_turn = []
                 continue
             has_image_attachment = any(
@@ -8174,11 +9082,13 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 pending_attachments.clear()
                 attachment_markers_for_turn = []
                 attachment_context_for_turn = ""
+                voice_transcript_context_for_turn = ""
                 attachment_file_ids_for_turn = []
 
             except APIError as e:
                 attachment_markers_for_turn = []
                 attachment_context_for_turn = ""
+                voice_transcript_context_for_turn = ""
                 attachment_file_ids_for_turn = []
                 body = e.data if isinstance(e.data, dict) else {}
                 code = str(body.get("error", ""))
@@ -8221,6 +9131,71 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                             console.print(f"[red]{e.detail}[/red]")
                     except Exception:
                         console.print(f"[red]{e.detail}[/red]")
+
+    use_fullscreen_chat = str(os.getenv("OPENVEGAS_CHAT_FULLSCREEN", "0")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    } and bool(getattr(sys.stdin, "isatty", lambda: False)()) and bool(getattr(sys.stdout, "isatty", lambda: False)())
+    if use_fullscreen_chat:
+        try:
+            from openvegas.tui.chat_fullscreen import run_chat_fullscreen
+
+            async def _fullscreen_auto_attach(message: str) -> tuple[list[str], list[str], bool]:
+                return await _detect_auto_attach_paths_with_deadline(
+                    message,
+                    workspace_root=workspace_root,
+                    max_candidates=max_attachments_per_turn,
+                    deadline_ms=auto_attach_deadline_ms,
+                )
+
+            def _fullscreen_path_resolver(token: str) -> str | None:
+                return _resolve_attachment_token_path(token, workspace_root=workspace_root)
+
+            def _fullscreen_web_gate(message: str, has_uploaded_attachments: bool) -> bool:
+                return _should_enable_web_search_for_turn(
+                    message,
+                    has_uploaded_attachments=has_uploaded_attachments,
+                )
+
+            fullscreen_outcome = run_chat_fullscreen(
+                provider=current_provider,
+                model=current_model,
+                workspace_root=workspace_root,
+                web_search_requested=web_search_requested,
+                voice_transcribe_requested=voice_transcribe_requested,
+                mcp_enabled=_mcp_feature_enabled(),
+                max_attachments_per_turn=max_attachments_per_turn,
+                max_attachment_bytes=max_attachment_bytes,
+                auto_attach_resolver=_fullscreen_auto_attach,
+                path_resolver=_fullscreen_path_resolver,
+                clipboard_text_reader=_read_clipboard_text,
+                clipboard_has_image=_clipboard_has_image,
+                clipboard_save_image=_save_clipboard_image_to_file,
+                pasted_path_extractor=_extract_pasted_path_candidates,
+                web_search_gate=_fullscreen_web_gate,
+                parse_mcp_call=_parse_mcp_call_command,
+                workspace_intent_detector=_has_workspace_tooling_intent,
+            )
+            raw = str(fullscreen_outcome or "").strip()
+            handoff_message = ""
+            if raw:
+                try:
+                    payload = json.loads(raw)
+                except Exception:
+                    payload = {}
+                if isinstance(payload, dict) and str(payload.get("action") or "") == "handoff_legacy":
+                    handoff_message = str(payload.get("message") or "").strip()
+            if handoff_message:
+                fullscreen_handoff_message = handoff_message
+            else:
+                return
+        except Exception as exc:
+            console.print(
+                "[yellow]Fullscreen chat unavailable; falling back to legacy mode."
+                f" ({type(exc).__name__})[/yellow]"
+            )
 
     while True:
         outcome = run_async(_run_chat())

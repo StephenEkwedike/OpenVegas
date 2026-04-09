@@ -24,6 +24,8 @@ from openvegas.config import (
     get_bearer_token,
     get_session,
     invalidate_session_cache,
+    request_touchid_unlock,
+    require_touchid_unlock_for_refresh_storage,
     token_expires_soon,
 )
 from openvegas.telemetry import emit_metric, emit_once_process
@@ -89,6 +91,19 @@ class OpenVegasClient:
         self._session_snapshot = get_session()
 
     async def _refresh_once(self, trigger: str) -> str:
+        refresh_storage = str(self._session_snapshot.get("refresh_storage", "") or "")
+        if require_touchid_unlock_for_refresh_storage(refresh_storage):
+            if not request_touchid_unlock():
+                emit_metric(
+                    "auth_refresh_attempt_total",
+                    {
+                        "surface": "cli",
+                        "trigger": trigger,
+                        "outcome": "failure",
+                        "reason": "touchid_unlock_failed",
+                    },
+                )
+                raise CliAuthError("touchid_unlock_required")
         try:
             token = await asyncio.to_thread(lambda: SupabaseAuth().refresh_token())
         except AuthRefreshTimeout as e:
@@ -193,7 +208,9 @@ class OpenVegasClient:
             except ValueError:
                 self._invalidate_session_cache("refresh_malformed")
                 raise APIError(401, "Session refresh returned invalid payload. Run: openvegas login")
-            except CliAuthError:
+            except CliAuthError as e:
+                if str(e) == "touchid_unlock_required":
+                    raise APIError(401, "Touch ID unlock required for saved session. Run: openvegas login")
                 self._invalidate_session_cache("refresh_rejected")
                 raise APIError(401, "Session expired. Run: openvegas login")
             resp = await self._do_http(method, path, **kwargs)
@@ -412,32 +429,36 @@ class OpenVegasClient:
         size_bytes: int,
         mime_type: str,
         sha256_hex: str,
+        timeout_sec: float | None = None,
     ) -> dict:
-        return await self._request(
-            "POST",
-            "/files/upload/init",
-            json={
+        req: dict[str, Any] = {
+            "json": {
                 "filename": str(filename or ""),
                 "size_bytes": int(size_bytes),
                 "mime_type": str(mime_type or ""),
                 "sha256": str(sha256_hex or "").lower(),
-            },
-        )
+            }
+        }
+        if timeout_sec is not None:
+            req["timeout"] = float(timeout_sec)
+        return await self._request("POST", "/files/upload/init", **req)
 
     async def upload_complete(
         self,
         *,
         upload_id: str,
         content_base64: str,
+        timeout_sec: float | None = None,
     ) -> dict:
-        return await self._request(
-            "POST",
-            "/files/upload/complete",
-            json={
+        req: dict[str, Any] = {
+            "json": {
                 "upload_id": str(upload_id or ""),
                 "content_base64": str(content_base64 or ""),
-            },
-        )
+            }
+        }
+        if timeout_sec is not None:
+            req["timeout"] = float(timeout_sec)
+        return await self._request("POST", "/files/upload/complete", **req)
 
     async def search_files(self, *, query: str, limit: int = 5) -> dict:
         return await self._request(
@@ -473,6 +494,13 @@ class OpenVegasClient:
 
     async def mcp_server_health(self, *, server_id: str) -> dict:
         return await self._request("GET", f"/mcp/servers/{server_id}/health")
+
+    async def mcp_list_tools(self, *, server_id: str, timeout_sec: int = 20) -> dict:
+        return await self._request(
+            "GET",
+            f"/mcp/servers/{server_id}/tools",
+            params={"timeout_sec": int(timeout_sec)},
+        )
 
     async def mcp_call_tool(
         self,
@@ -552,6 +580,30 @@ class OpenVegasClient:
             json={"reason": str(reason or "user_cancel")},
         )
 
+    async def speech_transcribe(
+        self,
+        *,
+        file_id: str,
+        provider: str = "openai",
+        model: str = "gpt-4o-mini-transcribe",
+        language: str | None = None,
+        prompt: str | None = None,
+        timeout_sec: float | None = None,
+    ) -> dict:
+        payload: dict[str, Any] = {
+            "file_id": str(file_id or ""),
+            "provider": str(provider or "openai"),
+            "model": str(model or "gpt-4o-mini-transcribe"),
+        }
+        if language:
+            payload["language"] = str(language)
+        if prompt:
+            payload["prompt"] = str(prompt)
+        req: dict[str, Any] = {"json": payload}
+        if timeout_sec is not None:
+            req["timeout"] = float(timeout_sec)
+        return await self._request("POST", "/speech/transcribe", **req)
+
     async def get_ops_diagnostics(self) -> dict:
         return await self._request("GET", "/ops/diagnostics")
 
@@ -560,6 +612,32 @@ class OpenVegasClient:
 
     async def get_ops_runs(self, *, limit: int = 25) -> dict:
         return await self._request("GET", "/ops/runs", params={"limit": max(1, int(limit))})
+
+    async def get_ops_run_detail(self, *, run_id: str) -> dict:
+        return await self._request("GET", f"/ops/runs/{str(run_id or '').strip()}")
+
+    async def get_ops_trends(self, *, limit: int = 120) -> dict:
+        return await self._request("GET", "/ops/trends", params={"limit": max(1, int(limit))})
+
+    async def get_ops_alert_state(self) -> dict:
+        return await self._request("GET", "/ops/alerts/state")
+
+    async def get_ops_alert_audit(self, *, limit: int = 100) -> dict:
+        return await self._request("GET", "/ops/alerts/audit", params={"limit": max(1, min(500, int(limit)))})
+
+    async def ack_ops_alert(self, *, metric: str) -> dict:
+        return await self._request("POST", "/ops/alerts/ack", json={"metric": str(metric or "")})
+
+    async def silence_ops_alert(self, *, metric: str, duration_sec: int = 900, reason: str = "") -> dict:
+        return await self._request(
+            "POST",
+            "/ops/alerts/silence",
+            json={
+                "metric": str(metric or ""),
+                "duration_sec": int(duration_sec),
+                "reason": str(reason or ""),
+            },
+        )
 
     async def get_mode(self) -> dict:
         return await self._request("GET", "/inference/mode")

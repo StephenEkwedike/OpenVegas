@@ -6,7 +6,9 @@ import json
 import logging
 import os
 import tempfile
+import sys
 import time
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +17,7 @@ from openvegas.telemetry import emit_metric
 CONFIG_DIR = Path.home() / ".openvegas"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 LEGACY_DEFAULT_BACKEND_URL = "https://api.openvegas.gg"
-DEFAULT_BACKEND_URL = os.getenv("OPENVEGAS_BACKEND_URL", "http://127.0.0.1:8000")
+DEFAULT_BACKEND_URL = os.getenv("OPENVEGAS_BACKEND_URL", "https://app.openvegas.ai")
 DEFAULT_OPENAI_MODEL = os.getenv("OPENVEGAS_DEFAULT_OPENAI_MODEL", "gpt-5.4")
 _PLATFORM_STORE_SERVICE = "openvegas"
 _PLATFORM_STORE_ACCOUNT = "refresh_token"
@@ -148,6 +150,97 @@ def platform_keychain_available() -> bool:
         return True
     except Exception:
         return False
+
+
+def touchid_enabled() -> bool:
+    return str(os.getenv("OPENVEGAS_ENABLE_TOUCHID", "0")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def touchid_supported() -> bool:
+    if sys.platform != "darwin":
+        return False
+    return platform_keychain_available()
+
+
+def require_touchid_unlock_for_refresh_storage(refresh_storage: str | None = None) -> bool:
+    if not touchid_enabled():
+        return False
+    storage = str(refresh_storage or "").strip().lower()
+    return storage in {"platform_credential_store", "platform", "keychain"}
+
+
+def _touchid_prompt_via_local_auth(reason: str = "Unlock OpenVegas session") -> bool:
+    if sys.platform != "darwin":
+        return False
+    try:
+        # Optional dependency: pyobjc-framework-LocalAuthentication
+        from LocalAuthentication import (  # type: ignore
+            LAContext,
+            LAPolicyDeviceOwnerAuthenticationWithBiometrics,
+        )
+    except Exception:
+        return False
+
+    completed = threading.Event()
+    outcome: dict[str, bool] = {"ok": False}
+
+    try:
+        context = LAContext.alloc().init()
+        can_eval, _err = context.canEvaluatePolicy_error_(
+            LAPolicyDeviceOwnerAuthenticationWithBiometrics,
+            None,
+        )
+        if not bool(can_eval):
+            return False
+
+        def _reply(success: bool, _error: object) -> None:
+            outcome["ok"] = bool(success)
+            completed.set()
+
+        context.evaluatePolicy_localizedReason_reply_(
+            LAPolicyDeviceOwnerAuthenticationWithBiometrics,
+            str(reason or "Unlock OpenVegas session"),
+            _reply,
+        )
+        completed.wait(timeout=20.0)
+    except Exception:
+        return False
+
+    return bool(outcome.get("ok", False))
+
+
+def request_touchid_unlock() -> bool:
+    """Best-effort biometric + keychain unlock gate on macOS.
+
+    1) Attempt explicit LocalAuthentication biometric prompt when available.
+    2) Confirm keychain retrieval succeeds for refresh token entry.
+
+    The refresh token remains stored only in keychain/config according to existing
+    storage policy. This function never broadens secret scope.
+    """
+    if not touchid_enabled():
+        return True
+    if not touchid_supported():
+        return False
+
+    require_biometric = str(os.getenv("OPENVEGAS_TOUCHID_REQUIRE_BIOMETRIC", "1")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    biometric_ok = _touchid_prompt_via_local_auth("Unlock OpenVegas session")
+    if require_biometric and not biometric_ok:
+        return False
+
+    keyring = _try_import_keyring()
+    if keyring is None:
+        return False
+    try:
+        token = keyring.get_password(_PLATFORM_STORE_SERVICE, _PLATFORM_STORE_ACCOUNT)
+    except Exception:
+        return False
+    return bool(str(token or "").strip())
 
 
 def save_refresh_to_platform_store(refresh_token: str) -> None:
@@ -295,6 +388,20 @@ def clear_session() -> None:
     _clear_platform_refresh_token_only()
     cfg = load_config()
     cfg["session"] = {}
+    save_config(cfg)
+    clear_session_claim_cache()
+
+
+def clear_access_token_keep_refresh() -> None:
+    """Clear only access token fields while preserving refresh-token storage."""
+    cfg = load_config()
+    session = dict(cfg.get("session") or {})
+    if not session:
+        return
+    # Preserve refresh storage location/token; only drop access token material.
+    session["access_token"] = ""
+    session["access_expires_at"] = 0
+    cfg["session"] = session
     save_config(cfg)
     clear_session_claim_cache()
 

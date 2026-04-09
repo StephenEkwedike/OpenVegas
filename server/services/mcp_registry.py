@@ -9,6 +9,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -173,30 +174,106 @@ class MCPRegistryService:
             raise ValueError("tool_required")
         args = dict(arguments or {})
         timeout = max(1, min(120, int(timeout_sec or 20)))
+        retries = max(0, min(4, int(os.getenv("OPENVEGAS_MCP_RETRY_MAX", "1"))))
+        events: list[dict[str, Any]] = [
+            {"type": "tool_start", "ts": _utc_now(), "detail": f"{rec.transport}:{tool_name}"}
+        ]
 
         if rec.transport == "streamable-http":
             url = str(rec.target or "").rstrip("/") + "/tools/call"
-            async with httpx.AsyncClient(timeout=float(timeout)) as client:
-                resp = await client.post(url, json={"tool": tool_name, "arguments": args})
-            if resp.status_code >= 400:
-                raise RuntimeError(f"http_error:{resp.status_code}")
-            data = resp.json() if resp.content else {}
-            return {"server_id": rec.id, "tool": tool_name, "transport": rec.transport, "result": data}
+            started = time.monotonic()
+            last_err = "http_unknown_error"
+            for attempt in range(1, retries + 2):
+                events.append({"type": "tool_progress", "ts": _utc_now(), "detail": f"attempt={attempt}"})
+                try:
+                    async with httpx.AsyncClient(timeout=float(timeout)) as client:
+                        resp = await client.post(url, json={"tool": tool_name, "arguments": args})
+                except httpx.TimeoutException as exc:
+                    last_err = f"timeout:{exc}"
+                    if attempt <= retries:
+                        await asyncio.sleep(min(1.5, 0.2 * (2 ** (attempt - 1))))
+                        continue
+                    raise TimeoutError("mcp_timeout") from exc
+                except Exception as exc:
+                    last_err = str(exc)
+                    if attempt <= retries:
+                        await asyncio.sleep(min(1.5, 0.2 * (2 ** (attempt - 1))))
+                        continue
+                    raise RuntimeError(last_err) from exc
+                if resp.status_code in {401, 403}:
+                    raise PermissionError(f"mcp_auth_failed:{resp.status_code}")
+                if resp.status_code in {408, 429} or resp.status_code >= 500:
+                    last_err = f"http_error:{resp.status_code}"
+                    if attempt <= retries:
+                        await asyncio.sleep(min(1.5, 0.2 * (2 ** (attempt - 1))))
+                        continue
+                    raise RuntimeError(last_err)
+                if resp.status_code >= 400:
+                    raise RuntimeError(f"http_error:{resp.status_code}")
+                data = resp.json() if resp.content else {}
+                elapsed_ms = round((time.monotonic() - started) * 1000.0, 1)
+                events.append({"type": "tool_result", "ts": _utc_now(), "detail": f"succeeded {elapsed_ms}ms"})
+                return {
+                    "server_id": rec.id,
+                    "tool": tool_name,
+                    "transport": rec.transport,
+                    "result": data,
+                    "events": events,
+                    "attempts": attempt,
+                    "latency_ms": elapsed_ms,
+                }
+            raise RuntimeError(last_err)
 
         if rec.transport == "websocket":
             import websockets
 
-            async with websockets.connect(str(rec.target or ""), open_timeout=float(timeout), close_timeout=2.0) as ws:
-                await ws.send(json.dumps({"type": "tool.call", "tool": tool_name, "arguments": args}, separators=(",", ":")))
-                raw = await asyncio.wait_for(ws.recv(), timeout=float(timeout))
-            parsed: Any
-            if isinstance(raw, bytes):
-                raw = raw.decode("utf-8", errors="ignore")
-            try:
-                parsed = json.loads(str(raw or ""))
-            except Exception:
-                parsed = {"text": str(raw or "")}
-            return {"server_id": rec.id, "tool": tool_name, "transport": rec.transport, "result": parsed}
+            started = time.monotonic()
+            last_err = "ws_unknown_error"
+            for attempt in range(1, retries + 2):
+                events.append({"type": "tool_progress", "ts": _utc_now(), "detail": f"attempt={attempt}"})
+                try:
+                    async with websockets.connect(
+                        str(rec.target or ""),
+                        open_timeout=float(timeout),
+                        close_timeout=2.0,
+                    ) as ws:
+                        await ws.send(
+                            json.dumps({"type": "tool.call", "tool": tool_name, "arguments": args}, separators=(",", ":"))
+                        )
+                        raw = await asyncio.wait_for(ws.recv(), timeout=float(timeout))
+                except asyncio.TimeoutError as exc:
+                    last_err = "ws_timeout"
+                    if attempt <= retries:
+                        await asyncio.sleep(min(1.5, 0.2 * (2 ** (attempt - 1))))
+                        continue
+                    raise TimeoutError("mcp_timeout") from exc
+                except Exception as exc:
+                    last_err = str(exc)
+                    if attempt <= retries:
+                        await asyncio.sleep(min(1.5, 0.2 * (2 ** (attempt - 1))))
+                        continue
+                    raise RuntimeError(last_err) from exc
+                parsed: Any
+                if isinstance(raw, bytes):
+                    raw = raw.decode("utf-8", errors="ignore")
+                try:
+                    parsed = json.loads(str(raw or ""))
+                except Exception:
+                    parsed = {"text": str(raw or "")}
+                if isinstance(parsed, dict) and int(parsed.get("status_code") or 0) in {401, 403}:
+                    raise PermissionError(f"mcp_auth_failed:{int(parsed.get('status_code') or 0)}")
+                elapsed_ms = round((time.monotonic() - started) * 1000.0, 1)
+                events.append({"type": "tool_result", "ts": _utc_now(), "detail": f"succeeded {elapsed_ms}ms"})
+                return {
+                    "server_id": rec.id,
+                    "tool": tool_name,
+                    "transport": rec.transport,
+                    "result": parsed,
+                    "events": events,
+                    "attempts": attempt,
+                    "latency_ms": elapsed_ms,
+                }
+            raise RuntimeError(last_err)
 
         # stdio transport:
         # Convention: command receives "<tool>" "<arguments-json>" and outputs JSON on stdout.
@@ -204,6 +281,8 @@ class MCPRegistryService:
         if not target:
             raise RuntimeError("missing_stdio_target")
         cmd_parts = shlex.split(target)
+        started = time.monotonic()
+        events.append({"type": "tool_progress", "ts": _utc_now(), "detail": "spawn"})
         proc = await asyncio.to_thread(
             subprocess.run,
             [*cmd_parts, tool_name, json.dumps(args, separators=(",", ":"), ensure_ascii=False)],
@@ -224,10 +303,163 @@ class MCPRegistryService:
             parsed = {}
         if int(proc.returncode) != 0:
             raise RuntimeError(f"stdio_exit_{proc.returncode}:{stderr[:200]}")
+        elapsed_ms = round((time.monotonic() - started) * 1000.0, 1)
+        events.append({"type": "tool_result", "ts": _utc_now(), "detail": f"succeeded {elapsed_ms}ms"})
         return {
             "server_id": rec.id,
             "tool": tool_name,
             "transport": rec.transport,
             "result": parsed,
             "stderr": stderr,
+            "events": events,
+            "attempts": 1,
+            "latency_ms": elapsed_ms,
         }
+
+    async def list_tools(
+        self,
+        *,
+        user_id: str,
+        server_id: str,
+        timeout_sec: int = 20,
+    ) -> dict[str, Any]:
+        rec = await self.get_server(user_id=user_id, server_id=server_id)
+        if not rec:
+            raise KeyError("not_found")
+        timeout = max(1, min(120, int(timeout_sec or 20)))
+        retries = max(0, min(4, int(os.getenv("OPENVEGAS_MCP_RETRY_MAX", "1"))))
+
+        if rec.transport == "streamable-http":
+            base = str(rec.target or "").rstrip("/")
+            candidates = [
+                ("GET", f"{base}/tools", None),
+                ("POST", f"{base}/tools/list", {}),
+                ("POST", f"{base}/tools.list", {}),
+            ]
+            last_error = "tool_catalog_unavailable"
+            async with httpx.AsyncClient(timeout=float(timeout)) as client:
+                for attempt in range(1, retries + 2):
+                    for method, url, body in candidates:
+                        try:
+                            if method == "GET":
+                                resp = await client.get(url)
+                            else:
+                                resp = await client.post(url, json=body)
+                            if resp.status_code in {401, 403}:
+                                raise PermissionError(f"mcp_auth_failed:{resp.status_code}")
+                            if resp.status_code in {408, 429} or resp.status_code >= 500:
+                                last_error = f"http_error:{resp.status_code}"
+                                continue
+                            if resp.status_code >= 400:
+                                last_error = f"http_error:{resp.status_code}"
+                                continue
+                            data = resp.json() if resp.content else {}
+                            tools = data.get("tools") if isinstance(data, dict) else data
+                            if isinstance(tools, list):
+                                return {
+                                    "server_id": rec.id,
+                                    "transport": rec.transport,
+                                    "tools": tools,
+                                    "attempts": attempt,
+                                }
+                        except PermissionError:
+                            raise
+                        except httpx.TimeoutException:
+                            last_error = "timeout"
+                            continue
+                        except Exception as exc:
+                            last_error = str(exc)
+                            continue
+                    if attempt <= retries:
+                        await asyncio.sleep(min(1.5, 0.2 * (2 ** (attempt - 1))))
+            raise RuntimeError(last_error)
+
+        if rec.transport == "websocket":
+            import websockets
+
+            last_err = "ws_tool_list_failed"
+            for attempt in range(1, retries + 2):
+                try:
+                    async with websockets.connect(
+                        str(rec.target or ""),
+                        open_timeout=float(timeout),
+                        close_timeout=2.0,
+                    ) as ws:
+                        await ws.send(json.dumps({"type": "tools.list"}, separators=(",", ":")))
+                        raw = await asyncio.wait_for(ws.recv(), timeout=float(timeout))
+                except asyncio.TimeoutError as exc:
+                    last_err = "timeout"
+                    if attempt <= retries:
+                        await asyncio.sleep(min(1.5, 0.2 * (2 ** (attempt - 1))))
+                        continue
+                    raise TimeoutError("mcp_timeout") from exc
+                except Exception as exc:
+                    last_err = str(exc)
+                    if attempt <= retries:
+                        await asyncio.sleep(min(1.5, 0.2 * (2 ** (attempt - 1))))
+                        continue
+                    raise RuntimeError(last_err) from exc
+                if isinstance(raw, bytes):
+                    raw = raw.decode("utf-8", errors="ignore")
+                try:
+                    parsed = json.loads(str(raw or ""))
+                except Exception:
+                    parsed = {"tools": []}
+                if isinstance(parsed, dict) and int(parsed.get("status_code") or 0) in {401, 403}:
+                    raise PermissionError(f"mcp_auth_failed:{int(parsed.get('status_code') or 0)}")
+                tools = parsed.get("tools") if isinstance(parsed, dict) else []
+                if not isinstance(tools, list):
+                    tools = []
+                return {
+                    "server_id": rec.id,
+                    "transport": rec.transport,
+                    "tools": tools,
+                    "raw": parsed,
+                    "attempts": attempt,
+                }
+            raise RuntimeError(last_err)
+
+        # stdio transport:
+        target = str(rec.target or "").strip()
+        if not target:
+            raise RuntimeError("missing_stdio_target")
+        cmd_parts = shlex.split(target)
+        # Two conventions supported:
+        # 1) "<cmd> --list-tools"
+        # 2) "<cmd> __list_tools__ {}"
+        attempts = [
+            [*cmd_parts, "--list-tools"],
+            [*cmd_parts, "__list_tools__", "{}"],
+        ]
+        last_error = "tool_catalog_unavailable"
+        for argv in attempts:
+            proc = await asyncio.to_thread(
+                subprocess.run,
+                argv,
+                capture_output=True,
+                text=True,
+                timeout=float(timeout),
+                check=False,
+            )
+            stdout = str(proc.stdout or "").strip()
+            stderr = str(proc.stderr or "").strip()
+            if int(proc.returncode) != 0:
+                last_error = f"stdio_exit_{proc.returncode}:{stderr[:200]}"
+                continue
+            parsed: Any
+            if stdout:
+                try:
+                    parsed = json.loads(stdout)
+                except Exception:
+                    parsed = {"tools": []}
+            else:
+                parsed = {"tools": []}
+            tools = parsed.get("tools") if isinstance(parsed, dict) else parsed
+            if isinstance(tools, list):
+                return {
+                    "server_id": rec.id,
+                    "transport": rec.transport,
+                    "tools": tools,
+                    "stderr": stderr,
+                }
+        raise RuntimeError(last_error)

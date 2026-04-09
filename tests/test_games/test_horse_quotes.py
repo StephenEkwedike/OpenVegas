@@ -182,18 +182,24 @@ class _FakeWallet:
         self.place_bet_calls = 0
         self.settle_win_calls = 0
         self.settle_loss_calls = 0
+        self.place_bet_amounts: list[Decimal] = []
+        self.settle_win_amounts: list[Decimal] = []
+        self.settle_loss_amounts: list[Decimal] = []
 
     async def place_bet(self, *args, **kwargs):
-        _ = args, kwargs
         self.place_bet_calls += 1
+        if len(args) >= 2:
+            self.place_bet_amounts.append(Decimal(str(args[1])))
 
     async def settle_win(self, *args, **kwargs):
-        _ = args, kwargs
         self.settle_win_calls += 1
+        if len(args) >= 2:
+            self.settle_win_amounts.append(Decimal(str(args[1])))
 
     async def settle_loss(self, *args, **kwargs):
-        _ = args, kwargs
         self.settle_loss_calls += 1
+        if len(args) >= 2:
+            self.settle_loss_amounts.append(Decimal(str(args[1])))
 
 
 async def _fake_resolve_result(**kwargs):
@@ -321,3 +327,84 @@ async def test_same_quote_different_horse_concurrent_one_conflicts(monkeypatch):
     statuses = sorted([r1.status_code, r2.status_code])
     assert statuses == [200, 409]
     assert wallet.place_bet_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_quote_play_rejects_tampered_board_hash(monkeypatch):
+    db = _FakeDB()
+    wallet = _FakeWallet()
+    monkeypatch.setattr(games_routes, "get_db", lambda: db)
+    monkeypatch.setattr(games_routes, "get_wallet", lambda: wallet)
+    monkeypatch.setattr(games_routes, "_resolve_result", _fake_resolve_result)
+    monkeypatch.setattr(games_routes, "_record_game_history", _noop_record_game_history)
+
+    create_req = games_routes.HorseQuoteRequest(bet_type="win", budget_v="20", idempotency_key="quote-key")
+    user = {"user_id": "11111111-1111-1111-1111-111111111111"}
+    quote_resp = await games_routes._create_horse_quote(create_req, user)
+    quote_id = json.loads(quote_resp.body_text)["quote_id"]
+
+    db.quotes[str(quote_id)]["board_hash"] = "tampered"
+
+    req = games_routes.PlayRequest(quote_id=quote_id, horse=1, idempotency_key="play-key")
+    out = await games_routes._play_horse_quote(req=req, user=user, is_demo=False)
+    body = json.loads(out.body_text)
+    assert out.status_code == 409
+    assert body["error"] == "quote_integrity_error"
+    assert wallet.place_bet_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_quote_play_uses_quote_snapshot_for_render_and_settlement(monkeypatch):
+    db = _FakeDB()
+    wallet = _FakeWallet()
+    monkeypatch.setattr(games_routes, "get_db", lambda: db)
+    monkeypatch.setattr(games_routes, "get_wallet", lambda: wallet)
+    monkeypatch.setattr(games_routes, "_record_game_history", _noop_record_game_history)
+
+    async def _resolve_with_conflicting_runtime_odds(**kwargs):
+        bet = kwargs["bet"]
+        return GameResult(
+            game_id=bet["game_id"],
+            player_id=bet["player_id"],
+            bet_amount=Decimal(str(bet["amount"])),
+            payout=Decimal("0"),
+            net=Decimal("0"),
+            outcome_data={
+                "finish_order_nums": [int(bet["horse"]), 2, 3],
+                "horses": [
+                    {"number": 1, "name": "A", "odds": "999.0"},
+                    {"number": 2, "name": "B", "odds": "999.0"},
+                ],
+            },
+            server_seed="server",
+            server_seed_hash="hash",
+            client_seed="client",
+            nonce=0,
+            provably_fair=True,
+        )
+
+    monkeypatch.setattr(games_routes, "_resolve_result", _resolve_with_conflicting_runtime_odds)
+
+    create_req = games_routes.HorseQuoteRequest(bet_type="win", budget_v="20", idempotency_key="quote-key")
+    user = {"user_id": "11111111-1111-1111-1111-111111111111"}
+    quote_resp = await games_routes._create_horse_quote(create_req, user)
+    quote_payload = json.loads(quote_resp.body_text)
+    quote_id = quote_payload["quote_id"]
+
+    selected = next(h for h in quote_payload["horses"] if int(h["number"]) == 1)
+
+    req = games_routes.PlayRequest(quote_id=quote_id, horse=1, idempotency_key="play-key")
+    out = await games_routes._play_horse_quote(req=req, user=user, is_demo=False)
+    payload = json.loads(out.body_text)
+    assert out.status_code == 200
+
+    outcome = payload["outcome_data"]
+    assert outcome["selected_horse_odds"] == str(selected["odds"])
+    assert outcome["debit_v"] == str(selected["debit_v"])
+    assert outcome["payout_if_hit_v"] == str(selected["payout_if_hit_v"])
+    assert outcome["settlement_debit_v"] == str(selected["debit_v"])
+    assert outcome["settlement_payout_if_hit_v"] == str(selected["payout_if_hit_v"])
+    assert all(str(h.get("odds")) != "999.0" for h in outcome.get("horses", []))
+
+    assert wallet.place_bet_calls == 1
+    assert wallet.place_bet_amounts[0] == Decimal(str(selected["debit_v"]))

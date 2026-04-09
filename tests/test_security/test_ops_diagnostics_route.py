@@ -41,6 +41,7 @@ def test_ops_diagnostics_returns_metrics_and_summary():
     assert "run_summary" in body
     assert "thresholds" in body
     assert "rollback" in body
+    assert "alert_audit" in body
     assert body["run_summary"]["run_count"] >= 1
 
     alerts_resp = client.get("/ops/alerts")
@@ -55,6 +56,39 @@ def test_ops_diagnostics_returns_metrics_and_summary():
     runs_body = runs_resp.json()
     assert "runs" in runs_body
     assert isinstance(runs_body["runs"], list)
+    assert runs_body["runs"], "expected at least one run row for drill-down"
+
+    run_id = str(runs_body["runs"][0].get("run_id", ""))
+    detail_resp = client.get(f"/ops/runs/{run_id}")
+    assert detail_resp.status_code == 200
+    assert detail_resp.json()["run"]["run_id"] == run_id
+
+    trends_resp = client.get("/ops/trends?limit=10")
+    assert trends_resp.status_code == 200
+    assert isinstance(trends_resp.json().get("trend"), list)
+
+    ack_resp = client.post("/ops/alerts/ack", json={"metric": "turn_latency_ms_p95"})
+    assert ack_resp.status_code == 200
+    assert ack_resp.json()["acked"] is True
+
+    silence_resp = client.post(
+        "/ops/alerts/silence",
+        json={"metric": "turn_latency_ms_p95", "duration_sec": 120, "reason": "maintenance"},
+    )
+    assert silence_resp.status_code == 200
+    assert silence_resp.json()["silenced"] is True
+
+    state_resp = client.get("/ops/alerts/state")
+    assert state_resp.status_code == 200
+    state = state_resp.json()
+    assert "turn_latency_ms_p95" in set(state.get("acked", []))
+    assert "turn_latency_ms_p95" in dict(state.get("silenced", {}))
+
+    audit_resp = client.get("/ops/alerts/audit?limit=10")
+    assert audit_resp.status_code == 200
+    audit_rows = audit_resp.json().get("audit", [])
+    assert isinstance(audit_rows, list)
+    assert audit_rows
 
 
 def test_ops_alerts_fires_when_threshold_exceeded(monkeypatch):

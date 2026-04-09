@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from rich.console import Console
 from rich.table import Table
@@ -24,6 +25,143 @@ DIM = Style(color="grey50")
 
 
 _MD_TABLE_SEPARATOR_RE = re.compile(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$")
+
+
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)\s]+)\)")
+_MD_BOLD_RE = re.compile(r"\*\*([^*]+)\*\*")
+_MD_ITALIC_RE = re.compile(r"(?<!\*)\*([^*\n]+)\*(?!\*)")
+_PAREN_URL_LINE_RE = re.compile(r"^\s*\((https?://[^)\s]+)\)\s*$")
+_URL_RE = re.compile(r"https?://[^\s)]+")
+_SOURCE_HEADING_RE = re.compile(r"^\s*(?:[-*]\s*)?(?:sources?|references?)\s*:?\s*$", re.IGNORECASE)
+_DANGLING_CITATION_LABEL_RE = re.compile(
+    r"^\s*(?:[-*]\s*)?.*(?:source|page|link|url|reference).*\:\s*$",
+    re.IGNORECASE,
+)
+
+
+def _clean_url_token(raw: str) -> str:
+    token = str(raw or "").strip()
+    if not token:
+        return token
+    token = token.rstrip("`\'\"),.;:>")
+    token = token.lstrip("<")
+    token = token.rstrip("?&")
+    return token
+_CITATION_DOMAIN_ONLY_RE = re.compile(r"^\(?[A-Za-z0-9.-]+\.[A-Za-z]{2,}\)?$")
+
+
+def _strip_tracking_params(url: str) -> str:
+    token = _clean_url_token(url)
+    if not token:
+        return token
+    try:
+        parsed = urlparse(token)
+        kept = []
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True):
+            k = str(key or "").lower()
+            if k.startswith("utm_") or k in {"fbclid", "gclid", "mc_cid", "mc_eid"}:
+                continue
+            kept.append((key, value))
+        return urlunparse(parsed._replace(query=urlencode(kept, doseq=True)))
+    except Exception:
+        return token
+
+
+def _clean_assistant_markdown(text: str) -> str:
+    """Convert raw model markdown into cleaner terminal prose."""
+    out = str(text or "")
+    if not out.strip():
+        return ""
+
+    # 1) markdown links => label (url)
+    def _md_link_sub(match: re.Match[str]) -> str:
+        label = str(match.group(1) or "").strip()
+        url = _strip_tracking_params(str(match.group(2) or "").strip())
+        return url
+
+    out = _MD_LINK_RE.sub(_md_link_sub, out)
+
+    # 2) strip tracking residue
+    out = re.sub(r"[?&]utm_source=[^\s\)&]*", "", out)
+
+    # 3) remove heavy markdown emphasis
+    out = _MD_BOLD_RE.sub(r"\1", out)
+    out = _MD_ITALIC_RE.sub(r"\1", out)
+
+    # 4) remove stray backticks and empty citation residue
+    out = re.sub(r"(?<!\w)`(?!\w)", "", out)
+    out = re.sub(r"`\s*$", "", out, flags=re.MULTILINE)
+    out = out.replace("`", "")
+
+    # 5) collapse excessive blank lines
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    out = re.sub(r"^\s*[-:]+\s*$", "", out, flags=re.MULTILINE)
+    return out.strip()
+
+
+def _extract_sources_from_text_lines(lines: list[str]) -> tuple[list[str], list[str]]:
+    cleaned_lines: list[str] = []
+    sources: list[str] = []
+    seen: set[str] = set()
+
+    def _add_source(raw_url: str) -> None:
+        token = _strip_tracking_params(_clean_url_token(raw_url))
+        if token and token not in seen:
+            seen.add(token)
+            sources.append(token)
+
+    for raw in lines:
+        row = str(raw or "")
+
+        # Markdown links: keep label in prose, collect URL as source.
+        def _link_sub(match: re.Match[str]) -> str:
+            label = str(match.group(1) or "").strip()
+            url = _clean_url_token(match.group(2))
+            _add_source(url)
+            return label
+
+        row = _MD_LINK_RE.sub(_link_sub, row)
+
+        # Standalone parenthesized URL citation lines.
+        solo = _PAREN_URL_LINE_RE.match(row.strip())
+        if solo:
+            _add_source(solo.group(1))
+            continue
+
+        # Standalone citation-host lines left over from markdown links: (example.com)
+        if _CITATION_DOMAIN_ONLY_RE.match(row.strip()):
+            continue
+
+        # Parenthesized inline URLs: remove from prose and collect.
+        for m in re.finditer(r"\((https?://[^)\s]+)\)", row):
+            _add_source(_clean_url_token(m.group(1)))
+        row = re.sub(r"\((https?://[^)\s]+)\)", "", row)
+
+        # Bare URL-only lines.
+        bare = _URL_RE.fullmatch(row.strip())
+        if bare:
+            _add_source(_clean_url_token(bare.group(0)))
+            continue
+
+        # Any remaining inline URLs: collect and remove from prose.
+        for m in _URL_RE.finditer(row):
+            _add_source(_clean_url_token(m.group(0)))
+        row = _URL_RE.sub("", row)
+        row = row.replace("`", "")
+
+        row = re.sub(r"\s{2,}", " ", row)
+        row = re.sub(r"\s+([,.;:!?])", r"\1", row)
+        row = row.rstrip()
+        if _SOURCE_HEADING_RE.match(row):
+            continue
+        if _DANGLING_CITATION_LABEL_RE.match(row):
+            continue
+        if re.fullmatch(r"[-:*\s]+", row or ""):
+            continue
+        if row.strip():
+            cleaned_lines.append(row)
+
+    return cleaned_lines, sources
 
 
 def _split_markdown_table_blocks(payload: str) -> list[tuple[str, list[str]]]:
@@ -106,12 +244,24 @@ def render_user_input(console: Console, text: str) -> None:
 
 def render_assistant(console: Console, text: str) -> None:
     """Render assistant response with plain text + markdown table formatting."""
-    payload = str(text or "")
+    payload = _clean_assistant_markdown(text)
     if not payload:
         return
+
     blocks = _split_markdown_table_blocks(payload)
     if not blocks:
         blocks = [("text", payload.splitlines() or [payload])]
+
+    all_sources: list[str] = []
+    seen_sources: set[str] = set()
+
+    def _merge_sources(items: list[str]) -> None:
+        for item in items:
+            token = str(item or "").strip()
+            if token and token not in seen_sources:
+                seen_sources.add(token)
+                all_sources.append(token)
+
     first_text_line = True
     for block_type, lines in blocks:
         if block_type == "table":
@@ -123,21 +273,35 @@ def render_assistant(console: Console, text: str) -> None:
                     console.print(line)
                 first_text_line = False
             continue
-        for line_text in lines:
+
+        cleaned_lines, sources = _extract_sources_from_text_lines(lines)
+        _merge_sources(sources)
+        for line_text in cleaned_lines:
             line = Text()
             line.append("• " if first_text_line else "  ", style=ASSISTANT_BULLET)
             line.append(line_text, style=ASSISTANT_TEXT)
             console.print(line)
             first_text_line = False
 
+    if all_sources:
+        console.print(Text("  Sources:", style=DIM))
+        for idx, url in enumerate(all_sources[:8], start=1):
+            console.print(Text(f"    {idx}. {url}", style=DIM))
+
 
 def render_tool_event(console: Console, label: str, detail: str = "") -> None:
     """Render compact, dim tool activity line."""
+    show = str(os.getenv("OPENVEGAS_CHAT_SHOW_TOOL_EVENTS", "0")).strip().lower() in {"1", "true", "yes", "on"}
+    if not show:
+        return
     text = f"  ⟳ {label}" + (f" — {detail}" if detail else "")
     console.print(Text(text, style=DIM))
 
 
 def render_tool_result(console: Console, label: str, status: str) -> None:
+    show = str(os.getenv("OPENVEGAS_CHAT_SHOW_TOOL_EVENTS", "0")).strip().lower() in {"1", "true", "yes", "on"}
+    if not show:
+        return
     text = f"  ⟳ {label} — {status}"
     console.print(Text(text, style=DIM))
 

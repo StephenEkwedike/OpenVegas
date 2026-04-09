@@ -97,6 +97,36 @@ class MCPCallToolRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+@router.get("/mcp/servers/{server_id}/tools")
+async def mcp_list_tools(server_id: str, timeout_sec: int = 20, user: dict = Depends(get_current_user)):
+    if not _mcp_enabled():
+        return JSONResponse(status_code=503, content={"error": "feature_disabled", "detail": "mcp disabled"})
+    svc = get_mcp_registry_service()
+    try:
+        result = await svc.list_tools(
+            user_id=str(user["user_id"]),
+            server_id=server_id,
+            timeout_sec=timeout_sec,
+        )
+    except KeyError:
+        emit_metric("mcp_tool_list_total", {"outcome": "failure", "reason": "not_found"})
+        return JSONResponse(status_code=404, content={"error": "not_found", "detail": "MCP server not found"})
+    except PermissionError as exc:
+        emit_metric("mcp_tool_list_total", {"outcome": "failure", "reason": "auth"})
+        return JSONResponse(status_code=403, content={"error": "mcp_auth_failed", "detail": str(exc)})
+    except TimeoutError as exc:
+        emit_metric("mcp_tool_list_total", {"outcome": "failure", "reason": "timeout"})
+        return JSONResponse(status_code=504, content={"error": "mcp_timeout", "detail": str(exc)})
+    except RuntimeError as exc:
+        emit_metric("mcp_tool_list_total", {"outcome": "failure", "reason": "runtime"})
+        return JSONResponse(status_code=502, content={"error": "mcp_tool_list_failed", "detail": str(exc)})
+    emit_metric(
+        "mcp_tool_list_total",
+        {"outcome": "success", "transport": str(result.get("transport", "unknown"))},
+    )
+    return result
+
+
 @router.post("/mcp/servers/{server_id}/tools/call")
 async def mcp_call_tool(server_id: str, req: MCPCallToolRequest, user: dict = Depends(get_current_user)):
     if not _mcp_enabled():
@@ -111,12 +141,25 @@ async def mcp_call_tool(server_id: str, req: MCPCallToolRequest, user: dict = De
             timeout_sec=req.timeout_sec,
         )
     except KeyError:
+        emit_metric("mcp_tool_call_total", {"outcome": "failure", "reason": "not_found"})
         return JSONResponse(status_code=404, content={"error": "not_found", "detail": "MCP server not found"})
     except NotImplementedError as exc:
+        emit_metric("mcp_tool_call_total", {"outcome": "failure", "reason": "not_implemented"})
         return JSONResponse(status_code=501, content={"error": str(exc), "detail": str(exc)})
     except ValueError as exc:
+        emit_metric("mcp_tool_call_total", {"outcome": "failure", "reason": "invalid_request"})
         return JSONResponse(status_code=400, content={"error": str(exc), "detail": str(exc)})
+    except PermissionError as exc:
+        emit_metric("mcp_tool_call_total", {"outcome": "failure", "reason": "auth"})
+        return JSONResponse(status_code=403, content={"error": "mcp_auth_failed", "detail": str(exc)})
+    except TimeoutError as exc:
+        emit_metric("mcp_tool_call_total", {"outcome": "failure", "reason": "timeout"})
+        return JSONResponse(status_code=504, content={"error": "mcp_timeout", "detail": str(exc)})
     except RuntimeError as exc:
+        emit_metric("mcp_tool_call_total", {"outcome": "failure", "reason": "runtime"})
         return JSONResponse(status_code=502, content={"error": "mcp_tool_call_failed", "detail": str(exc)})
-    emit_metric("mcp_tool_call_total", {"transport": str(result.get("transport", "unknown"))})
+    emit_metric(
+        "mcp_tool_call_total",
+        {"outcome": "success", "transport": str(result.get("transport", "unknown"))},
+    )
     return result

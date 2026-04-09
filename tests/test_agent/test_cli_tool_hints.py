@@ -69,6 +69,7 @@ from openvegas.cli import _resolve_screenshot_stem_to_path
 from openvegas.cli import _message_requests_attachment_analysis
 from openvegas.cli import _format_composer_attachment_status_row
 from openvegas.cli import _format_live_composer_status_row
+from openvegas.cli import _parse_mcp_call_command
 from openvegas.cli import _preflight_filter_attachments_for_capabilities
 from openvegas.cli import _inject_attachment_markers_into_message
 from openvegas.cli import _is_chat_attachment_mime_allowed
@@ -276,6 +277,7 @@ def test_resolve_screenshot_stem_selects_latest_match(tmp_path: Path):
 def test_message_requests_attachment_analysis_detection():
     assert _message_requests_attachment_analysis("tell me what you see in this screenshot") is True
     assert _message_requests_attachment_analysis("can you analyze this pdf") is True
+    assert _message_requests_attachment_analysis("please transcribe this audio clip") is True
     assert _message_requests_attachment_analysis("find latest homes in austin") is False
 
 
@@ -373,6 +375,58 @@ def test_format_composer_attachment_status_row_shows_unsupported_images(monkeypa
         model="gpt-5",
     )
     assert "unsupported" in str(out)
+
+
+def test_format_composer_attachment_status_row_shows_audio_files(monkeypatch):
+    monkeypatch.setenv("OPENVEGAS_ENABLE_SPEECH_TO_TEXT", "1")
+    attachments = [
+        PendingAttachment(
+            local_id="a1",
+            path="/tmp/voice-note.m4a",
+            name="voice-note.m4a",
+            mime_type="audio/m4a",
+            size_bytes=10,
+            sha256="hash-audio",
+            state=AttachmentState.ATTACHED,
+        )
+    ]
+    out = _format_composer_attachment_status_row(
+        attachments,
+        provider="openai",
+        model="gpt-5",
+    )
+    assert "audio file" in str(out).lower()
+
+
+def test_extract_filename_like_tokens_includes_audio_extensions():
+    tokens = _extract_filename_like_tokens("Please review voice-note.m4a and standup.mp3")
+    lowered = {t.lower() for t in tokens}
+    assert any(tok.endswith("voice-note.m4a") for tok in lowered)
+    assert any(tok.endswith("standup.mp3") for tok in lowered)
+
+
+def test_parse_mcp_call_command_accepts_json_args():
+    server, tool, args, err = _parse_mcp_call_command('/mcp call srv-1 ping {"x":1,"ok":true}')
+    assert err is None
+    assert server == "srv-1"
+    assert tool == "ping"
+    assert args == {"x": 1, "ok": True}
+
+
+def test_parse_mcp_call_command_accepts_key_value_args():
+    server, tool, args, err = _parse_mcp_call_command("/mcp call srv-2 search query=hello limit=3")
+    assert err is None
+    assert server == "srv-2"
+    assert tool == "search"
+    assert args == {"query": "hello", "limit": 3}
+
+
+def test_parse_mcp_call_command_rejects_invalid_shape():
+    server, tool, args, err = _parse_mcp_call_command("/mcp call srv-2")
+    assert server == ""
+    assert tool == ""
+    assert args == {}
+    assert "usage:" in str(err)
 
 
 def test_preflight_drops_images_when_vision_unsupported(monkeypatch):

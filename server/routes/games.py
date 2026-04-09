@@ -592,6 +592,20 @@ async def _play_horse_quote(
             return out
 
         horses = _parse_horses_json(quote["horses_json"])
+        expected_board_hash = _sha256_text(
+            _canonical_json(
+                {
+                    "bet_type": str(quote["bet_type"]),
+                    "budget_v": _money_text(Decimal(str(quote["budget_v"]))),
+                    "horses": horses,
+                }
+            )
+        )
+        if str(quote["board_hash"] or "") != expected_board_hash:
+            out = _error_response(409, "quote_integrity_error", "Quote board integrity check failed")
+            await _idem_persist(tx, row_id=idem.row_id, response=out, resource_id=quote_id)
+            return out
+
         selected = next((h for h in horses if int(h.get("number", -1)) == int(req.horse)), None)
         if selected is None:
             out = _error_response(400, "invalid_horse_selection", "Selected horse not in quote board")
@@ -604,10 +618,17 @@ async def _play_horse_quote(
             return out
 
         bet_type = str(quote["bet_type"])
-        debit_v = _q6_down(Decimal(str(selected.get("debit_v", "0"))))
-        payout_if_hit_v = _q6_down(Decimal(str(selected.get("payout_if_hit_v", "0"))))
+        quoted_debit_v = _q6_down(Decimal(str(selected.get("debit_v", "0"))))
+        quoted_payout_if_hit_v = _q6_down(Decimal(str(selected.get("payout_if_hit_v", "0"))))
+        debit_v = quoted_debit_v
+        payout_if_hit_v = quoted_payout_if_hit_v
         if debit_v <= 0:
             out = _error_response(409, "quote_position_unselectable", "Selected horse position has zero debit")
+            await _idem_persist(tx, row_id=idem.row_id, response=out, resource_id=quote_id)
+            return out
+
+        if abs(debit_v - quoted_debit_v) > Decimal("0.000001"):
+            out = _error_response(409, "quote_settlement_mismatch", "Settlement debit diverged from quote")
             await _idem_persist(tx, row_id=idem.row_id, response=out, resource_id=quote_id)
             return out
 
@@ -666,6 +687,14 @@ async def _play_horse_quote(
         result.bet_amount = _q6_down(debit_v)
         result.payout = _q6_down(payout_v)
         result.net = net_v
+        quote_horses_render = [
+            {
+                "number": int(h.get("number", 0)),
+                "name": str(h.get("name", "")),
+                "odds": str(h.get("odds", "0")),
+            }
+            for h in horses
+        ]
         result.outcome_data = {
             **(result.outcome_data or {}),
             "quote_id": quote_id,
@@ -678,6 +707,10 @@ async def _play_horse_quote(
             "max_units": int(selected.get("max_units", 0)),
             "debit_v": _money_text(debit_v),
             "payout_if_hit_v": _money_text(payout_if_hit_v),
+            "settlement_debit_v": _money_text(debit_v),
+            "settlement_payout_if_hit_v": _money_text(payout_if_hit_v),
+            "quote_horses": horses,
+            "horses": quote_horses_render,
             "quote_mode": True,
         }
 

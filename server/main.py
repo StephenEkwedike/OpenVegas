@@ -10,9 +10,52 @@ from time import perf_counter
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, RedirectResponse, Response
-from dotenv import load_dotenv
+from dotenv import load_dotenv, dotenv_values
 from openvegas.compact_uuid import decode_compact_uuid
 from openvegas.telemetry import record_http_request
+
+
+
+def _early_truthy(value: str | None, default: str = "0") -> bool:
+    token = str(value if value is not None else default).strip().lower()
+    return token in {"1", "true", "yes", "on"}
+
+
+def _early_resolve_root_dir() -> Path:
+    env_root = os.getenv("OPENVEGAS_ROOT")
+    candidates: list[Path] = []
+    if env_root:
+        candidates.append(Path(env_root).expanduser())
+    candidates.append(Path.cwd())
+    candidates.append(Path(__file__).resolve().parents[1])
+    for candidate in candidates:
+        try:
+            root = candidate.resolve()
+        except Exception:
+            continue
+        if (root / "ui" / "index.html").exists() and (root / "server" / "main.py").exists():
+            return root
+    return Path(__file__).resolve().parents[1]
+
+
+def _early_dotenv_override(root: Path) -> bool:
+    explicit = os.getenv("OPENVEGAS_DOTENV_OVERRIDE")
+    if explicit is not None:
+        return _early_truthy(explicit, "0")
+    file_val = None
+    try:
+        file_val = dotenv_values(root / ".env").get("OPENVEGAS_DOTENV_OVERRIDE")
+    except Exception:
+        file_val = None
+    if file_val is not None:
+        return _early_truthy(str(file_val), "0")
+    runtime_env = str(os.getenv("OPENVEGAS_RUNTIME_ENV", os.getenv("ENV", "local"))).strip().lower()
+    default = "1" if runtime_env in {"local", "dev", "development", "test"} else "0"
+    return _early_truthy(None, default)
+
+
+EARLY_ROOT_DIR = _early_resolve_root_dir()
+load_dotenv(EARLY_ROOT_DIR / ".env", override=_early_dotenv_override(EARLY_ROOT_DIR))
 
 from server.routes import mint as mint_routes
 from server.routes import games as game_routes
@@ -33,6 +76,7 @@ from server.routes import mcp as mcp_routes
 from server.routes import code_exec as code_exec_routes
 from server.routes import image_gen as image_gen_routes
 from server.routes import realtime as realtime_routes
+from server.routes import speech as speech_routes
 from server.routes import ops_diagnostics as ops_diagnostics_routes
 from server.services.dependencies import (
     assert_db_ready,
@@ -64,14 +108,49 @@ def _resolve_root_dir() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-ROOT_DIR = _resolve_root_dir()
+ROOT_DIR = EARLY_ROOT_DIR
+
+def _env_truthy(name: str, default: str = "0") -> bool:
+    return str(os.getenv(name, default)).strip().lower() in {"1", "true", "yes", "on"}
+
+def _dotenv_override_enabled() -> bool:
+    # Precedence: explicit process env -> .env OPENVEGAS_DOTENV_OVERRIDE -> runtime default.
+    explicit = os.getenv("OPENVEGAS_DOTENV_OVERRIDE")
+    if explicit is not None:
+        return _env_truthy("OPENVEGAS_DOTENV_OVERRIDE", "0")
+
+    file_val = None
+    try:
+        file_val = dotenv_values(ROOT_DIR / ".env").get("OPENVEGAS_DOTENV_OVERRIDE")
+    except Exception:
+        file_val = None
+    if file_val is not None:
+        return str(file_val).strip().lower() in {"1", "true", "yes", "on"}
+
+    # Local/dev should prefer project .env over stale shell exports.
+    runtime_env = str(os.getenv("OPENVEGAS_RUNTIME_ENV", os.getenv("ENV", "local"))).strip().lower()
+    default = "1" if runtime_env in {"local", "dev", "development", "test"} else "0"
+    return _env_truthy("OPENVEGAS_DOTENV_OVERRIDE", default)
+
 # Allow `uvicorn server.main:app --reload` to work without manually sourcing env vars.
-load_dotenv(ROOT_DIR / ".env", override=False)
+# In local/dev, override is enabled by default to avoid stale exported env var surprises.
+load_dotenv(ROOT_DIR / ".env", override=_dotenv_override_enabled())
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await init_runtime_deps()
+    try:
+        flags = current_flags()
+        upload_mime = str(os.getenv("OPENVEGAS_FILE_UPLOAD_ALLOWED_MIME", "")).strip()
+        logger.info(
+            "startup_flags files_enabled=%s speech_to_text=%s upload_mime_allowlist=%s",
+            bool(getattr(flags, "files_enabled", False)),
+            str(os.getenv("OPENVEGAS_ENABLE_SPEECH_TO_TEXT", "1")),
+            upload_mime or "<default>",
+        )
+    except Exception:
+        pass
     qr_ok, qr_reason = ensure_qrcode_available()
     if not qr_ok:
         logger.warning("QR runtime unavailable at startup: %s", qr_reason)
@@ -137,6 +216,7 @@ UI_PAGES = {
     "faq": UI_DIR / "faq.html",
     "how-to-play": UI_DIR / "how-to-play.html",
     "contact": UI_DIR / "contact.html",
+    "call-to-action": UI_DIR / "call-to-action.html",
 }
 
 LEGACY_UI_REDIRECTS = {
@@ -195,6 +275,7 @@ app.include_router(mcp_routes.router, tags=["mcp"])
 app.include_router(code_exec_routes.router, tags=["code-exec"])
 app.include_router(image_gen_routes.router, tags=["image-gen"])
 app.include_router(realtime_routes.router, tags=["realtime"])
+app.include_router(speech_routes.router, tags=["speech"])
 app.include_router(ops_diagnostics_routes.router, tags=["ops"])
 
 

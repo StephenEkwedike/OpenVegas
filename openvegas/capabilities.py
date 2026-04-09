@@ -25,6 +25,7 @@ class ModelCapabilities:
     code_exec: bool
     image_gen: bool
     realtime_voice: bool
+    speech_to_text: bool
 
 
 DEFAULT_CAPS = ModelCapabilities(
@@ -36,6 +37,7 @@ DEFAULT_CAPS = ModelCapabilities(
     code_exec=False,
     image_gen=False,
     realtime_voice=False,
+    speech_to_text=False,
 )
 
 PROVIDER_DEFAULTS: dict[str, ModelCapabilities] = {
@@ -47,6 +49,7 @@ PROVIDER_DEFAULTS: dict[str, ModelCapabilities] = {
         file_search=True,
         image_gen=True,
         realtime_voice=True,
+        speech_to_text=True,
     ),
     "anthropic": replace(DEFAULT_CAPS, image_input=True, file_upload=True),
     "gemini": replace(DEFAULT_CAPS, image_input=True, file_upload=True),
@@ -69,6 +72,7 @@ FEATURE_FLAG_KEY = {
     "code_exec": "code_exec",
     "image_gen": "image_gen",
     "realtime_voice": "realtime_voice",
+    "speech_to_text": "speech_to_text",
 }
 
 _REMOTE_OVERRIDE_CACHE: dict[str, object] = {"source": "", "loaded_at": 0.0, "overrides": {}}

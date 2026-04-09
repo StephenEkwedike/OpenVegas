@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenVegas | Call To Action</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@300;400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/ui/assets/theme.css?v=20260330" />
+    <link rel="stylesheet" href="/ui/assets/layout.css?v=20260330" />
+    <script defer src="/ui/assets/theme-fallback.js?v=20260330"></script>
+    <style>
+      body {
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+      }
+
+      .cta-shell {
+        width: min(940px, 92vw);
+        text-align: center;
+      }
+
+      .cta-title {
+        margin: 0 0 26px;
+        color: var(--text-main);
+        font-family: "Iowan Old Style", "Times New Roman", Georgia, serif;
+        font-size: clamp(2.1rem, 6vw, 4.25rem);
+        font-weight: 500;
+        line-height: 1.08;
+        letter-spacing: -0.02em;
+      }
+
+      .cta-command-wrap {
+        display: flex;
+        justify-content: center;
+        margin: 0 auto 22px;
+      }
+
+      .cta-command {
+        width: min(740px, 100%);
+        border-radius: 22px;
+        background: #121419;
+        color: #f4f6fb;
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        box-shadow: 0 18px 40px rgba(10, 14, 22, 0.2);
+        font-family: var(--font-mono);
+        font-size: clamp(0.95rem, 2.4vw, 1.65rem);
+        letter-spacing: 0.01em;
+        padding: 24px 28px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+
+      .cta-pills {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 12px;
+      }
+
+      .cta-pill {
+        text-decoration: none;
+        background: rgba(255, 255, 255, 0.75);
+        border: 1px solid var(--line);
+        color: var(--text-main);
+        border-radius: 999px;
+        font-family: var(--font-sans);
+        font-size: clamp(0.9rem, 2vw, 1.2rem);
+        padding: 10px 20px;
+        transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+      }
+
+      .cta-pill:hover {
+        transform: translateY(-1px);
+        border-color: var(--accent-aqua);
+        box-shadow: 0 8px 20px rgba(17, 120, 138, 0.12);
+      }
+
+      @media (max-width: 700px) {
+        .cta-title {
+          margin-bottom: 18px;
+        }
+
+        .cta-command {
+          border-radius: 16px;
+          padding: 16px 14px;
+        }
+      }
+    </style>
+  </head>
+  <body data-theme="light">
+    <main class="cta-shell">
+      <h1 class="cta-title">Play for extended compute.<br />Install Now.</h1>
+
+      <div class="cta-command-wrap">
+        <div class="cta-command">$ npm install -g @openvegas</div>
+      </div>
+
+      <div class="cta-pills">
+        <a class="cta-pill" href="/ui/contact">Contact Us</a>
+        <a class="cta-pill" href="/ui/how-to-play">Read the docs</a>
+        <a class="cta-pill" href="/ui">Launch OpenVegas</a>
+      </div>
+    </main>
+  </body>
+</html>

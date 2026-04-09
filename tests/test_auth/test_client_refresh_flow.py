@@ -207,3 +207,27 @@ async def test_get_balance_bootstraps_wallet_once(monkeypatch: pytest.MonkeyPatc
         ("GET", "/wallet/balance"),
         ("GET", "/wallet/balance"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_retry_401_touchid_unlock_required_returns_clear_message(monkeypatch: pytest.MonkeyPatch):
+    session_state = {
+        "access_token": "a",
+        "access_expires_at": 4_102_444_800,
+        "refresh_storage": "platform_credential_store",
+    }
+    monkeypatch.setattr(client_mod, "get_session", lambda: dict(session_state))
+    monkeypatch.setattr(client_mod, "get_bearer_token", lambda: "a")
+    monkeypatch.setattr(client_mod, "require_touchid_unlock_for_refresh_storage", lambda _s: True)
+    monkeypatch.setattr(client_mod, "request_touchid_unlock", lambda: False)
+    client = OpenVegasClient()
+
+    async def _fake_http(method: str, path: str, **_kwargs):
+        return _resp(401, method, path, {"detail": "expired"})
+
+    monkeypatch.setattr(client, "_do_http", _fake_http)
+
+    with pytest.raises(APIError) as exc:
+        await client._request("GET", "/wallet/balance")
+    assert exc.value.status == 401
+    assert "touch id unlock required" in exc.value.detail.lower()
