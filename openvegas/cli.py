@@ -6953,7 +6953,19 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     last_web_search_retry_without_tool = bool(
                         retry_result.get("web_search_retry_without_tool", False)
                     )
-                if cleaned_text:
+                # Avoid duplicate long answers: during tool-mode iterations, model text can
+                # include draft/final prose on each step while tool calls are still pending.
+                # Only render this immediate text when the turn is clearly text-only and we
+                # are about to finish without a follow-up tool step.
+                should_render_immediate_text = bool(
+                    cleaned_text
+                    and not candidate_tool_calls
+                    and step == 0
+                    and not tool_observations
+                    and not completion_criteria.active
+                    and not edit_intent
+                )
+                if should_render_immediate_text:
                     render_assistant(console, cleaned_text)
                     last_assistant_text_for_turn = cleaned_text
                 if web_search_effective_turn and show_web_diagnostics:
