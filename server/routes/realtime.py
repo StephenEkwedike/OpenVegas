@@ -307,7 +307,12 @@ async def realtime_relay_ws(relay_id: str, websocket: WebSocket):
                             )
                             if done:
                                 for task in done:
-                                    exc = task.exception()
+                                    if task.cancelled():
+                                        continue
+                                    try:
+                                        exc = task.exception()
+                                    except asyncio.CancelledError:
+                                        continue
                                     if exc and isinstance(exc, WebSocketDisconnect):
                                         reconnect_requested = False
                                         break
@@ -354,9 +359,9 @@ async def realtime_relay_ws(relay_id: str, websocket: WebSocket):
                     finally:
                         for task in (upstream_task, client_task):
                             task.cancel()
-                            with contextlib.suppress(Exception):
+                            with contextlib.suppress(asyncio.CancelledError, Exception):
                                 await task
-                        with contextlib.suppress(Exception):
+                        with contextlib.suppress(asyncio.CancelledError, Exception):
                             await upstream_ws.close()
                         await svc.mark_connected(relay_id=relay_id, connected=False)
                         emit_metric("realtime_relay_upstream_closed_total", {"provider": str(session.provider or "unknown")})

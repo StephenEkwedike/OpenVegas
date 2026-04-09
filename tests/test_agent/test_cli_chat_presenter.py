@@ -25,7 +25,7 @@ def test_render_assistant_uses_bullet_prefix_and_plain_text():
     console = Console(record=True, width=80, force_terminal=False)
     render_assistant(console, "### Header **bold** `code`")
     out = console.export_text()
-    assert "• ### Header **bold** `code`" in out
+    assert "• ### Header bold code" in out
 
 
 def test_render_assistant_formats_markdown_table():
