@@ -182,6 +182,33 @@ class OpenVegasClient:
             return body
         return {"data": body}
 
+    async def auth_preflight(self) -> None:
+        """Validate/refresh auth session before starting interactive workflows."""
+        self._session_snapshot = get_session()
+        self.token = get_bearer_token()
+
+        has_refresh = bool(str(self._session_snapshot.get("refresh_token", "") or "").strip())
+        if not self.token and not has_refresh:
+            raise APIError(401, "Session expired. Run: openvegas login")
+
+        if token_expires_soon(self._session_snapshot, leeway_sec=300):
+            try:
+                await self._refresh_single_flight(trigger="proactive_startup")
+            except TimeoutError:
+                self._invalidate_session_cache("refresh_timeout")
+                raise APIError(401, "Session refresh timed out. Run: openvegas login")
+            except ValueError:
+                self._invalidate_session_cache("refresh_malformed")
+                raise APIError(401, "Session refresh returned invalid payload. Run: openvegas login")
+            except CliAuthError as e:
+                if str(e) == "touchid_unlock_required":
+                    raise APIError(401, "Touch ID unlock required for saved session. Run: openvegas login")
+                self._invalidate_session_cache("refresh_rejected")
+                raise APIError(401, "Session expired. Run: openvegas login")
+
+        if not str(self.token or "").strip():
+            raise APIError(401, "Session expired. Run: openvegas login")
+
     async def _request(self, method: str, path: str, **kwargs) -> dict:
         if token_expires_soon(self._session_snapshot, leeway_sec=300):
             try:

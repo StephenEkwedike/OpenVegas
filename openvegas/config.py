@@ -17,7 +17,12 @@ from openvegas.telemetry import emit_metric
 CONFIG_DIR = Path.home() / ".openvegas"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 LEGACY_DEFAULT_BACKEND_URL = "https://api.openvegas.gg"
-DEFAULT_BACKEND_URL = os.getenv("OPENVEGAS_BACKEND_URL", "https://app.openvegas.ai")
+DEFAULT_BACKEND_URL = (
+    str(os.getenv("OPENVEGAS_BACKEND_URL", "")).strip()
+    or str(os.getenv("OPENVEGAS_API_BASE_URL", "")).strip()
+    or str(os.getenv("OPENVEGAS_API_URL", "")).strip()
+    or "https://app.openvegas.ai"
+)
 DEFAULT_OPENAI_MODEL = os.getenv("OPENVEGAS_DEFAULT_OPENAI_MODEL", "gpt-5.4")
 _PLATFORM_STORE_SERVICE = "openvegas"
 _PLATFORM_STORE_ACCOUNT = "refresh_token"
@@ -153,7 +158,8 @@ def platform_keychain_available() -> bool:
 
 
 def touchid_enabled() -> bool:
-    return str(os.getenv("OPENVEGAS_ENABLE_TOUCHID", "0")).strip().lower() in {"1", "true", "yes", "on"}
+    default = "1" if sys.platform == "darwin" else "0"
+    return str(os.getenv("OPENVEGAS_ENABLE_TOUCHID", default)).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def touchid_supported() -> bool:

@@ -38,7 +38,7 @@ def _critical_floor_v() -> Decimal:
 
 
 def _starter_grant_v() -> Decimal:
-    return _money(os.getenv("STARTER_GRANT_V", "150"))
+    return _money(os.getenv("STARTER_GRANT_V", "100"))
 
 
 def _balance_state(balance_v: Decimal, v_per_usd: Decimal) -> str:

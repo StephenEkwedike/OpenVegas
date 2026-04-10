@@ -240,7 +240,7 @@ def _drain_stdin_buffer(window_ms: int = 0) -> list[str]:
 
 
 def _load_openvegas_env_defaults_from_dotenv() -> None:
-    """Load OPENVEGAS_* defaults from local .env without overriding exported env."""
+    """Load OPENVEGAS_* defaults from local .env (optional override supported)."""
     global _ENV_DEFAULTS_BOOTSTRAPPED
     if _ENV_DEFAULTS_BOOTSTRAPPED:
         return
@@ -273,9 +273,18 @@ def _load_openvegas_env_defaults_from_dotenv() -> None:
             env_name = name.strip()
             if not env_name.startswith("OPENVEGAS_"):
                 continue
-            if env_name in os.environ:
+            dotenv_override = str(os.getenv("OPENVEGAS_DOTENV_OVERRIDE", "0")).strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+            if env_name in os.environ and not dotenv_override:
                 continue
             os.environ[env_name] = value.strip().strip("'\"")
+
+
+_load_openvegas_env_defaults_from_dotenv()
 
 
 def _win_always_enabled() -> bool:
@@ -4475,6 +4484,48 @@ def doctor_auth():
     )
 
 
+@cli.command("doctor-runtime")
+def doctor_runtime():
+    """Print one-line runtime diagnostics for deployment parity checks."""
+    _load_openvegas_env_defaults_from_dotenv()
+    import sys as _sys
+    from openvegas.config import get_backend_url, platform_keychain_available, touchid_enabled, touchid_supported
+
+    try:
+        import keyring  # type: ignore
+
+        keyring_ready = bool(keyring.get_keyring())
+    except Exception:
+        keyring_ready = False
+
+    try:
+        import numpy  # noqa: F401
+
+        numpy_ready = True
+    except Exception:
+        numpy_ready = False
+
+    try:
+        import sounddevice  # noqa: F401
+
+        sounddevice_ready = True
+    except Exception:
+        sounddevice_ready = False
+
+    console.print(
+        "doctor-runtime: "
+        f"exe={Path(_sys.argv[0]).name} "
+        f"python={_sys.executable} "
+        f"api_base={get_backend_url()} "
+        f"touchid_enabled={'1' if touchid_enabled() else '0'} "
+        f"touchid_supported={'1' if touchid_supported() else '0'} "
+        f"keychain_available={'1' if platform_keychain_available() else '0'} "
+        f"keyring_ready={'1' if keyring_ready else '0'} "
+        f"numpy_ready={'1' if numpy_ready else '0'} "
+        f"sounddevice_ready={'1' if sounddevice_ready else '0'}"
+    )
+
+
 @cli.command("whoami")
 def whoami():
     """Show current authenticated user from local session token."""
@@ -5209,6 +5260,13 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
     unicode_ok = _supports_unicode_output()
     last_successful_tool: str | None = None
     client = OpenVegasClient()
+    auth_preflight = getattr(client, "auth_preflight", None)
+    if callable(auth_preflight):
+        try:
+            run_async(auth_preflight())
+        except APIError as e:
+            console.print(f"[red]{e.detail}[/red]")
+            return
     use_prompt_toolkit_chat = (
         str(os.getenv("OPENVEGAS_CHAT_PROMPT_TOOLKIT", "1")).strip().lower() in {"1", "true", "yes", "on"}
         and bool(getattr(sys.stdin, "isatty", lambda: False)())
