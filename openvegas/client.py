@@ -51,6 +51,11 @@ class OpenVegasClient:
         self._refresh_inflight: asyncio.Task[str] | None = None
         self._proactive_fail_last_ts: float | None = None
         self._proactive_fail_cooldown_sec = 60.0
+        self._http_client = httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=httpx.Timeout(120.0, connect=20.0),
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+        )
         self._emit_startup_auth_mode_once()
 
     def _headers(self) -> dict:
@@ -151,18 +156,27 @@ class OpenVegasClient:
 
     async def _do_http(self, method: str, path: str, **kwargs) -> httpx.Response:
         try:
-            async with httpx.AsyncClient(timeout=120) as client:
-                return await client.request(
-                    method,
-                    f"{self.base_url}{path}",
-                    headers=self._headers(),
-                    **kwargs,
-                )
+            return await self._http_client.request(
+                method,
+                f"{self.base_url}{path}",
+                headers=self._headers(),
+                **kwargs,
+            )
         except httpx.HTTPError as e:
             raise APIError(
                 503,
                 f"Backend request failed: {type(e).__name__}. Check server is running and reachable at {self.base_url}.",
             ) from e
+
+    async def aclose(self) -> None:
+        if not self._http_client.is_closed:
+            await self._http_client.aclose()
+
+    async def __aenter__(self) -> OpenVegasClient:
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        await self.aclose()
 
     @staticmethod
     def _parse_or_raise(resp: httpx.Response) -> dict:
@@ -387,61 +401,61 @@ class OpenVegasClient:
         attempted_refresh = False
         while True:
             try:
-                async with httpx.AsyncClient(timeout=None) as client:
-                    async with client.stream(
-                        "POST",
-                        f"{self.base_url}/inference/stream",
-                        headers=self._headers(),
-                        json=payload,
-                    ) as resp:
-                        if resp.status_code in (401, 403) and not attempted_refresh:
-                            attempted_refresh = True
-                            try:
-                                await self._refresh_single_flight(trigger="retry_401_stream")
-                            except TimeoutError:
-                                self._invalidate_session_cache("refresh_timeout")
-                                raise APIError(401, "Session refresh timed out. Run: openvegas login")
-                            except ValueError:
-                                self._invalidate_session_cache("refresh_malformed")
-                                raise APIError(401, "Session refresh returned invalid payload. Run: openvegas login")
-                            except CliAuthError:
-                                self._invalidate_session_cache("refresh_rejected")
-                                raise APIError(401, "Session expired. Run: openvegas login")
+                async with self._http_client.stream(
+                    "POST",
+                    f"{self.base_url}/inference/stream",
+                    headers=self._headers(),
+                    json=payload,
+                    timeout=None,
+                ) as resp:
+                    if resp.status_code in (401, 403) and not attempted_refresh:
+                        attempted_refresh = True
+                        try:
+                            await self._refresh_single_flight(trigger="retry_401_stream")
+                        except TimeoutError:
+                            self._invalidate_session_cache("refresh_timeout")
+                            raise APIError(401, "Session refresh timed out. Run: openvegas login")
+                        except ValueError:
+                            self._invalidate_session_cache("refresh_malformed")
+                            raise APIError(401, "Session refresh returned invalid payload. Run: openvegas login")
+                        except CliAuthError:
+                            self._invalidate_session_cache("refresh_rejected")
+                            raise APIError(401, "Session expired. Run: openvegas login")
+                        continue
+
+                    if resp.status_code >= 400:
+                        detail = await resp.aread()
+                        text = detail.decode("utf-8", errors="ignore")
+                        data: dict | None = None
+                        try:
+                            parsed = json.loads(text)
+                            if isinstance(parsed, dict):
+                                data = parsed
+                                text = str(parsed.get("detail") or parsed.get("error") or text)
+                        except Exception:
+                            pass
+                        raise APIError(resp.status_code, text, data=data)
+
+                    current_event = "message"
+                    async for line in resp.aiter_lines():
+                        raw = (line or "").strip()
+                        if not raw:
                             continue
-
-                        if resp.status_code >= 400:
-                            detail = await resp.aread()
-                            text = detail.decode("utf-8", errors="ignore")
-                            data: dict | None = None
-                            try:
-                                parsed = json.loads(text)
-                                if isinstance(parsed, dict):
-                                    data = parsed
-                                    text = str(parsed.get("detail") or parsed.get("error") or text)
-                            except Exception:
-                                pass
-                            raise APIError(resp.status_code, text, data=data)
-
-                        current_event = "message"
-                        async for line in resp.aiter_lines():
-                            raw = (line or "").strip()
-                            if not raw:
-                                continue
-                            if raw.startswith("event:"):
-                                current_event = raw[6:].strip() or "message"
-                                continue
-                            if not raw.startswith("data:"):
-                                continue
-                            payload_line = raw[5:].strip()
-                            if not payload_line:
-                                continue
-                            try:
-                                data = json.loads(payload_line)
-                            except Exception:
-                                continue
-                            if isinstance(data, dict):
-                                yield {"event": current_event, "data": data}
-                        return
+                        if raw.startswith("event:"):
+                            current_event = raw[6:].strip() or "message"
+                            continue
+                        if not raw.startswith("data:"):
+                            continue
+                        payload_line = raw[5:].strip()
+                        if not payload_line:
+                            continue
+                        try:
+                            data = json.loads(payload_line)
+                        except Exception:
+                            continue
+                        if isinstance(data, dict):
+                            yield {"event": current_event, "data": data}
+                    return
             except httpx.HTTPError as e:
                 raise APIError(
                     503,
@@ -610,7 +624,10 @@ class OpenVegasClient:
     async def speech_transcribe(
         self,
         *,
-        file_id: str,
+        file_id: str | None = None,
+        content_base64: str | None = None,
+        filename: str | None = None,
+        mime_type: str | None = None,
         provider: str = "openai",
         model: str = "gpt-4o-mini-transcribe",
         language: str | None = None,
@@ -618,10 +635,17 @@ class OpenVegasClient:
         timeout_sec: float | None = None,
     ) -> dict:
         payload: dict[str, Any] = {
-            "file_id": str(file_id or ""),
             "provider": str(provider or "openai"),
             "model": str(model or "gpt-4o-mini-transcribe"),
         }
+        if file_id is not None:
+            payload["file_id"] = str(file_id or "")
+        if content_base64 is not None:
+            payload["content_base64"] = str(content_base64 or "")
+        if filename is not None:
+            payload["filename"] = str(filename or "")
+        if mime_type is not None:
+            payload["mime_type"] = str(mime_type or "")
         if language:
             payload["language"] = str(language)
         if prompt:
@@ -1316,24 +1340,23 @@ class OpenVegasClient:
         tool_call_id: str,
     ) -> AsyncGenerator[dict[str, Any], None]:
         url = f"{self.base_url}/agent/runs/{run_id}/tools/{tool_call_id}/stream"
-        async with httpx.AsyncClient(timeout=None) as client:
-            async with client.stream("GET", url, headers=self._headers()) as resp:
-                if resp.status_code >= 400:
-                    detail = await resp.aread()
-                    raise APIError(resp.status_code, detail.decode("utf-8", errors="ignore"))
-                async for line in resp.aiter_lines():
-                    raw = (line or "").strip()
-                    if not raw.startswith("data:"):
-                        continue
-                    payload = raw[5:].strip()
-                    if not payload:
-                        continue
-                    try:
-                        data = json.loads(payload)
-                    except Exception:
-                        continue
-                    if isinstance(data, dict):
-                        yield data
+        async with self._http_client.stream("GET", url, headers=self._headers(), timeout=None) as resp:
+            if resp.status_code >= 400:
+                detail = await resp.aread()
+                raise APIError(resp.status_code, detail.decode("utf-8", errors="ignore"))
+            async for line in resp.aiter_lines():
+                raw = (line or "").strip()
+                if not raw.startswith("data:"):
+                    continue
+                payload = raw[5:].strip()
+                if not payload:
+                    continue
+                try:
+                    data = json.loads(payload)
+                except Exception:
+                    continue
+                if isinstance(data, dict):
+                    yield data
 
     async def ide_stream_events(
         self,
@@ -1345,21 +1368,20 @@ class OpenVegasClient:
             f"{self.base_url}/ide/events/stream"
             f"?run_id={run_id}&runtime_session_id={runtime_session_id}"
         )
-        async with httpx.AsyncClient(timeout=None) as client:
-            async with client.stream("GET", url, headers=self._headers()) as resp:
-                if resp.status_code >= 400:
-                    detail = await resp.aread()
-                    raise APIError(resp.status_code, detail.decode("utf-8", errors="ignore"))
-                async for line in resp.aiter_lines():
-                    raw = (line or "").strip()
-                    if not raw.startswith("data:"):
-                        continue
-                    payload = raw[5:].strip()
-                    if not payload:
-                        continue
-                    try:
-                        data = json.loads(payload)
-                    except Exception:
-                        continue
-                    if isinstance(data, dict):
-                        yield data
+        async with self._http_client.stream("GET", url, headers=self._headers(), timeout=None) as resp:
+            if resp.status_code >= 400:
+                detail = await resp.aread()
+                raise APIError(resp.status_code, detail.decode("utf-8", errors="ignore"))
+            async for line in resp.aiter_lines():
+                raw = (line or "").strip()
+                if not raw.startswith("data:"):
+                    continue
+                payload = raw[5:].strip()
+                if not payload:
+                    continue
+                try:
+                    data = json.loads(payload)
+                except Exception:
+                    continue
+                if isinstance(data, dict):
+                    yield data

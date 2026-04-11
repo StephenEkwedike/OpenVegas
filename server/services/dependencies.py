@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Any
 
+import httpx
+
 from openvegas.fraud.engine import FraudEngine
 from openvegas.gateway.catalog import ProviderCatalog
 from openvegas.gateway.inference import AIGateway
@@ -141,6 +143,7 @@ class FeatureFlags:
 
 _db: Any = _Placeholder()
 _redis: Any = _Placeholder()
+_http_client: httpx.AsyncClient | None = None
 _log = logging.getLogger(__name__)
 
 
@@ -169,6 +172,23 @@ def get_db():
 
 def get_redis():
     return _redis
+
+
+def bind_http_client(client: httpx.AsyncClient | None) -> None:
+    global _http_client
+    _http_client = client
+
+
+def get_http_client() -> httpx.AsyncClient | None:
+    return _http_client
+
+
+async def request_with_http_client(method: str, url: str, **kwargs) -> httpx.Response:
+    client = get_http_client()
+    if client is not None:
+        return await client.request(method, url, **kwargs)
+    async with httpx.AsyncClient(follow_redirects=True, timeout=None) as temp_client:
+        return await temp_client.request(method, url, **kwargs)
 
 
 async def require_tables(db: Any, tables: set[str]) -> None:
@@ -438,7 +458,7 @@ def get_catalog() -> ProviderCatalog:
 
 
 def get_gateway() -> AIGateway:
-    return AIGateway(get_db(), get_wallet(), get_catalog())
+    return AIGateway(get_db(), get_wallet(), get_catalog(), http_client=get_http_client())
 
 
 def get_llm_mode_service() -> LLMModeService:

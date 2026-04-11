@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import time
 import uuid
+from dataclasses import dataclass
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from typing import Any
 
@@ -40,6 +41,30 @@ from openvegas.gateway.inference import InferenceRequest
 from openvegas.wallet.ledger import InsufficientBalance
 
 router = APIRouter()
+
+
+@dataclass
+class _PreparedAskContext:
+    req: "AskRequest"
+    started: float
+    run_id: str
+    gateway: Any
+    thread_svc: Any
+    thread_ctx: Any
+    mode_payload: dict[str, Any]
+    context_enabled: bool
+    inference_request: InferenceRequest
+    web_search_requested: bool
+    web_search_effective: bool
+    attachments_requested: bool
+    attachments_effective: bool
+    attachments_used: bool
+    response_warnings: list[str]
+    history_messages_loaded: int
+    history_messages_skipped: int
+    history_messages_used: int
+    history_messages_dropped: int
+    did_prune: bool
 
 
 def _model_context_tokens(model_id: str) -> int:
@@ -393,13 +418,13 @@ async def set_mode(req: ModeUpdateRequest, user: dict = Depends(get_current_user
     return resolved.as_dict()
 
 
-@router.post("/ask")
-async def ask(
+async def _prepare_ask_context(
     req: AskRequest,
-    user: dict = Depends(get_current_user),
-):
-    started = time.monotonic()
-    run_id = str(uuid.uuid4())
+    *,
+    user: dict,
+    run_id: str,
+    started: float,
+) -> _PreparedAskContext | JSONResponse | dict[str, Any]:
     fraud = get_fraud_engine()
     try:
         await fraud.check_inference(user["user_id"])
@@ -408,7 +433,6 @@ async def ask(
             status_code=429,
             content={"error": "rate_limited", "detail": str(e)},
         )
-
     mode_svc = get_llm_mode_service()
     mode_state = await mode_svc.resolve_for_user(user_id=user["user_id"])
     mode_payload = mode_state.as_dict() if hasattr(mode_state, "as_dict") else dict(mode_state)
@@ -502,7 +526,6 @@ async def ask(
             status_code=status,
             content={"error": e.code.value, "detail": e.detail, "run_id": run_id, "context_enabled": context_enabled, **mode_payload},
         )
-
     gateway = get_gateway()
     history_messages: list[dict[str, str]] = []
     history_messages_loaded = 0
@@ -619,9 +642,16 @@ async def ask(
         and str(outbound_messages[-1].get("content") or "") == req.prompt
     ):
         outbound_messages.append({"role": "user", "content": req.prompt})
-
-    try:
-        result = await gateway.infer(InferenceRequest(
+    return _PreparedAskContext(
+        req=req,
+        started=started,
+        run_id=run_id,
+        gateway=gateway,
+        thread_svc=thread_svc,
+        thread_ctx=thread_ctx,
+        mode_payload=mode_payload,
+        context_enabled=context_enabled,
+        inference_request=InferenceRequest(
             account_id=f"user:{user['user_id']}",
             provider=req.provider,
             model=req.model,
@@ -629,98 +659,164 @@ async def ask(
             idempotency_key=req.idempotency_key,
             enable_tools=bool(req.enable_tools),
             enable_web_search=web_search_effective,
-        ))
-        await thread_svc.append_exchange(
-            thread_ctx=thread_ctx,
-            prompt=req.prompt,
-            response_text=result.text,
-            input_tokens=result.input_tokens,
-            output_tokens=result.output_tokens,
-            persist_context=req.persist_context,
-        )
-        web_sources_max = _web_sources_max_from_env()
-        normalized_sources = _normalize_source_urls(
-            list(getattr(result, "web_search_sources", None) or []),
-            max_sources=web_sources_max,
-        )
-        trusted_sources, source_scores = filter_trusted_sources(normalized_sources)
-        ranked_sources, source_ranking = _rank_and_filter_web_sources(
-            prompt=req.prompt,
-            sources=trusted_sources,
-            source_scores=source_scores,
-            max_sources=web_sources_max,
-        )
-        latency_ms = max(0.0, (time.monotonic() - started) * 1000.0)
-        emit_run_metrics(
-            run_id=run_id,
-            data={
-                "provider": req.provider,
-                "model": req.model,
-                "turn_latency_ms": round(latency_ms, 3),
-                "input_tokens": int(result.input_tokens),
-                "output_tokens": int(result.output_tokens),
-                "tool_calls": len(result.tool_calls or []),
-                "tool_failures": 0,
-                "fallbacks": 1 if response_warnings else 0,
-                "cost_usd": float(getattr(result, "actual_cost_usd", 0) or 0),
-            },
-        )
-        return {
-            "text": result.text,
-            "v_cost": str(result.v_cost),
-            "input_tokens": result.input_tokens,
-            "output_tokens": result.output_tokens,
-            "provider_request_id": result.provider_request_id,
-            "tool_calls": result.tool_calls or [],
-            "thread_id": thread_ctx.thread_id,
-            "run_id": run_id,
-            "thread_status": thread_ctx.thread_status,
-            "context_enabled": context_enabled,
-            "history_messages_loaded": history_messages_loaded,
-            "history_messages_skipped": history_messages_skipped,
-            "history_messages_used": len(history_messages),
-            "history_messages_dropped": history_messages_dropped,
-            "did_prune": did_prune,
-            "web_search_requested": web_search_requested,
-            "web_search_effective": web_search_effective,
+        ),
+        web_search_requested=web_search_requested,
+        web_search_effective=web_search_effective,
+        attachments_requested=attachments_requested,
+        attachments_effective=attachments_gateway_effective,
+        attachments_used=attachments_used,
+        response_warnings=response_warnings,
+        history_messages_loaded=history_messages_loaded,
+        history_messages_skipped=history_messages_skipped,
+        history_messages_used=len(history_messages),
+        history_messages_dropped=history_messages_dropped,
+        did_prune=did_prune,
+    )
+
+
+async def _finalize_ask_result(
+    prepared: _PreparedAskContext,
+    *,
+    result: Any,
+) -> dict[str, Any]:
+    req = prepared.req
+    await prepared.thread_svc.append_exchange(
+        thread_ctx=prepared.thread_ctx,
+        prompt=req.prompt,
+        response_text=result.text,
+        input_tokens=result.input_tokens,
+        output_tokens=result.output_tokens,
+        persist_context=req.persist_context,
+    )
+    web_sources_max = _web_sources_max_from_env()
+    normalized_sources = _normalize_source_urls(
+        list(getattr(result, "web_search_sources", None) or []),
+        max_sources=web_sources_max,
+    )
+    trusted_sources, source_scores = filter_trusted_sources(normalized_sources)
+    ranked_sources, source_ranking = _rank_and_filter_web_sources(
+        prompt=req.prompt,
+        sources=trusted_sources,
+        source_scores=source_scores,
+        max_sources=web_sources_max,
+    )
+    latency_ms = max(0.0, (time.monotonic() - prepared.started) * 1000.0)
+    emit_run_metrics(
+        run_id=prepared.run_id,
+        data={
+            "provider": req.provider,
+            "model": req.model,
+            "turn_latency_ms": round(latency_ms, 3),
+            "input_tokens": int(result.input_tokens),
+            "output_tokens": int(result.output_tokens),
+            "tool_calls": len(result.tool_calls or []),
+            "tool_failures": 0,
+            "fallbacks": 1 if prepared.response_warnings else 0,
+            "cost_usd": float(getattr(result, "actual_cost_usd", 0) or 0),
+        },
+    )
+    return {
+        "text": result.text,
+        "v_cost": str(result.v_cost),
+        "input_tokens": result.input_tokens,
+        "output_tokens": result.output_tokens,
+        "provider_request_id": result.provider_request_id,
+        "tool_calls": result.tool_calls or [],
+        "thread_id": prepared.thread_ctx.thread_id,
+        "run_id": prepared.run_id,
+        "thread_status": prepared.thread_ctx.thread_status,
+        "context_enabled": prepared.context_enabled,
+        "history_messages_loaded": prepared.history_messages_loaded,
+        "history_messages_skipped": prepared.history_messages_skipped,
+        "history_messages_used": prepared.history_messages_used,
+        "history_messages_dropped": prepared.history_messages_dropped,
+        "did_prune": prepared.did_prune,
+        "web_search_requested": prepared.web_search_requested,
+        "web_search_effective": prepared.web_search_effective,
+        "web_search_used": bool(getattr(result, "web_search_used", False)),
+        "web_search_sources": ranked_sources,
+        "web_search_source_scores": source_scores,
+        "web_search_source_ranking": source_ranking,
+        "web_search_retry_without_tool": bool(getattr(result, "web_search_retry_without_tool", False)),
+        "attachments_requested": prepared.attachments_requested,
+        "attachments_effective": prepared.attachments_effective,
+        "attachments_used": prepared.attachments_used,
+        "warning": (prepared.response_warnings[0] if prepared.response_warnings else None),
+        "warnings": prepared.response_warnings,
+        "diagnostics": {
+            "run_id": prepared.run_id,
+            "provider": req.provider,
+            "model": req.model,
+            "history_loaded": prepared.history_messages_loaded,
+            "history_used": prepared.history_messages_used,
+            "history_dropped": prepared.history_messages_dropped,
+            "history_skipped": prepared.history_messages_skipped,
+            "did_prune": prepared.did_prune,
+            "attachments_requested": prepared.attachments_requested,
+            "attachments_effective": prepared.attachments_effective,
+            "web_search_requested": prepared.web_search_requested,
+            "web_search_effective": prepared.web_search_effective,
             "web_search_used": bool(getattr(result, "web_search_used", False)),
-            "web_search_sources": ranked_sources,
-            "web_search_source_scores": source_scores,
-            "web_search_source_ranking": source_ranking,
-            "web_search_retry_without_tool": bool(getattr(result, "web_search_retry_without_tool", False)),
-            "attachments_requested": attachments_requested,
-            "attachments_effective": attachments_gateway_effective,
-            "attachments_used": attachments_used,
-            "warning": (response_warnings[0] if response_warnings else None),
-            "warnings": response_warnings,
-            "diagnostics": {
-                "run_id": run_id,
-                "provider": req.provider,
-                "model": req.model,
-                "history_loaded": history_messages_loaded,
-                "history_used": len(history_messages),
-                "history_dropped": history_messages_dropped,
-                "history_skipped": history_messages_skipped,
-                "did_prune": did_prune,
-                "attachments_requested": attachments_requested,
-                "attachments_effective": attachments_gateway_effective,
-                "web_search_requested": web_search_requested,
-                "web_search_effective": web_search_effective,
-                "web_search_used": bool(getattr(result, "web_search_used", False)),
-                "web_search_sources_ranked": len(ranked_sources),
-            },
-            **mode_payload,
-        }
+            "web_search_sources_ranked": len(ranked_sources),
+        },
+        **prepared.mode_payload,
+    }
+
+
+async def _execute_ask(prepared: _PreparedAskContext) -> dict[str, Any]:
+    result = await prepared.gateway.infer(prepared.inference_request)
+    return await _finalize_ask_result(prepared, result=result)
+
+
+def _json_response_body(response: JSONResponse) -> dict[str, Any]:
+    try:
+        return json.loads((response.body or b"{}").decode("utf-8"))
+    except Exception:
+        return {"error": "stream_bridge_error", "detail": "Failed to parse route error payload"}
+
+
+def _stream_error_completion_payload(body: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "status": "error",
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "v_cost": "0",
+        "thread_id": body.get("thread_id"),
+        "thread_status": body.get("thread_status"),
+        "context_enabled": body.get("context_enabled"),
+        "warning": body.get("warning"),
+        "warnings": list(body.get("warnings") or []),
+        "web_search_requested": bool(body.get("web_search_requested", False)),
+        "web_search_effective": bool(body.get("web_search_effective", False)),
+        "web_search_used": False,
+        "web_search_sources": [],
+        "web_search_source_ranking": [],
+    }
+
+
+@router.post("/ask")
+async def ask(
+    req: AskRequest,
+    user: dict = Depends(get_current_user),
+):
+    started = time.monotonic()
+    run_id = str(uuid.uuid4())
+    prepared = await _prepare_ask_context(req, user=user, run_id=run_id, started=started)
+    if not isinstance(prepared, _PreparedAskContext):
+        return prepared
+    try:
+        return await _execute_ask(prepared)
     except ContractError as e:
         status = 503 if e.code == APIErrorCode.PROVIDER_UNAVAILABLE else 400
         return JSONResponse(
             status_code=status,
-            content={"error": e.code.value, "detail": e.detail, "run_id": run_id, "context_enabled": context_enabled, **mode_payload},
+            content={"error": e.code.value, "detail": e.detail, "run_id": run_id, "context_enabled": prepared.context_enabled, **prepared.mode_payload},
         )
     except ModelDisabled as e:
         return JSONResponse(
             status_code=400,
-            content={"error": "model_disabled", "detail": str(e), "run_id": run_id, "context_enabled": context_enabled, **mode_payload},
+            content={"error": "model_disabled", "detail": str(e), "run_id": run_id, "context_enabled": prepared.context_enabled, **prepared.mode_payload},
         )
     except InsufficientBalance as e:
         return JSONResponse(
@@ -729,8 +825,8 @@ async def ask(
                 "error": APIErrorCode.INSUFFICIENT_BALANCE.value,
                 "detail": str(e),
                 "run_id": run_id,
-                "context_enabled": context_enabled,
-                **mode_payload,
+                "context_enabled": prepared.context_enabled,
+                **prepared.mode_payload,
             },
         )
 
@@ -753,6 +849,7 @@ async def ask_stream(
     req: AskRequest,
     user: dict = Depends(get_current_user),
 ):
+    started = time.monotonic()
     run_id = str(uuid.uuid4())
     turn_id = str(uuid.uuid4())
 
@@ -779,13 +876,9 @@ async def ask_stream(
             "stream_start",
             {"provider": req.provider, "model": req.model},
         )
-        result = await ask(req=req, user=user)
-        if isinstance(result, JSONResponse):
-            body: dict[str, Any]
-            try:
-                body = json.loads((result.body or b"{}").decode("utf-8"))
-            except Exception:
-                body = {"error": "stream_bridge_error", "detail": "Failed to parse route error payload"}
+        prepared = await _prepare_ask_context(req, user=user, run_id=run_id, started=started)
+        if isinstance(prepared, JSONResponse):
+            body = _json_response_body(prepared)
             yield _emit("response.error", body)
             yield _emit(
                 "stream_end",
@@ -795,60 +888,127 @@ async def ask_stream(
             )
             yield _emit(
                 "response.completed",
-                {
-                    "status": "error",
-                    "input_tokens": 0,
-                    "output_tokens": 0,
-                    "total_tokens": 0,
-                    "v_cost": "0",
-                    "thread_id": body.get("thread_id"),
-                    "thread_status": body.get("thread_status"),
-                    "context_enabled": body.get("context_enabled"),
-                    "warning": body.get("warning"),
-                    "warnings": list(body.get("warnings") or []),
-                    "web_search_requested": bool(body.get("web_search_requested", False)),
-                    "web_search_effective": bool(body.get("web_search_effective", False)),
-                    "web_search_used": False,
-                    "web_search_sources": [],
-                    "web_search_source_ranking": [],
-                },
+                _stream_error_completion_payload(body),
             )
             return
+        if not isinstance(prepared, _PreparedAskContext):
+            result_payload = prepared
+            streamed_direct = False
+        else:
+            streamed_direct = False
+            try:
+                if hasattr(prepared.gateway, "stream_infer"):
+                    streamed_direct = True
+                    streamed_result = None
+                    async for event in prepared.gateway.stream_infer(prepared.inference_request):
+                        event_type = str(event.get("type") or "").strip().lower()
+                        if event_type == "text_delta":
+                            chunk = str(event.get("text") or "")
+                            if chunk:
+                                yield _emit("response.delta", {"text": chunk})
+                                yield _emit("stream_delta", {"chars": len(chunk)})
+                            continue
+                        candidate = event.get("result")
+                        if candidate is not None:
+                            streamed_result = candidate
+                    if streamed_result is None:
+                        raise ContractError(
+                            APIErrorCode.PROVIDER_UNAVAILABLE,
+                            "Streaming completed without a final inference result.",
+                        )
+                    result_payload = await _finalize_ask_result(prepared, result=streamed_result)
+                else:
+                    result_payload = await _execute_ask(prepared)
+            except ContractError as e:
+                body = {
+                    "error": e.code.value,
+                    "detail": e.detail,
+                    "run_id": run_id,
+                    "context_enabled": prepared.context_enabled,
+                    **prepared.mode_payload,
+                }
+                yield _emit("response.error", body)
+                yield _emit("stream_end", {"status": "error"})
+                yield _emit(
+                    "response.completed",
+                    _stream_error_completion_payload(body),
+                )
+                return
+            except ModelDisabled as e:
+                body = {
+                    "error": "model_disabled",
+                    "detail": str(e),
+                    "run_id": run_id,
+                    "context_enabled": prepared.context_enabled,
+                    **prepared.mode_payload,
+                }
+                yield _emit("response.error", body)
+                yield _emit("stream_end", {"status": "error"})
+                yield _emit(
+                    "response.completed",
+                    _stream_error_completion_payload(body),
+                )
+                return
+            except InsufficientBalance as e:
+                body = {
+                    "error": APIErrorCode.INSUFFICIENT_BALANCE.value,
+                    "detail": str(e),
+                    "run_id": run_id,
+                    "context_enabled": prepared.context_enabled,
+                    **prepared.mode_payload,
+                }
+                yield _emit("response.error", body)
+                yield _emit("stream_end", {"status": "error"})
+                yield _emit(
+                    "response.completed",
+                    _stream_error_completion_payload(body),
+                )
+                return
 
-        tool_calls = list(result.get("tool_calls") or [])
-        for tool in tool_calls:
-            yield _emit("tool_start", {"tool": tool})
-            yield _emit("tool_progress", {"tool": tool, "phase": "executing"})
-            yield _emit("tool.call", {"tool": tool})
-            yield _emit("tool_result", {"tool": tool, "status": "emitted"})
-            yield _emit("tool.result", {"tool": tool, "status": "emitted"})
+        streamed_tool_calls = list(result_payload.get("tool_calls") or [])
+        if streamed_direct and streamed_tool_calls:
+            for tool in streamed_tool_calls:
+                yield _emit("tool_start", {"tool": tool})
+                yield _emit("tool_progress", {"tool": tool, "phase": "executing"})
+                yield _emit("tool.call", {"tool": tool})
+                yield _emit("tool_result", {"tool": tool, "status": "emitted"})
+                yield _emit("tool.result", {"tool": tool, "status": "emitted"})
 
-        for chunk in _chunk_text(str(result.get("text") or "")):
-            yield _emit("response.delta", {"text": chunk})
-            yield _emit("stream_delta", {"chars": len(chunk)})
+        if not streamed_direct:
+            for tool in streamed_tool_calls:
+                yield _emit("tool_start", {"tool": tool})
+                yield _emit("tool_progress", {"tool": tool, "phase": "executing"})
+                yield _emit("tool.call", {"tool": tool})
+                yield _emit("tool_result", {"tool": tool, "status": "emitted"})
+                yield _emit("tool.result", {"tool": tool, "status": "emitted"})
+
+            for chunk in _chunk_text(str(result_payload.get("text") or "")):
+                yield _emit("response.delta", {"text": chunk})
+                yield _emit("stream_delta", {"chars": len(chunk)})
 
         yield _emit("stream_end", {"status": "ok"})
         yield _emit(
             "response.completed",
             {
                 "status": "ok",
-                "text": str(result.get("text", "") or ""),
-                "v_cost": str(result.get("v_cost", "0") or "0"),
-                "thread_id": result.get("thread_id"),
-                "thread_status": result.get("thread_status"),
-                "context_enabled": result.get("context_enabled"),
-                "warning": result.get("warning"),
-                "input_tokens": int(result.get("input_tokens", 0) or 0),
-                "output_tokens": int(result.get("output_tokens", 0) or 0),
-                "total_tokens": int(result.get("total_tokens", 0) or 0),
-                "web_search_requested": bool(result.get("web_search_requested", False)),
-                "web_search_effective": bool(result.get("web_search_effective", False)),
-                "web_search_used": bool(result.get("web_search_used", False)),
-                "web_search_retry_without_tool": bool(result.get("web_search_retry_without_tool", False)),
-                "web_search_sources": list(result.get("web_search_sources") or []),
-                "web_search_source_scores": list(result.get("web_search_source_scores") or []),
-                "web_search_source_ranking": list(result.get("web_search_source_ranking") or []),
-                "warnings": list(result.get("warnings") or []),
+                "text": str(result_payload.get("text", "") or ""),
+                "v_cost": str(result_payload.get("v_cost", "0") or "0"),
+                "thread_id": result_payload.get("thread_id"),
+                "thread_status": result_payload.get("thread_status"),
+                "context_enabled": result_payload.get("context_enabled"),
+                "warning": result_payload.get("warning"),
+                "input_tokens": int(result_payload.get("input_tokens", 0) or 0),
+                "output_tokens": int(result_payload.get("output_tokens", 0) or 0),
+                "total_tokens": int(result_payload.get("total_tokens", 0) or 0),
+                "web_search_requested": bool(result_payload.get("web_search_requested", False)),
+                "web_search_effective": bool(result_payload.get("web_search_effective", False)),
+                "web_search_used": bool(result_payload.get("web_search_used", False)),
+                "web_search_retry_without_tool": bool(result_payload.get("web_search_retry_without_tool", False)),
+                "web_search_sources": list(result_payload.get("web_search_sources") or []),
+                "web_search_source_scores": list(result_payload.get("web_search_source_scores") or []),
+                "web_search_source_ranking": list(result_payload.get("web_search_source_ranking") or []),
+                "tool_calls": streamed_tool_calls,
+                "warnings": list(result_payload.get("warnings") or []),
             },
         )
 

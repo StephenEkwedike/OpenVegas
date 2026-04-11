@@ -54,6 +54,13 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _row_optional(row: Any, key: str) -> Any:
+    try:
+        return row[key]
+    except (KeyError, IndexError, TypeError):
+        return None
+
+
 @dataclass(frozen=True)
 class MutationHTTPResult:
     status_code: int
@@ -567,10 +574,14 @@ class AgentOrchestrationService:
                 "SELECT 1 FROM agent_run_tool_calls WHERE run_id = $1::uuid LIMIT 1",
                 run_id,
             )
-            existing_session = str(run["runtime_session_id"]) if run.get("runtime_session_id") else None
-            existing_root = str(run["workspace_root"]) if run.get("workspace_root") else None
-            existing_fp = str(run["workspace_fingerprint"]) if run.get("workspace_fingerprint") else None
-            existing_git = str(run["git_root"]) if run.get("git_root") else None
+            existing_session_raw = _row_optional(run, "runtime_session_id")
+            existing_root_raw = _row_optional(run, "workspace_root")
+            existing_fp_raw = _row_optional(run, "workspace_fingerprint")
+            existing_git_raw = _row_optional(run, "git_root")
+            existing_session = str(existing_session_raw) if existing_session_raw else None
+            existing_root = str(existing_root_raw) if existing_root_raw else None
+            existing_fp = str(existing_fp_raw) if existing_fp_raw else None
+            existing_git = str(existing_git_raw) if existing_git_raw else None
 
             if has_tool and any(
                 [

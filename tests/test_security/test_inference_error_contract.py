@@ -108,6 +108,28 @@ class _CaptureGateway:
         return _InferResult()
 
 
+class _StreamingGateway(_CaptureGateway):
+    async def stream_infer(self, req):
+        self.last_messages = list(req.messages)
+        self.last_enable_web_search = bool(getattr(req, "enable_web_search", False))
+        yield {"type": "text_delta", "text": "hello "}
+        yield {"type": "text_delta", "text": "world"}
+        out = _InferResult()
+        out.text = "hello world"
+        yield {"type": "completed", "result": out}
+
+
+class _ToolStreamingGateway(_CaptureGateway):
+    async def stream_infer(self, req):
+        self.last_messages = list(req.messages)
+        self.last_enable_web_search = bool(getattr(req, "enable_web_search", False))
+        yield {"type": "text_delta", "text": "thinking"}
+        out = _InferResult()
+        out.text = "thinking"
+        out.tool_calls = [{"tool_name": "Read", "arguments": {"path": "README.md"}}]
+        yield {"type": "completed", "result": out}
+
+
 class _FileUploadServiceStub:
     def __init__(self, rows: list[dict] | None = None):
         self.rows = list(rows or [])
@@ -777,6 +799,63 @@ def test_inference_stream_emits_ordered_sse_events(monkeypatch):
     assert completed_data.get("input_tokens") == 3
     assert completed_data.get("output_tokens") == 5
     assert isinstance(completed_data.get("web_search_source_ranking", []), list)
+
+
+def test_inference_stream_uses_gateway_streaming_when_available(monkeypatch):
+    class _Fraud:
+        async def check_inference(self, _user_id: str):
+            return None
+
+    gateway = _StreamingGateway()
+    monkeypatch.setattr(inference_routes, "get_fraud_engine", lambda: _Fraud())
+    monkeypatch.setattr(inference_routes, "get_gateway", lambda: gateway)
+    monkeypatch.setattr(inference_routes, "get_llm_mode_service", lambda: _ModeService())
+    monkeypatch.setattr(inference_routes, "get_provider_thread_service", lambda: _ThreadService())
+    monkeypatch.setattr(inference_routes, "get_file_upload_service", lambda: _FileUploadServiceStub([]))
+
+    client = TestClient(_app_with_router())
+    response = client.post(
+        "/inference/stream",
+        json={"prompt": "hi", "provider": "openai", "model": "gpt-5.4"},
+    )
+    assert response.status_code == 200
+
+    events = _parse_sse(response.text)
+    delta_payloads = [payload.get("payload", {}) for name, payload in events if name == "response.delta"]
+    assert [payload.get("text") for payload in delta_payloads] == ["hello ", "world"]
+
+    completed_payload = [payload for name, payload in events if name == "response.completed"][-1]
+    completed_data = completed_payload.get("payload", {})
+    assert completed_data.get("status") == "ok"
+    assert completed_data.get("text") == "hello world"
+    assert gateway.last_messages is not None
+
+
+def test_inference_stream_tool_mode_preserves_tool_calls_when_gateway_streams(monkeypatch):
+    class _Fraud:
+        async def check_inference(self, _user_id: str):
+            return None
+
+    gateway = _ToolStreamingGateway()
+    monkeypatch.setattr(inference_routes, "get_fraud_engine", lambda: _Fraud())
+    monkeypatch.setattr(inference_routes, "get_gateway", lambda: gateway)
+    monkeypatch.setattr(inference_routes, "get_llm_mode_service", lambda: _ModeService())
+    monkeypatch.setattr(inference_routes, "get_provider_thread_service", lambda: _ThreadService())
+    monkeypatch.setattr(inference_routes, "get_file_upload_service", lambda: _FileUploadServiceStub([]))
+
+    client = TestClient(_app_with_router())
+    response = client.post(
+        "/inference/stream",
+        json={"prompt": "read file", "provider": "openai", "model": "gpt-5.4", "enable_tools": True},
+    )
+    assert response.status_code == 200
+
+    events = _parse_sse(response.text)
+    tool_events = [payload.get("payload", {}) for name, payload in events if name == "tool.call"]
+    assert tool_events
+    completed_payload = [payload for name, payload in events if name == "response.completed"][-1]
+    completed_data = completed_payload.get("payload", {})
+    assert completed_data.get("tool_calls") == [{"tool_name": "Read", "arguments": {"path": "README.md"}}]
 
 
 def test_inference_stream_emits_normalized_tool_events(monkeypatch):

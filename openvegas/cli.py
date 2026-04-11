@@ -4484,6 +4484,46 @@ def doctor_auth():
     )
 
 
+@cli.command("whoami")
+def whoami():
+    """Show current authenticated user from local session token."""
+    _load_openvegas_env_defaults_from_dotenv()
+    import base64
+    import json as _json
+    from openvegas.config import get_session
+
+    session = get_session() or {}
+    token = str(session.get("access_token", "") or "").strip()
+    if not token:
+        console.print("[yellow]Not logged in.[/yellow]")
+        return
+
+    email = ""
+    user_id = ""
+    try:
+        parts = token.split(".")
+        if len(parts) >= 2:
+            payload = parts[1]
+            payload += "=" * ((4 - len(payload) % 4) % 4)
+            decoded = base64.urlsafe_b64decode(payload.encode("utf-8")).decode("utf-8", errors="ignore")
+            claims = _json.loads(decoded)
+            if isinstance(claims, dict):
+                email = str(claims.get("email", "") or "")
+                user_id = str(claims.get("sub", "") or "")
+    except Exception:
+        pass
+
+    refresh_storage = str(session.get("refresh_storage", "") or "none")
+    if not email and not user_id:
+        console.print(f"whoami: refresh_storage={refresh_storage} email=unknown user_id=unknown")
+        return
+
+    console.print(
+        f"whoami: refresh_storage={refresh_storage} "
+        f"email={email or 'unknown'} user_id={user_id or 'unknown'}"
+    )
+
+
 @cli.command("doctor-runtime")
 def doctor_runtime():
     """Print one-line runtime diagnostics for deployment parity checks."""
@@ -4523,46 +4563,6 @@ def doctor_runtime():
         f"keyring_ready={'1' if keyring_ready else '0'} "
         f"numpy_ready={'1' if numpy_ready else '0'} "
         f"sounddevice_ready={'1' if sounddevice_ready else '0'}"
-    )
-
-
-@cli.command("whoami")
-def whoami():
-    """Show current authenticated user from local session token."""
-    _load_openvegas_env_defaults_from_dotenv()
-    import base64
-    import json as _json
-    from openvegas.config import get_session
-
-    session = get_session() or {}
-    token = str(session.get("access_token", "") or "").strip()
-    if not token:
-        console.print("[yellow]Not logged in.[/yellow]")
-        return
-
-    email = ""
-    user_id = ""
-    try:
-        parts = token.split(".")
-        if len(parts) >= 2:
-            payload = parts[1]
-            payload += "=" * ((4 - len(payload) % 4) % 4)
-            decoded = base64.urlsafe_b64decode(payload.encode("utf-8")).decode("utf-8", errors="ignore")
-            claims = _json.loads(decoded)
-            if isinstance(claims, dict):
-                email = str(claims.get("email", "") or "")
-                user_id = str(claims.get("sub", "") or "")
-    except Exception:
-        pass
-
-    refresh_storage = str(session.get("refresh_storage", "") or "none")
-    if not email and not user_id:
-        console.print(f"whoami: refresh_storage={refresh_storage} email=unknown user_id=unknown")
-        return
-
-    console.print(
-        f"whoami: refresh_storage={refresh_storage} "
-        f"email={email or 'unknown'} user_id={user_id or 'unknown'}"
     )
 
 
@@ -5260,6 +5260,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
     unicode_ok = _supports_unicode_output()
     last_successful_tool: str | None = None
     client = OpenVegasClient()
+    startup_bootstrap_task: asyncio.Task[None] | None = None
+    runtime_run_task: asyncio.Task[bool] | None = None
     auth_preflight = getattr(client, "auth_preflight", None)
     if callable(auth_preflight):
         try:
@@ -5879,9 +5881,11 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
         if size_bytes <= 0:
             raise RuntimeError("voice capture is empty")
         try:
-            digest = _file_sha256(file_path)
+            file_bytes = file_path.read_bytes()
         except Exception as exc:
-            raise RuntimeError(f"voice hash failed: {exc}")
+            raise RuntimeError(f"voice read failed: {exc}")
+        if not file_bytes:
+            raise RuntimeError("voice capture is empty")
 
         mime_type = _sniff_mime_type(str(file_path)).strip().lower()
         if mime_type in {"audio/x-wav", "audio/wave", "audio/vnd.wave"}:
@@ -5891,47 +5895,100 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
 
         _render_capability_status("speech_to_text", f"transcribing {marker} ({duration_sec:.1f}s)...")
 
+        def _supports_inline_stt_fallback(exc: APIError) -> bool:
+            if exc.status in {404, 405, 422}:
+                return True
+            detail = str(exc.detail or "").lower()
+            return any(
+                token in detail
+                for token in {
+                    "content_base64",
+                    "extra_forbidden",
+                    "field required",
+                    "file_id",
+                    "validation error",
+                }
+            )
+
+        async def _transcribe_via_upload(*, digest: str) -> str:
+            phase = "upload_init"
+            try:
+                emit_metric("voice_capture_phase_total", {"phase": "upload_init_started"})
+                init_resp = await asyncio.wait_for(
+                    client.upload_init(
+                        filename=file_path.name,
+                        size_bytes=size_bytes,
+                        mime_type=mime_type,
+                        sha256_hex=digest,
+                    ),
+                    timeout=_voice_timeout("OPENVEGAS_CHAT_VOICE_UPLOAD_TIMEOUT_SEC", 30.0),
+                )
+                upload_id = str(init_resp.get("upload_id") or "").strip()
+                if not upload_id:
+                    raise RuntimeError("upload init did not return upload_id")
+                phase = "upload_complete"
+                emit_metric("voice_capture_phase_total", {"phase": "upload_complete_started"})
+                complete_resp = await asyncio.wait_for(
+                    client.upload_complete(
+                        upload_id=upload_id,
+                        content_base64=base64.b64encode(file_bytes).decode("ascii"),
+                    ),
+                    timeout=_voice_timeout("OPENVEGAS_CHAT_VOICE_UPLOAD_TIMEOUT_SEC", 30.0),
+                )
+                remote_file_id = str(
+                    complete_resp.get("file_id")
+                    or complete_resp.get("upload_id")
+                    or upload_id
+                ).strip()
+                if not remote_file_id:
+                    raise RuntimeError("upload complete did not return file_id")
+
+                uploaded_attachment_cache[_attachment_key(str(file_path), size_bytes, digest)] = remote_file_id
+                emit_metric("voice_capture_phase_total", {"phase": "upload_succeeded"})
+
+                phase = "transcribe"
+                emit_metric("voice_capture_phase_total", {"phase": "transcribe_started"})
+                stt = await asyncio.wait_for(
+                    client.speech_transcribe(
+                        file_id=remote_file_id,
+                        provider=current_provider,
+                        model=voice_transcribe_model,
+                        language=voice_transcribe_language,
+                        prompt="Transcribe exactly; keep punctuation concise.",
+                    ),
+                    timeout=_voice_timeout("OPENVEGAS_CHAT_VOICE_TRANSCRIBE_TIMEOUT_SEC", 90.0),
+                )
+                emit_metric("voice_capture_phase_total", {"phase": "transcribe_succeeded"})
+                return str((stt or {}).get("text") or "").strip()
+            except asyncio.TimeoutError:
+                if phase in {"upload_init", "upload_complete"}:
+                    emit_metric("voice_capture_phase_total", {"phase": "upload_timeout"})
+                    raise RuntimeError("voice upload timed out")
+                emit_metric("voice_capture_phase_total", {"phase": "transcribe_failed"})
+                raise RuntimeError("speech transcription timed out")
+            except APIError as exc:
+                if phase in {"upload_init", "upload_complete"}:
+                    emit_metric("voice_capture_phase_total", {"phase": "upload_failed"})
+                else:
+                    emit_metric("voice_capture_phase_total", {"phase": "transcribe_failed"})
+                detail = str(exc.detail or "speech transcription failed").strip()
+                raise RuntimeError(detail or "speech transcription failed")
+            except Exception:
+                if phase in {"upload_init", "upload_complete"}:
+                    emit_metric("voice_capture_phase_total", {"phase": "upload_failed"})
+                else:
+                    emit_metric("voice_capture_phase_total", {"phase": "transcribe_failed"})
+                raise
+
         phase = "upload_init"
         try:
-            emit_metric("voice_capture_phase_total", {"phase": "upload_init_started"})
-            init_resp = await asyncio.wait_for(
-                client.upload_init(
-                    filename=file_path.name,
-                    size_bytes=size_bytes,
-                    mime_type=mime_type,
-                    sha256_hex=digest,
-                ),
-                timeout=_voice_timeout("OPENVEGAS_CHAT_VOICE_UPLOAD_TIMEOUT_SEC", 30.0),
-            )
-            upload_id = str(init_resp.get("upload_id") or "").strip()
-            if not upload_id:
-                raise RuntimeError("upload init did not return upload_id")
-            file_bytes = file_path.read_bytes()
-            phase = "upload_complete"
-            emit_metric("voice_capture_phase_total", {"phase": "upload_complete_started"})
-            complete_resp = await asyncio.wait_for(
-                client.upload_complete(
-                    upload_id=upload_id,
-                    content_base64=base64.b64encode(file_bytes).decode("ascii"),
-                ),
-                timeout=_voice_timeout("OPENVEGAS_CHAT_VOICE_UPLOAD_TIMEOUT_SEC", 30.0),
-            )
-            remote_file_id = str(
-                complete_resp.get("file_id")
-                or complete_resp.get("upload_id")
-                or upload_id
-            ).strip()
-            if not remote_file_id:
-                raise RuntimeError("upload complete did not return file_id")
-
-            uploaded_attachment_cache[_attachment_key(str(file_path), size_bytes, digest)] = remote_file_id
-            emit_metric("voice_capture_phase_total", {"phase": "upload_succeeded"})
-
             phase = "transcribe"
             emit_metric("voice_capture_phase_total", {"phase": "transcribe_started"})
             stt = await asyncio.wait_for(
                 client.speech_transcribe(
-                    file_id=remote_file_id,
+                    content_base64=base64.b64encode(file_bytes).decode("ascii"),
+                    filename=file_path.name,
+                    mime_type=mime_type,
                     provider=current_provider,
                     model=voice_transcribe_model,
                     language=voice_transcribe_language,
@@ -5940,28 +5997,23 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 timeout=_voice_timeout("OPENVEGAS_CHAT_VOICE_TRANSCRIBE_TIMEOUT_SEC", 90.0),
             )
             emit_metric("voice_capture_phase_total", {"phase": "transcribe_succeeded"})
-            transcript = str((stt or {}).get("text") or "").strip()
-            if not transcript:
-                raise RuntimeError("speech-to-text returned empty transcript")
-            return transcript
+            return str((stt or {}).get("text") or "").strip()
         except asyncio.TimeoutError:
-            if phase in {"upload_init", "upload_complete"}:
-                emit_metric("voice_capture_phase_total", {"phase": "upload_timeout"})
-                raise RuntimeError("voice upload timed out")
             emit_metric("voice_capture_phase_total", {"phase": "transcribe_failed"})
             raise RuntimeError("speech transcription timed out")
         except APIError as exc:
-            if phase in {"upload_init", "upload_complete"}:
-                emit_metric("voice_capture_phase_total", {"phase": "upload_failed"})
-            else:
-                emit_metric("voice_capture_phase_total", {"phase": "transcribe_failed"})
+            if _supports_inline_stt_fallback(exc):
+                emit_metric("voice_capture_phase_total", {"phase": "transcribe_upload_fallback"})
+                try:
+                    digest = _file_sha256(file_path)
+                except Exception as digest_exc:
+                    raise RuntimeError(f"voice hash failed: {digest_exc}")
+                return await _transcribe_via_upload(digest=digest)
+            emit_metric("voice_capture_phase_total", {"phase": "transcribe_failed"})
             detail = str(exc.detail or "speech transcription failed").strip()
             raise RuntimeError(detail or "speech transcription failed")
         except Exception:
-            if phase in {"upload_init", "upload_complete"}:
-                emit_metric("voice_capture_phase_total", {"phase": "upload_failed"})
-            else:
-                emit_metric("voice_capture_phase_total", {"phase": "transcribe_failed"})
+            emit_metric("voice_capture_phase_total", {"phase": "transcribe_failed"})
             raise
 
     def _erase_prompt_line_if_possible() -> None:
@@ -6121,16 +6173,12 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 f"User request: {user_message}\n"
                 f"Observations: {json.dumps(observations, ensure_ascii=False)}"
             )
-            final_res = await client.ask(
+            final_res = await _ask_with_optional_stream(
                 final_prompt,
-                current_provider,
-                current_model,
                 idempotency_key=f"chat-finalize-{uuid.uuid4()}",
-                thread_id=current_thread_id,
-                conversation_mode=conversation_mode,
-                persist_context=(conversation_mode == "persistent"),
                 enable_tools=False,
                 enable_web_search=False,
+                attachments=[],
             )
             next_thread = final_res.get("thread_id")
             if next_thread:
@@ -6138,10 +6186,11 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             _maybe_warn_context_disabled(final_res if isinstance(final_res, dict) else {})
             return final_res
 
-        async def _ask_direct_one_shot(
+        async def _ask_with_optional_stream(
             prompt: str,
             *,
             idempotency_key: str,
+            enable_tools: bool,
             enable_web_search: bool,
             attachments: list[str],
         ) -> dict[str, Any]:
@@ -6159,7 +6208,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     thread_id=current_thread_id,
                     conversation_mode=conversation_mode,
                     persist_context=(conversation_mode == "persistent"),
-                    enable_tools=False,
+                    enable_tools=enable_tools,
                     enable_web_search=enable_web_search,
                     attachments=attachments,
                 )
@@ -6176,7 +6225,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     thread_id=current_thread_id,
                     conversation_mode=conversation_mode,
                     persist_context=(conversation_mode == "persistent"),
-                    enable_tools=False,
+                    enable_tools=enable_tools,
                     enable_web_search=enable_web_search,
                     attachments=attachments,
                 ):
@@ -6263,7 +6312,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         thread_id=current_thread_id,
                         conversation_mode=conversation_mode,
                         persist_context=(conversation_mode == "persistent"),
-                        enable_tools=False,
+                        enable_tools=enable_tools,
                         enable_web_search=enable_web_search,
                         attachments=attachments,
                     )
@@ -6297,7 +6346,23 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 ),
                 "web_search_sources": list(completed_payload.get("web_search_sources") or []),
                 "web_search_source_ranking": list(completed_payload.get("web_search_source_ranking") or []),
+                "tool_calls": list(completed_payload.get("tool_calls") or []),
             }
+
+        async def _ask_direct_one_shot(
+            prompt: str,
+            *,
+            idempotency_key: str,
+            enable_web_search: bool,
+            attachments: list[str],
+        ) -> dict[str, Any]:
+            return await _ask_with_optional_stream(
+                prompt,
+                idempotency_key=idempotency_key,
+                enable_tools=False,
+                enable_web_search=enable_web_search,
+                attachments=attachments,
+            )
 
         async def _force_finalize(final_res: dict[str, Any], *, reason: str = "completed") -> LoopAction:
             nonlocal last_assistant_text_for_turn
@@ -6949,14 +7014,9 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 if web_search_activity_turn:
                     _render_capability_status("web_search", "searching...")
                 ask_idem = f"chat-ask-{uuid.uuid4()}"
-                result = await client.ask(
+                result = await _ask_with_optional_stream(
                     prompt,
-                    current_provider,
-                    current_model,
                     idempotency_key=ask_idem,
-                    thread_id=current_thread_id,
-                    conversation_mode=conversation_mode,
-                    persist_context=(conversation_mode == "persistent"),
                     enable_tools=enable_local_tools_turn,
                     enable_web_search=web_search_effective_turn,
                     attachments=attachment_file_ids_for_turn,
@@ -6984,14 +7044,9 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         web_search_effective=True,
                         attachment_context=prompt_attachment_context,
                     )
-                    retry_result = await client.ask(
+                    retry_result = await _ask_with_optional_stream(
                         retry_prompt,
-                        current_provider,
-                        current_model,
                         idempotency_key=f"chat-ask-retry-{uuid.uuid4()}",
-                        thread_id=current_thread_id,
-                        conversation_mode=conversation_mode,
-                        persist_context=(conversation_mode == "persistent"),
                         enable_tools=enable_local_tools_turn,
                         enable_web_search=True,
                         attachments=attachment_file_ids_for_turn,
@@ -7105,6 +7160,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         return True
                     continue
 
+            if not current_run_id:
+                await _ensure_runtime_run(wait=True)
             if not current_run_id:
                 console.print("[red]Tool request ignored: no active run.[/red]")
                 return bool(cleaned_text)
@@ -8051,11 +8108,98 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
 
     fullscreen_handoff_message: str | None = None
 
+    async def _sync_chat_preferences() -> None:
+        nonlocal conversation_mode, current_model
+        mode_task: asyncio.Task[dict] | None = None
+        models_task: asyncio.Task[dict] | None = None
+        get_mode_fn = getattr(client, "get_mode", None)
+        if callable(get_mode_fn):
+            mode_task = asyncio.create_task(get_mode_fn())
+        list_models_fn = getattr(client, "list_models", None)
+        if current_provider == "openai" and callable(list_models_fn):
+            models_task = asyncio.create_task(list_models_fn("openai"))
+
+        if mode_task is None:
+            conversation_mode = conversation_mode or "persistent"
+        else:
+            try:
+                mode = await mode_task
+                conversation_mode = str(mode.get("conversation_mode", conversation_mode or "persistent"))
+            except Exception:
+                conversation_mode = conversation_mode or "persistent"
+
+        if models_task is None:
+            return
+        try:
+            models_resp = await models_task
+            enabled_models = [
+                str(m.get("model_id", "")).strip()
+                for m in models_resp.get("models", [])
+                if m.get("enabled")
+            ]
+            selected = _pick_preferred_model(enabled_models, current_model)
+            if selected and selected != current_model:
+                current_model = selected
+        except Exception:
+            pass
+
+    async def _create_and_register_runtime_run() -> bool:
+        nonlocal current_run_id, current_run_version, current_signature
+        try:
+            run_info = await client.agent_run_create(state="running", is_resumable=True)
+            run_id = str(run_info.get("run_id", "") or "")
+            if not run_id:
+                current_run_id = None
+                current_run_version = 0
+                current_signature = "sha256:"
+                return False
+            current_run_id = run_id
+            current_run_version = int(run_info.get("run_version", 0))
+            current_signature = str(run_info.get("valid_actions_signature", "sha256:"))
+            await client.agent_register_workspace(
+                run_id=current_run_id,
+                runtime_session_id=runtime_session_id,
+                workspace_root=workspace_root,
+                workspace_fingerprint=workspace_fp,
+                git_root=workspace_git_root,
+            )
+            return True
+        except Exception:
+            current_run_id = None
+            current_run_version = 0
+            current_signature = "sha256:"
+            return False
+
+    async def _ensure_runtime_run(*, wait: bool) -> bool:
+        nonlocal runtime_run_task
+        if current_run_id:
+            return True
+        if runtime_run_task is None or runtime_run_task.done():
+            runtime_run_task = asyncio.create_task(_create_and_register_runtime_run())
+        if not wait:
+            return False
+        try:
+            return bool(await runtime_run_task)
+        except Exception:
+            return False
+
+    async def _bootstrap_chat_session() -> None:
+        await asyncio.gather(
+            _sync_chat_preferences(),
+            _ensure_runtime_run(wait=True),
+        )
+
+    def _start_chat_bootstrap() -> None:
+        nonlocal startup_bootstrap_task
+        if startup_bootstrap_task is None or startup_bootstrap_task.done():
+            startup_bootstrap_task = asyncio.create_task(_bootstrap_chat_session())
+
     async def _run_chat() -> str:
         nonlocal current_provider, current_model, current_thread_id
         nonlocal current_run_id, current_run_version, current_signature
         nonlocal plan_mode, conversation_mode, workspace_root, workspace_fp, approval_mode
         nonlocal verbose_tool_events
+        nonlocal startup_bootstrap_task, runtime_run_task
         nonlocal fullscreen_handoff_message
         nonlocal web_search_requested
         nonlocal last_web_search_effective
@@ -8075,6 +8219,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
         shown_topup_id: str | None = None
         shown_topup_status: str | None = None
         shown_at_monotonic: float = 0.0
+        low_balance_hint_task: asyncio.Task[None] | None = None
 
         def _balance_usd_equiv(balance_v_raw: str | Decimal | float | int | None) -> Decimal:
             raw = Decimal(str(balance_v_raw or "0"))
@@ -8130,6 +8275,30 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 shown_at_monotonic = time.monotonic()
             except Exception:
                 return
+
+        async def _schedule_low_balance_hint(*, force: bool = False) -> None:
+            nonlocal low_balance_hint_task
+            if force:
+                await _maybe_render_low_balance_hint(force=True)
+                return
+            if low_balance_hint_task is not None and not low_balance_hint_task.done():
+                return
+            low_balance_hint_task = asyncio.create_task(_maybe_render_low_balance_hint(force=False))
+            await asyncio.sleep(0)
+
+        async def _cleanup_chat_background_tasks() -> None:
+            nonlocal low_balance_hint_task, startup_bootstrap_task, runtime_run_task
+            to_cancel: list[asyncio.Task[Any]] = []
+            for task in (low_balance_hint_task, startup_bootstrap_task, runtime_run_task):
+                if task is None or task.done():
+                    continue
+                task.cancel()
+                to_cancel.append(task)
+            low_balance_hint_task = None
+            startup_bootstrap_task = None
+            runtime_run_task = None
+            if to_cancel:
+                await asyncio.gather(*to_cancel, return_exceptions=True)
 
         async def _read_chat_message() -> str:
             nonlocal prompt_toolkit_unavailable_warned, chat_prompt_session, chat_prompt_bindings, pending_voice_prefill, pending_voice_meta, prompt_input_active
@@ -8387,43 +8556,6 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 return "/paste"
             return merged
 
-        try:
-            mode = await client.get_mode()
-            conversation_mode = str(mode.get("conversation_mode", "persistent"))
-        except Exception:
-            conversation_mode = "persistent"
-        if current_provider == "openai":
-            try:
-                models_resp = await client.list_models("openai")
-                enabled_models = [
-                    str(m.get("model_id", "")).strip()
-                    for m in models_resp.get("models", [])
-                    if m.get("enabled")
-                ]
-                selected = _pick_preferred_model(enabled_models, current_model)
-                if selected and selected != current_model:
-                    current_model = selected
-            except Exception:
-                pass
-
-        try:
-            run_info = await client.agent_run_create(state="running", is_resumable=True)
-            current_run_id = str(run_info.get("run_id", "") or "")
-            current_run_version = int(run_info.get("run_version", 0))
-            current_signature = str(run_info.get("valid_actions_signature", "sha256:"))
-            if current_run_id:
-                await client.agent_register_workspace(
-                    run_id=current_run_id,
-                    runtime_session_id=runtime_session_id,
-                    workspace_root=workspace_root,
-                    workspace_fingerprint=workspace_fp,
-                    git_root=workspace_git_root,
-                )
-        except Exception:
-            current_run_id = None
-            current_run_version = 0
-            current_signature = "sha256:"
-
         if show_model_meta:
             console.print(f"OpenVegas Chat · {current_provider}/{current_model} · {conversation_mode}")
         else:
@@ -8437,6 +8569,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
         render_status_bar(console, _status_actor(), "ready", workspace_root)
         _render_action_hint()
         dealer_panel.render("idle", "ready")
+        _start_chat_bootstrap()
 
         while True:
             if str(fullscreen_handoff_message or "").strip():
@@ -8454,6 +8587,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
 
                 if cmd == "/exit":
                     voice_button.stop_if_recording()
+                    await _cleanup_chat_background_tasks()
                     console.print("[dim]Exiting chat.[/dim]")
                     return "exit"
                 if cmd == "/help":
@@ -8629,7 +8763,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                                 f"[green]Voice captured: transcript ready in input ({int(insert_observed.get('chars') or 0)} chars).[/green]"
                             )
                         elif not voice_button.last_error:
-                            console.print("[yellow]Voice error: empty transcript returned.[/yellow]")
+                            console.print("[yellow]No speech detected. Try again.[/yellow]")
                     continue
                 if cmd == "/mcp":
                     if len(parts) < 2:
@@ -8891,6 +9025,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                                 )
                                 continue
                     voice_button.stop_if_recording()
+                    await _cleanup_chat_background_tasks()
                     return "ui"
 
                 console.print("[red]Unknown slash command. Use /help.[/red]")
@@ -9148,7 +9283,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                             "ts": time.time(),
                         }
                     )
-                await _maybe_render_low_balance_hint(force=False)
+                await _schedule_low_balance_hint(force=False)
                 pending_attachments.clear()
                 attachment_markers_for_turn = []
                 attachment_context_for_turn = ""
@@ -9267,14 +9402,22 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 f" ({type(exc).__name__})[/yellow]"
             )
 
-    while True:
-        outcome = run_async(_run_chat())
-        if outcome == "ui":
-            from openvegas.tui.prompt_ui import run_prompt_ui
+    try:
+        while True:
+            outcome = run_async(_run_chat())
+            if outcome == "ui":
+                from openvegas.tui.prompt_ui import run_prompt_ui
 
-            run_prompt_ui(no_render=False, render_timeout_sec=15.0)
-            continue
-        break
+                run_prompt_ui(no_render=False, render_timeout_sec=15.0)
+                continue
+            break
+    finally:
+        aclose = getattr(client, "aclose", None)
+        if callable(aclose):
+            try:
+                run_async(aclose())
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------

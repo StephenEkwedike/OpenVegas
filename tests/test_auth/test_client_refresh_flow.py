@@ -55,6 +55,51 @@ async def test_cli_startup_expired_access_valid_refresh_proactive_succeeds_no_pr
 
 
 @pytest.mark.asyncio
+async def test_auth_preflight_requires_saved_session(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(client_mod, "get_session", lambda: {})
+    monkeypatch.setattr(client_mod, "get_bearer_token", lambda: None)
+    client = OpenVegasClient()
+
+    with pytest.raises(APIError) as exc:
+        await client.auth_preflight()
+
+    assert exc.value.status == 401
+    assert "Session expired" in exc.value.detail
+
+
+@pytest.mark.asyncio
+async def test_auth_preflight_refreshes_expiring_token_before_chat_start(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    session_state = {
+        "access_token": "expired-access",
+        "access_expires_at": 1,
+        "refresh_token": "valid-refresh",
+        "refresh_storage": "config",
+    }
+    monkeypatch.setattr(client_mod, "get_session", lambda: dict(session_state))
+    monkeypatch.setattr(client_mod, "get_bearer_token", lambda: "expired-access")
+    client = OpenVegasClient()
+
+    refresh_calls: list[str] = []
+
+    async def _fake_refresh(*, trigger: str):
+        refresh_calls.append(trigger)
+        session_state["access_token"] = "fresh-access"
+        session_state["access_expires_at"] = 4_102_444_800
+        client.token = "fresh-access"
+        client._session_snapshot = dict(session_state)
+        return "fresh-access"
+
+    monkeypatch.setattr(client, "_refresh_single_flight", _fake_refresh)
+
+    await client.auth_preflight()
+
+    assert refresh_calls == ["proactive_startup"]
+    assert client.token == "fresh-access"
+
+
+@pytest.mark.asyncio
 async def test_401_triggers_single_retry_after_refresh(monkeypatch: pytest.MonkeyPatch):
     session_state = {"access_token": "a", "access_expires_at": 4_102_444_800}
     monkeypatch.setattr(client_mod, "get_session", lambda: dict(session_state))

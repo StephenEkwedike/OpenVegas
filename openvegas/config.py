@@ -17,11 +17,20 @@ from openvegas.telemetry import emit_metric
 CONFIG_DIR = Path.home() / ".openvegas"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 LEGACY_DEFAULT_BACKEND_URL = "https://api.openvegas.gg"
+FALLBACK_DEFAULT_BACKEND_URL = "https://app.openvegas.ai"
+LEGACY_LOCAL_BACKEND_URLS = {
+    "http://127.0.0.1:8000",
+    "http://localhost:8000",
+    "http://0.0.0.0:8000",
+}
+LEGACY_PRODUCTION_BACKEND_URLS = {
+    "https://openvegasdeployed-production.up.railway.app",
+}
 DEFAULT_BACKEND_URL = (
     str(os.getenv("OPENVEGAS_BACKEND_URL", "")).strip()
     or str(os.getenv("OPENVEGAS_API_BASE_URL", "")).strip()
     or str(os.getenv("OPENVEGAS_API_URL", "")).strip()
-    or "https://app.openvegas.ai"
+    or FALLBACK_DEFAULT_BACKEND_URL
 )
 DEFAULT_OPENAI_MODEL = os.getenv("OPENVEGAS_DEFAULT_OPENAI_MODEL", "gpt-5.4")
 _PLATFORM_STORE_SERVICE = "openvegas"
@@ -54,6 +63,43 @@ DEFAULT_CONFIG = {
 _SESSION_CLAIMS_CACHE: dict[str, Any] | None = None
 
 
+def _normalize_backend_url(url: object) -> str:
+    return str(url or "").strip().rstrip("/")
+
+
+def _environment_backend_url() -> str:
+    return (
+        _normalize_backend_url(os.getenv("OPENVEGAS_BACKEND_URL", ""))
+        or _normalize_backend_url(os.getenv("OPENVEGAS_API_BASE_URL", ""))
+        or _normalize_backend_url(os.getenv("OPENVEGAS_API_URL", ""))
+    )
+
+
+def _current_default_backend_url() -> str:
+    value = _environment_backend_url()
+    return value or FALLBACK_DEFAULT_BACKEND_URL
+
+
+def _should_migrate_backend_url(url: object) -> bool:
+    normalized = _normalize_backend_url(url)
+    return normalized in {
+        LEGACY_DEFAULT_BACKEND_URL,
+        *LEGACY_LOCAL_BACKEND_URLS,
+        *LEGACY_PRODUCTION_BACKEND_URLS,
+    }
+
+
+def _persist_migrated_config(config: dict) -> None:
+    try:
+        save_config_atomic(config)
+        try:
+            CONFIG_FILE.chmod(0o600)
+        except Exception:
+            pass
+    except Exception:
+        logger.debug("config migration persist failed", exc_info=True)
+
+
 def ensure_config_dir() -> None:
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     try:
@@ -65,11 +111,14 @@ def ensure_config_dir() -> None:
 
 def load_config() -> dict:
     ensure_config_dir()
+    current_default_backend_url = _current_default_backend_url()
     if CONFIG_FILE.exists():
         with open(CONFIG_FILE, encoding="utf-8") as f:
             stored = json.loads(f.read())
-        if stored.get("backend_url") == LEGACY_DEFAULT_BACKEND_URL:
-            stored["backend_url"] = DEFAULT_BACKEND_URL
+        migrated = False
+        if _should_migrate_backend_url(stored.get("backend_url")):
+            stored["backend_url"] = current_default_backend_url
+            migrated = True
         # Migrate legacy OpenAI default model to current GPT-5.4 default
         # unless user explicitly set a non-legacy value.
         stored_models = dict(stored.get("default_model_by_provider") or {})
@@ -77,8 +126,17 @@ def load_config() -> dict:
         if openai_model in {"", "gpt-4o-mini", "gpt-5.3-codex"}:
             stored_models["openai"] = DEFAULT_OPENAI_MODEL
             stored["default_model_by_provider"] = stored_models
-        return {**DEFAULT_CONFIG, **stored}
-    return dict(DEFAULT_CONFIG)
+            migrated = True
+        merged = {**DEFAULT_CONFIG, **stored}
+        backend_url = _normalize_backend_url(merged.get("backend_url"))
+        if not backend_url:
+            backend_url = current_default_backend_url
+            migrated = True
+        merged["backend_url"] = backend_url
+        if migrated:
+            _persist_migrated_config(merged)
+        return merged
+    return {**DEFAULT_CONFIG, "backend_url": current_default_backend_url}
 
 
 def save_config_atomic(config: dict) -> None:
@@ -446,5 +504,9 @@ def token_expires_soon(session: dict | None = None, leeway_sec: int = 300) -> bo
 
 
 def get_backend_url() -> str:
+    env_override = _environment_backend_url()
+    if env_override:
+        return env_override
     config = load_config()
-    return config.get("backend_url", DEFAULT_BACKEND_URL)
+    backend_url = _normalize_backend_url(config.get("backend_url", DEFAULT_BACKEND_URL))
+    return backend_url or _current_default_backend_url()

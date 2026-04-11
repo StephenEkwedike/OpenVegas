@@ -5,9 +5,10 @@ from __future__ import annotations
 import hashlib
 import os
 
-import httpx
 from fastapi import Depends, HTTPException, Request
 from jose import jwt, JWTError
+
+from server.services.dependencies import request_with_http_client
 
 
 def _supabase_jwt_secret() -> str:
@@ -33,14 +34,15 @@ async def _validate_with_supabase(token: str) -> dict:
         )
 
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(
-                f"{url}/auth/v1/user",
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "apikey": anon,
-                },
-            )
+        resp = await request_with_http_client(
+            "GET",
+            f"{url}/auth/v1/user",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "apikey": anon,
+            },
+            timeout=10,
+        )
     except Exception:
         raise HTTPException(503, "Unable to reach Supabase Auth for token validation")
 

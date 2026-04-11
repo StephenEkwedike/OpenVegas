@@ -8,8 +8,8 @@ HTTP tool-use actions with its ov_agent_* bearer token.
 OPENVEGAS_SKILL_MANIFEST = {
     "name": "openvegas",
     "description": "Compute infrastructure for autonomous agents — inference routing, deterministic boosts, and casino games for probabilistic compute top-ups",
-    "version": "0.2.0",
-    "base_url": "https://api.openvegas.gg",
+    "version": "0.3.7",
+    "base_url": "https://app.openvegas.ai",
     "auth": {
         "type": "bearer",
         "token_prefix": "ov_agent_",

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
-from typing import Any
+from typing import Any, AsyncGenerator
 
 import httpx
 
@@ -55,15 +55,89 @@ class InferenceResult:
     web_search_retry_without_tool: bool = False
 
 
+@dataclass
+class _InferenceExecutionContext:
+    account_id: str
+    model_config: dict[str, Any]
+    user_id: str | None
+    provider_api_key: str
+    reserve_v: Decimal
+    request_id: str
+    preauth_id: str
+    reservation_ref: str
+
+
 class AIGateway:
     """Routes inference requests, meters usage, and settles charges with grant-first policy."""
 
-    def __init__(self, db: Any, wallet: WalletService, catalog: ProviderCatalog):
+    def __init__(
+        self,
+        db: Any,
+        wallet: WalletService,
+        catalog: ProviderCatalog,
+        http_client: httpx.AsyncClient | None = None,
+    ):
         self.db = db
         self.wallet = wallet
         self.catalog = catalog
+        self.http_client = http_client
 
     async def infer(self, req: InferenceRequest) -> InferenceResult:
+        ctx, replay = await self._prepare_inference_execution(req)
+        if replay is not None:
+            return replay
+
+        try:
+            result = await self._route_to_provider(req, ctx.provider_api_key)
+        except Exception:
+            await self._abort_inference_execution(ctx)
+            raise
+        return await self._finalize_inference_execution(ctx, req, result)
+
+    async def stream_infer(self, req: InferenceRequest) -> AsyncGenerator[dict[str, Any], None]:
+        ctx, replay = await self._prepare_inference_execution(req)
+        if replay is not None:
+            if str(replay.text or "").strip():
+                yield {"type": "text_delta", "text": str(replay.text)}
+            yield {"type": "completed", "result": replay}
+            return
+
+        result: InferenceResult | None = None
+        try:
+            if (
+                req.provider == "openai"
+                and (
+                    self._prefers_openai_responses_api(req.model)
+                    or self._messages_include_multimodal_content(req.messages)
+                )
+            ):
+                async for event in self._stream_openai_responses(req=req, api_key=ctx.provider_api_key):
+                    if str(event.get("type") or "") == "text_delta":
+                        yield event
+                        continue
+                    candidate = event.get("result")
+                    if isinstance(candidate, InferenceResult):
+                        result = candidate
+                if result is None:
+                    raise ContractError(
+                        APIErrorCode.PROVIDER_UNAVAILABLE,
+                        "OpenAI streaming completed without a final response payload.",
+                    )
+            else:
+                result = await self._route_to_provider(req, ctx.provider_api_key)
+                if str(result.text or "").strip():
+                    yield {"type": "text_delta", "text": str(result.text)}
+        except Exception:
+            await self._abort_inference_execution(ctx)
+            raise
+
+        finalized = await self._finalize_inference_execution(ctx, req, result)
+        yield {"type": "completed", "result": finalized}
+
+    async def _prepare_inference_execution(
+        self,
+        req: InferenceRequest,
+    ) -> tuple[_InferenceExecutionContext, InferenceResult | None]:
         model_config = await self.catalog.get_model(req.provider, req.model)
         if not model_config or not model_config["enabled"]:
             raise ModelDisabled(f"{req.model} is currently disabled")
@@ -95,7 +169,19 @@ class AIGateway:
             payload_hash=payload_hash,
         )
         if replay is not None:
-            return replay
+            return (
+                _InferenceExecutionContext(
+                    account_id=req.account_id,
+                    model_config=model_config,
+                    user_id=user_id,
+                    provider_api_key=provider_api_key,
+                    reserve_v=reserve_v,
+                    request_id=request_id,
+                    preauth_id="",
+                    reservation_ref=request_id,
+                ),
+                replay,
+            )
 
         preauth_id = str(uuid.uuid4())
         reservation_ref = request_id
@@ -126,18 +212,32 @@ class AIGateway:
         except Exception:
             await self._mark_request_failed(request_id=request_id)
             raise
-
-        try:
-            result = await self._route_to_provider(req, provider_api_key)
-        except Exception:
-            await self._void_preauth(
+        return (
+            _InferenceExecutionContext(
+                account_id=req.account_id,
+                model_config=model_config,
+                user_id=user_id,
+                provider_api_key=provider_api_key,
+                reserve_v=reserve_v,
+                request_id=request_id,
                 preauth_id=preauth_id,
                 reservation_ref=reservation_ref,
-                account_id=req.account_id,
-                reserved_v=reserve_v,
-            )
-            await self._mark_request_failed(request_id=request_id)
-            raise
+            ),
+            None,
+        )
+
+    async def _finalize_inference_execution(
+        self,
+        ctx: _InferenceExecutionContext,
+        req: InferenceRequest,
+        result: InferenceResult,
+    ) -> InferenceResult:
+        model_config = ctx.model_config
+        user_id = ctx.user_id
+        request_id = ctx.request_id
+        preauth_id = ctx.preauth_id
+        reservation_ref = ctx.reservation_ref
+        reserve_v = ctx.reserve_v
 
         actual_v = self._calculate_v_cost(model_config, result.input_tokens, result.output_tokens)
         actual_usd = self._calculate_actual_usd(
@@ -290,6 +390,19 @@ class AIGateway:
             )
 
         return result
+
+    async def _abort_inference_execution(
+        self,
+        ctx: _InferenceExecutionContext,
+    ) -> None:
+        if str(ctx.preauth_id or "").strip():
+            await self._void_preauth(
+                preauth_id=ctx.preauth_id,
+                reservation_ref=ctx.reservation_ref,
+                account_id=ctx.account_id,
+                reserved_v=ctx.reserve_v,
+            )
+        await self._mark_request_failed(request_id=ctx.request_id)
 
     async def _begin_inference_request(
         self,
@@ -632,9 +745,7 @@ class AIGateway:
         )
 
     async def _call_openai(self, req: InferenceRequest, api_key: str) -> InferenceResult:
-        import openai
-
-        client = openai.AsyncOpenAI(api_key=api_key)
+        client = self._build_openai_client(api_key)
         if self._prefers_openai_responses_api(req.model) or self._messages_include_multimodal_content(req.messages):
             return await self._call_openai_responses(client=client, req=req)
         return await self._call_openai_chat_completions(client=client, req=req)
@@ -727,46 +838,7 @@ class AIGateway:
         )
 
     async def _call_openai_responses(self, *, client: Any, req: InferenceRequest) -> InferenceResult:
-        kwargs: dict[str, Any] = {
-            "model": req.model,
-            "input": self._messages_to_openai_responses_input(req.messages),
-            "max_output_tokens": req.max_tokens,
-        }
-        tools: list[dict[str, Any]] = []
-        if req.enable_tools:
-            tools.append(
-                {
-                    "type": "function",
-                    "name": "call_local_tool",
-                    "description": "Request local workspace tool execution.",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "tool_name": {
-                                "type": "string",
-                                "enum": [
-                                    "Read",
-                                    "Search",
-                                    "Write",
-                                    "FindAndReplace",
-                                    "InsertAtEnd",
-                                    "Bash",
-                                    "List",
-                                ],
-                            },
-                            "arguments": {"type": "object"},
-                            "shell_mode": {"type": "string", "enum": ["read_only", "mutating"]},
-                            "timeout_sec": {"type": "integer", "minimum": 1, "maximum": 300},
-                        },
-                        "required": ["tool_name", "arguments"],
-                    },
-                }
-            )
-        if req.enable_web_search and os.getenv("OPENVEGAS_OPENAI_WEB_SEARCH_ENABLED", "1").strip() in {"1", "true", "yes", "on"}:
-            tools.append({"type": "web_search_preview"})
-        if tools:
-            kwargs["tools"] = tools
-            kwargs["tool_choice"] = "auto"
+        kwargs = self._build_openai_responses_request(req)
 
         web_search_retry_without_tool = False
         try:
@@ -790,34 +862,149 @@ class AIGateway:
                     self._raise_openai_request_error(retry_exc)
             else:
                 self._raise_openai_request_error(exc)
-        parsed_tool_calls: list[dict[str, Any]] = []
-        if req.enable_tools:
-            for item in list(getattr(resp, "output", []) or []):
-                if str(getattr(item, "type", "")) != "function_call":
-                    continue
-                fn_name = str(getattr(item, "name", "") or "")
-                raw_args = str(getattr(item, "arguments", "") or "")
-                parsed = self._parse_local_tool_call(
-                    function_name=fn_name,
-                    raw_arguments=raw_args,
-                )
-                if parsed:
-                    parsed_tool_calls.append(parsed)
-
-        usage = getattr(resp, "usage", None)
-        web_sources_max = self._web_sources_max_from_env()
-        web_search_sources = self._extract_openai_web_sources(resp, max_sources=web_sources_max)
-        web_search_used = self._response_includes_web_search(resp) or bool(web_search_sources)
-        return InferenceResult(
-            text=self._extract_openai_responses_text(resp),
-            input_tokens=int(getattr(usage, "input_tokens", 0) or 0),
-            output_tokens=int(getattr(usage, "output_tokens", 0) or 0),
-            provider_request_id=getattr(resp, "id", None),
-            tool_calls=parsed_tool_calls or None,
-            web_search_used=web_search_used,
-            web_search_sources=web_search_sources or None,
+        parsed_tool_calls = self._extract_openai_response_tool_calls(resp) if req.enable_tools else None
+        return self._build_openai_responses_result(
+            resp=resp,
+            tool_calls=parsed_tool_calls,
             web_search_retry_without_tool=web_search_retry_without_tool,
         )
+
+    async def _stream_openai_responses(
+        self,
+        *,
+        req: InferenceRequest,
+        api_key: str,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        payload = self._build_openai_responses_request(req)
+        payload["stream"] = True
+        text_chunks: list[str] = []
+        completed_response: Any = None
+        web_search_retry_without_tool = False
+
+        async def _consume_stream(stream_payload: dict[str, Any]) -> None:
+            nonlocal completed_response
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            }
+
+            async def _stream_events(client: httpx.AsyncClient) -> AsyncGenerator[dict[str, Any], None]:
+                async with client.stream(
+                    "POST",
+                    "https://api.openai.com/v1/responses",
+                    headers=headers,
+                    json=stream_payload,
+                    timeout=None,
+                ) as resp:
+                    if resp.status_code >= 400:
+                        detail_bytes = await resp.aread()
+                        detail = detail_bytes.decode("utf-8", errors="ignore").strip() or resp.reason_phrase
+                        raise RuntimeError(detail or "OpenAI streaming request failed")
+
+                    data_lines: list[str] = []
+                    async for raw_line in resp.aiter_lines():
+                        line = str(raw_line or "")
+                        if not line:
+                            if not data_lines:
+                                continue
+                            raw = "\n".join(data_lines).strip()
+                            data_lines = []
+                            if not raw or raw == "[DONE]":
+                                continue
+                            try:
+                                payload_obj = json.loads(raw)
+                            except Exception:
+                                continue
+                            if isinstance(payload_obj, dict):
+                                yield payload_obj
+                            continue
+                        if line.startswith(":"):
+                            continue
+                        if line.startswith("data:"):
+                            data_lines.append(line.split(":", 1)[1].lstrip())
+
+                    if data_lines:
+                        raw = "\n".join(data_lines).strip()
+                        if raw and raw != "[DONE]":
+                            try:
+                                payload_obj = json.loads(raw)
+                            except Exception:
+                                payload_obj = None
+                            if isinstance(payload_obj, dict):
+                                yield payload_obj
+
+            if self.http_client is not None:
+                source = _stream_events(self.http_client)
+            else:
+                async with httpx.AsyncClient(follow_redirects=True, timeout=None) as temp_client:
+                    source = _stream_events(temp_client)
+                    async for event in source:
+                        event_type = str(event.get("type") or "").strip().lower()
+                        if event_type == "response.output_text.delta":
+                            delta = str(event.get("delta") or event.get("text") or "")
+                            if delta:
+                                text_chunks.append(delta)
+                                yield {"type": "text_delta", "text": delta}
+                            continue
+                        if event_type == "response.completed":
+                            completed_response = event.get("response")
+                            continue
+                        if event_type in {"error", "response.error", "response.failed"}:
+                            raise RuntimeError(json.dumps(event, separators=(",", ":"), ensure_ascii=False))
+                return
+
+            async for event in source:
+                event_type = str(event.get("type") or "").strip().lower()
+                if event_type == "response.output_text.delta":
+                    delta = str(event.get("delta") or event.get("text") or "")
+                    if delta:
+                        text_chunks.append(delta)
+                        yield {"type": "text_delta", "text": delta}
+                    continue
+                if event_type == "response.completed":
+                    completed_response = event.get("response")
+                    continue
+                if event_type in {"error", "response.error", "response.failed"}:
+                    raise RuntimeError(json.dumps(event, separators=(",", ":"), ensure_ascii=False))
+
+        try:
+            async for event in _consume_stream(payload):
+                yield event
+        except Exception as exc:
+            if req.enable_web_search and self._should_retry_without_web_tool(exc):
+                retry = dict(payload)
+                retry_tools = [
+                    t for t in list(retry.get("tools", []))
+                    if str((t or {}).get("type") or "").strip().lower() != "web_search_preview"
+                ]
+                if retry_tools:
+                    retry["tools"] = retry_tools
+                else:
+                    retry.pop("tools", None)
+                    retry.pop("tool_choice", None)
+                text_chunks = []
+                completed_response = None
+                web_search_retry_without_tool = True
+                async for event in _consume_stream(retry):
+                    yield event
+            else:
+                self._raise_openai_request_error(exc)
+
+        if completed_response is None:
+            raise ContractError(
+                APIErrorCode.PROVIDER_UNAVAILABLE,
+                "OpenAI streaming completed without a final response payload.",
+            )
+
+        parsed_tool_calls = self._extract_openai_response_tool_calls(completed_response) if req.enable_tools else None
+        result = self._build_openai_responses_result(
+            resp=completed_response,
+            tool_calls=parsed_tool_calls,
+            web_search_retry_without_tool=web_search_retry_without_tool,
+        )
+        if text_chunks and not str(result.text or "").strip():
+            result.text = "".join(text_chunks).strip()
+        yield {"type": "completed", "result": result}
 
     @staticmethod
     def _prefers_openai_responses_api(model_id: str) -> bool:
@@ -897,11 +1084,27 @@ class AIGateway:
 
     @staticmethod
     def _response_includes_web_search(resp: Any) -> bool:
-        for item in list(getattr(resp, "output", []) or []):
-            item_type = str(getattr(item, "type", "") or "").strip().lower()
+        for item in AIGateway._iter_openai_output_items(resp):
+            item_type = str(AIGateway._openai_field(item, "type", "") or "").strip().lower()
             if item_type in {"web_search_call", "web_search_preview"}:
                 return True
         return False
+
+    def _extract_openai_response_tool_calls(self, resp: Any) -> list[dict[str, Any]] | None:
+        parsed_tool_calls: list[dict[str, Any]] = []
+        for item in self._iter_openai_output_items(resp):
+            item_type = str(self._openai_field(item, "type", "") or "").strip().lower()
+            if item_type != "function_call":
+                continue
+            fn_name = str(self._openai_field(item, "name", "") or "")
+            raw_args = str(self._openai_field(item, "arguments", "") or "")
+            parsed = self._parse_local_tool_call(
+                function_name=fn_name,
+                raw_arguments=raw_args,
+            )
+            if parsed:
+                parsed_tool_calls.append(parsed)
+        return parsed_tool_calls or None
 
     @staticmethod
     def _web_sources_max_from_env() -> int:
@@ -924,17 +1127,17 @@ class AIGateway:
             urls.append(url)
             return len(urls) >= max_sources
 
-        for item in list(getattr(resp, "output", []) or []):
+        for item in AIGateway._iter_openai_output_items(resp):
             for attr_name in ("url", "source", "source_url"):
-                if _collect_url(getattr(item, attr_name, "")):
+                if _collect_url(AIGateway._openai_field(item, attr_name, "")):
                     return urls
-            for part in list(getattr(item, "content", []) or []):
+            for part in list(AIGateway._openai_field(item, "content", []) or []):
                 for attr_name in ("url", "source", "source_url"):
-                    if _collect_url(getattr(part, attr_name, "")):
+                    if _collect_url(AIGateway._openai_field(part, attr_name, "")):
                         return urls
-                annotations = getattr(part, "annotations", None) or []
+                annotations = AIGateway._openai_field(part, "annotations", None) or []
                 for ann in annotations:
-                    if _collect_url(getattr(ann, "url", "")):
+                    if _collect_url(AIGateway._openai_field(ann, "url", "")):
                         return urls
         return urls
 
@@ -982,19 +1185,109 @@ class AIGateway:
 
     @staticmethod
     def _extract_openai_responses_text(resp: Any) -> str:
-        out_text = str(getattr(resp, "output_text", "") or "").strip()
+        out_text = str(AIGateway._openai_field(resp, "output_text", "") or "").strip()
         if out_text:
             return out_text
         chunks: list[str] = []
-        for item in list(getattr(resp, "output", []) or []):
-            if str(getattr(item, "type", "")).lower() != "message":
+        for item in AIGateway._iter_openai_output_items(resp):
+            if str(AIGateway._openai_field(item, "type", "")).lower() != "message":
                 continue
-            for part in list(getattr(item, "content", []) or []):
-                if str(getattr(part, "type", "")).lower() in {"text", "output_text"}:
-                    value = getattr(part, "text", "")
+            for part in list(AIGateway._openai_field(item, "content", []) or []):
+                if str(AIGateway._openai_field(part, "type", "")).lower() in {"text", "output_text"}:
+                    value = AIGateway._openai_field(part, "text", "")
                     if value:
                         chunks.append(str(value))
         return "\n".join(chunks).strip()
+
+    @staticmethod
+    def _openai_field(obj: Any, name: str, default: Any = None) -> Any:
+        if isinstance(obj, dict):
+            return obj.get(name, default)
+        return getattr(obj, name, default)
+
+    @staticmethod
+    def _iter_openai_output_items(resp: Any) -> list[Any]:
+        items = AIGateway._openai_field(resp, "output", [])
+        if isinstance(items, list):
+            return items
+        return list(items or [])
+
+    def _build_openai_client(self, api_key: str) -> Any:
+        from openai import AsyncOpenAI
+
+        kwargs: dict[str, Any] = {"api_key": api_key}
+        if self.http_client is not None:
+            kwargs["http_client"] = self.http_client
+        try:
+            return AsyncOpenAI(**kwargs)
+        except TypeError:
+            kwargs.pop("http_client", None)
+            return AsyncOpenAI(**kwargs)
+
+    def _build_openai_responses_request(self, req: InferenceRequest) -> dict[str, Any]:
+        kwargs: dict[str, Any] = {
+            "model": req.model,
+            "input": self._messages_to_openai_responses_input(req.messages),
+            "max_output_tokens": req.max_tokens,
+        }
+        tools: list[dict[str, Any]] = []
+        if req.enable_tools:
+            tools.append(
+                {
+                    "type": "function",
+                    "name": "call_local_tool",
+                    "description": "Request local workspace tool execution.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "tool_name": {
+                                "type": "string",
+                                "enum": [
+                                    "Read",
+                                    "Search",
+                                    "Write",
+                                    "FindAndReplace",
+                                    "InsertAtEnd",
+                                    "Bash",
+                                    "List",
+                                ],
+                            },
+                            "arguments": {"type": "object"},
+                            "shell_mode": {"type": "string", "enum": ["read_only", "mutating"]},
+                            "timeout_sec": {"type": "integer", "minimum": 1, "maximum": 300},
+                        },
+                        "required": ["tool_name", "arguments"],
+                    },
+                }
+            )
+        if req.enable_web_search and os.getenv("OPENVEGAS_OPENAI_WEB_SEARCH_ENABLED", "1").strip() in {"1", "true", "yes", "on"}:
+            tools.append({"type": "web_search_preview"})
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
+        return kwargs
+
+    def _build_openai_responses_result(
+        self,
+        *,
+        resp: Any,
+        tool_calls: list[dict[str, Any]] | None = None,
+        web_search_retry_without_tool: bool = False,
+    ) -> InferenceResult:
+        usage = self._openai_field(resp, "usage", None)
+        web_sources_max = self._web_sources_max_from_env()
+        web_search_sources = self._extract_openai_web_sources(resp, max_sources=web_sources_max)
+        web_search_used = self._response_includes_web_search(resp) or bool(web_search_sources)
+        return InferenceResult(
+            text=self._extract_openai_responses_text(resp),
+            input_tokens=int(self._openai_field(usage, "input_tokens", 0) or 0),
+            output_tokens=int(self._openai_field(usage, "output_tokens", 0) or 0),
+            provider_request_id=self._openai_field(resp, "id", None),
+            tool_calls=tool_calls,
+            web_search_used=web_search_used,
+            web_search_sources=web_search_sources or None,
+            web_search_retry_without_tool=web_search_retry_without_tool,
+        )
 
     @staticmethod
     def _raise_openai_request_error(exc: Exception) -> None:
@@ -1039,9 +1332,7 @@ class AIGateway:
         if str(provider or "").strip().lower() != "openai":
             raise ContractError(APIErrorCode.INVALID_TRANSITION, "Image generation currently supports openai only.")
         api_key = await self._resolve_provider_api_key("openai")
-        from openai import AsyncOpenAI
-
-        client = AsyncOpenAI(api_key=api_key)
+        client = self._build_openai_client(api_key)
         started = time.perf_counter()
         resp = await client.images.generate(
             model=str(model or "gpt-image-1"),
@@ -1092,9 +1383,7 @@ class AIGateway:
             raise ContractError(APIErrorCode.INVALID_TRANSITION, "Audio payload is empty.")
 
         api_key = await self._resolve_provider_api_key("openai")
-        from openai import AsyncOpenAI
-
-        client = AsyncOpenAI(api_key=api_key)
+        client = self._build_openai_client(api_key)
         started = time.perf_counter()
         file_obj = io.BytesIO(bytes(audio_bytes))
         file_obj.name = str(filename or "audio.wav")
@@ -1112,8 +1401,6 @@ class AIGateway:
         text = str(getattr(resp, "text", "") or "").strip()
         if not text and isinstance(resp, dict):
             text = str(resp.get("text") or "").strip()
-        if not text:
-            raise ContractError(APIErrorCode.PROVIDER_UNAVAILABLE, "Speech transcription returned empty text.")
 
         return {
             "provider": "openai",
@@ -1124,6 +1411,7 @@ class AIGateway:
             "diagnostics": {
                 "latency_ms": latency_ms,
                 "input_bytes": int(len(audio_bytes)),
+                "empty_text": not bool(text),
             },
         }
 
@@ -1142,15 +1430,26 @@ class AIGateway:
             "voice": str(voice or "alloy"),
         }
         timeout_sec = float(os.getenv("OPENVEGAS_REALTIME_TIMEOUT_SEC", "8"))
-        async with httpx.AsyncClient(timeout=max(1.0, timeout_sec)) as client:
-            resp = await client.post(
+        if self.http_client is not None:
+            resp = await self.http_client.post(
                 "https://api.openai.com/v1/realtime/sessions",
                 headers={
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
                 },
                 json=payload,
+                timeout=max(1.0, timeout_sec),
             )
+        else:
+            async with httpx.AsyncClient(follow_redirects=True, timeout=max(1.0, timeout_sec)) as client:
+                resp = await client.post(
+                    "https://api.openai.com/v1/realtime/sessions",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
         if resp.status_code >= 400:
             detail = resp.text
             raise ContractError(APIErrorCode.PROVIDER_UNAVAILABLE, f"Realtime session failed: {detail[:500]}")

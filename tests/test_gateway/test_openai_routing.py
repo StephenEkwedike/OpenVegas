@@ -87,8 +87,44 @@ class _FakeOpenAIClient:
         self.chat = SimpleNamespace(completions=chat_api)
 
 
-def _install_fake_openai(monkeypatch, *, client):
-    module = SimpleNamespace(AsyncOpenAI=lambda api_key: client)
+class _FakeStreamResponse:
+    def __init__(self, *, lines: list[str], status_code: int = 200, body: str = "", reason_phrase: str = "OK"):
+        self.lines = list(lines)
+        self.status_code = status_code
+        self._body = body
+        self.reason_phrase = reason_phrase
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def aread(self):
+        return self._body.encode("utf-8")
+
+    async def aiter_lines(self):
+        for line in self.lines:
+            yield line
+
+
+class _FakeHTTPClient:
+    def __init__(self, responses: list[_FakeStreamResponse]):
+        self.responses = list(responses)
+        self.stream_calls: list[dict] = []
+
+    def stream(self, method: str, url: str, **kwargs):
+        self.stream_calls.append({"method": method, "url": url, **kwargs})
+        return self.responses.pop(0)
+
+
+def _install_fake_openai(monkeypatch, *, client, capture: dict | None = None):
+    def _factory(**kwargs):
+        if capture is not None:
+            capture.update(kwargs)
+        return client
+
+    module = SimpleNamespace(AsyncOpenAI=_factory)
     monkeypatch.setitem(sys.modules, "openai", module)
 
 
@@ -369,6 +405,91 @@ async def test_openai_responses_retries_once_without_rejected_web_tool(monkeypat
     assert len(responses_api.calls) == 2
     assert {"type": "web_search_preview"} in list(responses_api.calls[0].get("tools", []))
     assert "tools" not in responses_api.calls[1]
+
+
+@pytest.mark.asyncio
+async def test_openai_client_reuses_shared_httpx_client(monkeypatch):
+    capture: dict[str, object] = {}
+    responses_payload = SimpleNamespace(
+        id="resp_shared",
+        output_text="shared client",
+        output=[],
+        usage=SimpleNamespace(input_tokens=2, output_tokens=1),
+    )
+    responses_api = _FakeResponsesAPI(responses_payload)
+    chat_api = _FakeChatCompletionsAPI(payload=None)
+    shared_http_client = object()
+    _install_fake_openai(
+        monkeypatch,
+        client=_FakeOpenAIClient(responses_api=responses_api, chat_api=chat_api),
+        capture=capture,
+    )
+
+    gw = AIGateway(
+        db=SimpleNamespace(),
+        wallet=_DummyWallet(),
+        catalog=_DummyCatalog(),
+        http_client=shared_http_client,
+    )
+    req = InferenceRequest(
+        account_id="user:u1",
+        provider="openai",
+        model="gpt-5.4",
+        messages=[{"role": "user", "content": "say hi"}],
+    )
+
+    result = await gw._call_openai(req, api_key="sk-test")
+
+    assert result.text == "shared client"
+    assert capture["api_key"] == "sk-test"
+    assert capture["http_client"] is shared_http_client
+
+
+@pytest.mark.asyncio
+async def test_stream_openai_responses_yields_live_deltas_and_final_result():
+    http_client = _FakeHTTPClient(
+        responses=[
+            _FakeStreamResponse(
+                lines=[
+                    'data: {"type":"response.output_text.delta","delta":"hello "}',
+                    "",
+                    'data: {"type":"response.output_text.delta","delta":"world"}',
+                    "",
+                    'data: {"type":"response.completed","response":{"id":"resp_stream","output":[{"type":"message","content":[{"type":"output_text","text":"hello world"}]}],"usage":{"input_tokens":11,"output_tokens":7}}}',
+                    "",
+                    "data: [DONE]",
+                    "",
+                ]
+            )
+        ]
+    )
+    gw = AIGateway(
+        db=SimpleNamespace(),
+        wallet=_DummyWallet(),
+        catalog=_DummyCatalog(),
+        http_client=http_client,  # type: ignore[arg-type]
+    )
+    req = InferenceRequest(
+        account_id="user:u1",
+        provider="openai",
+        model="gpt-5.4",
+        messages=[{"role": "user", "content": "say hi"}],
+        max_tokens=64,
+    )
+
+    events = [event async for event in gw._stream_openai_responses(req=req, api_key="sk-test")]
+
+    assert [event["type"] for event in events] == ["text_delta", "text_delta", "completed"]
+    assert [event["text"] for event in events[:-1]] == ["hello ", "world"]
+    result = events[-1]["result"]
+    assert result.text == "hello world"
+    assert result.input_tokens == 11
+    assert result.output_tokens == 7
+    assert result.provider_request_id == "resp_stream"
+    assert len(http_client.stream_calls) == 1
+    assert http_client.stream_calls[0]["method"] == "POST"
+    assert http_client.stream_calls[0]["url"] == "https://api.openai.com/v1/responses"
+    assert http_client.stream_calls[0]["json"]["stream"] is True
 
 
 def test_openai_web_source_extraction_dedupes_and_caps():

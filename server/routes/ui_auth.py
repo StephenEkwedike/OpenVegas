@@ -7,13 +7,12 @@ import os
 import time
 from typing import Any
 
-import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from openvegas.telemetry import emit_metric, emit_once_process
-from server.services.dependencies import current_flags
+from server.services.dependencies import current_flags, request_with_http_client
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -197,12 +196,13 @@ def _extract_expires_at(payload: dict[str, Any]) -> int:
 async def _supabase_token_password(*, email: str, password: str) -> dict[str, Any]:
     supabase_url, supabase_anon = _supabase_cfg()
     try:
-        async with httpx.AsyncClient(timeout=12) as client:
-            res = await client.post(
-                f"{supabase_url}/auth/v1/token?grant_type=password",
-                headers={"apikey": supabase_anon, "Content-Type": "application/json"},
-                json={"email": email, "password": password},
-            )
+        res = await request_with_http_client(
+            "POST",
+            f"{supabase_url}/auth/v1/token?grant_type=password",
+            headers={"apikey": supabase_anon, "Content-Type": "application/json"},
+            json={"email": email, "password": password},
+            timeout=12,
+        )
     except Exception as e:  # pragma: no cover - defensive network wrapper
         raise HTTPException(status_code=503, detail="Unable to reach auth provider") from e
 
@@ -248,12 +248,13 @@ async def _supabase_signup(
         payload["email_redirect_to"] = email_redirect_to
         payload["redirect_to"] = email_redirect_to
     try:
-        async with httpx.AsyncClient(timeout=12) as client:
-            res = await client.post(
-                f"{supabase_url}/auth/v1/signup",
-                headers={"apikey": supabase_anon, "Content-Type": "application/json"},
-                json=payload,
-            )
+        res = await request_with_http_client(
+            "POST",
+            f"{supabase_url}/auth/v1/signup",
+            headers={"apikey": supabase_anon, "Content-Type": "application/json"},
+            json=payload,
+            timeout=12,
+        )
     except Exception as e:  # pragma: no cover - defensive network wrapper
         raise HTTPException(status_code=503, detail="Unable to reach auth provider") from e
 
@@ -270,12 +271,13 @@ async def _supabase_signup(
 async def _supabase_token_refresh(refresh_token: str) -> dict[str, Any]:
     supabase_url, supabase_anon = _supabase_cfg()
     try:
-        async with httpx.AsyncClient(timeout=12) as client:
-            res = await client.post(
-                f"{supabase_url}/auth/v1/token?grant_type=refresh_token",
-                headers={"apikey": supabase_anon, "Content-Type": "application/json"},
-                json={"refresh_token": str(refresh_token)},
-            )
+        res = await request_with_http_client(
+            "POST",
+            f"{supabase_url}/auth/v1/token?grant_type=refresh_token",
+            headers={"apikey": supabase_anon, "Content-Type": "application/json"},
+            json={"refresh_token": str(refresh_token)},
+            timeout=12,
+        )
     except Exception as e:  # pragma: no cover - defensive network wrapper
         raise HTTPException(status_code=503, detail="Unable to reach auth provider") from e
 
@@ -297,16 +299,17 @@ async def revoke_refresh_session(refresh_token: str) -> None:
         raise RuntimeError("refresh_revoke_missing_access_token")
 
     supabase_url, supabase_anon = _supabase_cfg()
-    async with httpx.AsyncClient(timeout=12) as client:
-        res = await client.post(
-            f"{supabase_url}/auth/v1/logout",
-            headers={
-                "apikey": supabase_anon,
-                "Authorization": f"Bearer {access_token}",
-                "Content-Type": "application/json",
-            },
-            json={"scope": "global"},
-        )
+    res = await request_with_http_client(
+        "POST",
+        f"{supabase_url}/auth/v1/logout",
+        headers={
+            "apikey": supabase_anon,
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+        },
+        json={"scope": "global"},
+        timeout=12,
+    )
     if res.status_code >= 400:
         raise RuntimeError(f"refresh_revoke_failed_{res.status_code}")
 

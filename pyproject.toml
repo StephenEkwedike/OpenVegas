@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openvegas"
-version = "0.1.0"
+version = "0.3.7"
 description = "Terminal Arcade for Developers — mint, wager, and redeem $V for AI inference"
 requires-python = ">=3.11"
 license = "MIT"
@@ -12,7 +12,6 @@ dependencies = [
     "click>=8.1",
     "rich>=13.0",
     "prompt-toolkit>=3.0",
-    "numpy>=1.26",
     "keyring>=25.0",
     "Pillow>=10.0",
     "qrcode[pil]>=7.4",
@@ -36,6 +35,7 @@ server = [
     "asyncpg>=0.29",
 ]
 audio = [
+    "numpy>=1.26",
     "sounddevice>=0.4",
 ]
 dev = [

@@ -169,6 +169,34 @@ class _FakeServiceTx:
         return None
 
 
+class _RecordOnlyRow:
+    def __init__(self, data: dict):
+        self._data = dict(data)
+
+    def __getitem__(self, key: str):
+        return self._data[key]
+
+
+class _RegisterWorkspaceTx:
+    def __init__(self, initial_row: dict, updated_row: dict):
+        self._fetchrows = [
+            _RecordOnlyRow(initial_row),
+            None,
+            dict(updated_row),
+        ]
+        self.execute_calls: list[tuple[str, tuple[object, ...]]] = []
+
+    async def fetchrow(self, query: str, *_args):
+        _ = query
+        if self._fetchrows:
+            return self._fetchrows.pop(0)
+        return None
+
+    async def execute(self, query: str, *args):
+        self.execute_calls.append((query, args))
+        return "UPDATE 1"
+
+
 @pytest.mark.asyncio
 async def test_duplicate_start_same_tuple_no_second_event_or_version_bump(monkeypatch):
     run_row = {
@@ -241,6 +269,59 @@ async def test_duplicate_start_same_tuple_no_second_event_or_version_bump(monkey
     assert int(first.payload["run_version"]) == 7
     assert int(second.payload["run_version"]) == 7
     assert event_counter["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_register_workspace_accepts_record_like_rows_without_get(monkeypatch):
+    tx = _RegisterWorkspaceTx(
+        initial_row={
+            "id": "r1",
+            "user_id": "85add5d1-aaad-4caa-8422-8cd41ff400f7",
+            "runtime_session_id": None,
+            "workspace_root": None,
+            "workspace_fingerprint": None,
+            "git_root": None,
+        },
+        updated_row={
+            "id": "r1",
+            "user_id": "85add5d1-aaad-4caa-8422-8cd41ff400f7",
+            "runtime_session_id": "11111111-1111-1111-1111-111111111111",
+            "workspace_root": "/tmp/work",
+            "workspace_fingerprint": "sha256:" + ("a" * 64),
+            "git_root": "/tmp/work",
+            "state": "running",
+            "version": 0,
+        },
+    )
+    svc = AgentOrchestrationService(db=_FakeServiceDB(tx))
+
+    async def _success(*_args, **_kwargs):
+        return {
+            "error": None,
+            "detail": "",
+            "retryable": False,
+            "current_state": "running",
+            "run_version": 0,
+            "projection_version": 0,
+            "valid_actions": [{"action": "cancel"}],
+            "valid_actions_signature": valid_actions_signature(0, [{"action": "cancel"}]),
+        }
+
+    monkeypatch.setattr(svc, "_success_envelope_tx", _success)
+
+    payload = await svc.register_workspace(
+        user_id="85add5d1-aaad-4caa-8422-8cd41ff400f7",
+        run_id="r1",
+        runtime_session_id="11111111-1111-1111-1111-111111111111",
+        workspace_root="/tmp/work",
+        workspace_fingerprint="sha256:" + ("a" * 64),
+        git_root="/tmp/work",
+    )
+
+    assert payload["error"] is None
+    assert payload["run_id"] == "r1"
+    assert payload["runtime_session_id"] == "11111111-1111-1111-1111-111111111111"
+    assert tx.execute_calls
 
 
 @pytest.mark.asyncio
