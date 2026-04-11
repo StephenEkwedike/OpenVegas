@@ -135,3 +135,23 @@ def test_load_config_migrates_legacy_backend_url_to_api_alias_env(monkeypatch: p
     assert loaded["backend_url"] == "https://alias-api.example.com"
     persisted = cfg.CONFIG_FILE.read_text(encoding="utf-8")
     assert '"backend_url": "https://alias-api.example.com"' in persisted
+
+def test_save_session_keychain_store_failure_falls_back_to_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    _bind_temp_config(monkeypatch, tmp_path)
+    monkeypatch.delenv("OPENVEGAS_FORCE_CONFIG_REFRESH_STORAGE", raising=False)
+
+    monkeypatch.setattr(cfg, "platform_keychain_available", lambda: True)
+
+    def _raise_owner_mismatch(_token: str):
+        raise RuntimeError("Can't store password on keychain: (-25244, 'Unknown Error')")
+
+    monkeypatch.setattr(cfg, "save_refresh_to_platform_store", _raise_owner_mismatch)
+
+    cfg.save_session("access-2", "refresh-2", access_expires_at=1700000001)
+    sess = cfg.get_session()
+    assert sess["refresh_storage"] == "config"
+    assert sess["refresh_token"] == "refresh-2"
+    assert sess["access_token"] == "access-2"

@@ -199,6 +199,11 @@ def _try_import_keyring():
         return None
 
 
+def _is_keychain_owner_mismatch_error(exc: Exception) -> bool:
+    msg = str(exc or "").strip().lower()
+    return "-25244" in msg or "invalid attempt to change the owner" in msg
+
+
 def platform_keychain_available() -> bool:
     if _force_config_refresh_storage():
         return False
@@ -311,7 +316,19 @@ def save_refresh_to_platform_store(refresh_token: str) -> None:
     keyring = _try_import_keyring()
     if keyring is None:
         raise RuntimeError("keyring_unavailable")
-    keyring.set_password(_PLATFORM_STORE_SERVICE, _PLATFORM_STORE_ACCOUNT, str(refresh_token))
+    token = str(refresh_token or "")
+    try:
+        keyring.set_password(_PLATFORM_STORE_SERVICE, _PLATFORM_STORE_ACCOUNT, token)
+        return
+    except Exception as e:
+        if not _is_keychain_owner_mismatch_error(e):
+            raise
+    # Self-heal migrated/stale keychain entries that reject updates (OSStatus -25244).
+    try:
+        keyring.delete_password(_PLATFORM_STORE_SERVICE, _PLATFORM_STORE_ACCOUNT)
+    except Exception:
+        pass
+    keyring.set_password(_PLATFORM_STORE_SERVICE, _PLATFORM_STORE_ACCOUNT, token)
 
 
 def load_refresh_from_platform_store() -> str:
@@ -403,9 +420,25 @@ def save_session(access_token: str, refresh_token: str, access_expires_at: int |
 
     try:
         if not force_fallback and platform_keychain_available():
-            save_refresh_to_platform_store(refresh_token)
-            platform_saved = True
-            session_payload["refresh_storage"] = "platform_credential_store"
+            try:
+                save_refresh_to_platform_store(refresh_token)
+                platform_saved = True
+                session_payload["refresh_storage"] = "platform_credential_store"
+            except Exception as keychain_err:
+                # Never hard-fail login/session persistence on keychain write issues.
+                session_payload["refresh_storage"] = "config"
+                session_payload["refresh_token"] = str(refresh_token or "")
+                emit_metric(
+                    "auth_session_save_degraded_total",
+                    {
+                        "reason": "keychain_store_failed_fallback_config",
+                        "platform_saved": "false",
+                    },
+                )
+                logger.warning(
+                    "session_save_degraded keychain_store_failed_fallback_config err=%s",
+                    str(keychain_err),
+                )
         else:
             session_payload["refresh_storage"] = "config"
             session_payload["refresh_token"] = str(refresh_token or "")
