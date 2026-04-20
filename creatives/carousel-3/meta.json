@@ -1,0 +1,16 @@
+{
+  "campaign_name": "openvegas-horse-race-carousel",
+  "game_featured": "Horse Race",
+  "format": "1080x1350",
+  "slides": 5,
+  "assets": {
+    "image_primary": "../assets/horserace.png",
+    "video_clip": "../assets/gameplay-main.mp4",
+    "video_confetti_clip": "../assets/gameplay-confetti.mp4"
+  },
+  "notes": [
+    "Video-first slides use autoplay muted loop and fallback image strategy.",
+    "Confetti sequence extracted from Screen Recording 2026-04-15 at 1.37.31 PM for standalone social cut.",
+    "Copy aligns to creatives/design-skill.md narrative and visual contract."
+  ]
+}

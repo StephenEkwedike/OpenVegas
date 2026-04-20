@@ -426,6 +426,26 @@ class InlinePromptUI:
                 return False
             self.console.print(f"[red]Unable to start UI: API error {e.status}: {e.detail}[/red]")
             return False
+        except Exception:
+            self.console.print("[red]Session missing/expired. Run: openvegas login[/red]")
+            return False
+
+    @staticmethod
+    def _looks_like_auth_runtime_failure(exc: Exception) -> bool:
+        text = str(exc or "").strip().lower()
+        return any(
+            token in text
+            for token in (
+                "expired",
+                "refresh token",
+                "touch id",
+                "_refresh_token_timer",
+                "keychain",
+                "unauthorized",
+                "forbidden",
+                "[errno 2] no such file or directory",
+            )
+        )
 
     @staticmethod
     def _try_parse_json(raw: str) -> dict:
@@ -1081,6 +1101,9 @@ class InlinePromptUI:
         if err:
             return err
         try:
+            auth_preflight = getattr(self.client, "auth_preflight", None)
+            if callable(auth_preflight):
+                await auth_preflight()
             return await self._run_action()
         except APIError as e:
             if e.status == 401:
@@ -1089,7 +1112,9 @@ class InlinePromptUI:
         except (InvalidOperation, ValueError):
             return "Invalid input values for selected action."
         except Exception as e:  # pragma: no cover - runtime fallback
-            return f"Error: {e}"
+            if isinstance(e, FileNotFoundError) or self._looks_like_auth_runtime_failure(e):
+                return "Session missing/expired. Run: openvegas login"
+            return "Something went wrong. Please try again."
 
     def run(self) -> None:
         self.console.print("[bold cyan]OpenVegas Inline UI[/bold cyan] [dim](Ctrl+C to exit)[/dim]")

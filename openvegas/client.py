@@ -96,6 +96,7 @@ class OpenVegasClient:
         self._session_snapshot = get_session()
 
     async def _refresh_once(self, trigger: str) -> str:
+        self._session_snapshot = get_session()
         refresh_storage = str(self._session_snapshot.get("refresh_storage", "") or "")
         if require_touchid_unlock_for_refresh_storage(refresh_storage):
             if not request_touchid_unlock():
@@ -109,6 +110,22 @@ class OpenVegasClient:
                     },
                 )
                 raise CliAuthError("touchid_unlock_required")
+            # Keychain-backed storage may hydrate refresh token post-unlock.
+            self._session_snapshot = get_session()
+
+        refresh_value = str(self._session_snapshot.get("refresh_token", "") or "").strip()
+        if not refresh_value:
+            emit_metric(
+                "auth_refresh_attempt_total",
+                {
+                    "surface": "cli",
+                    "trigger": trigger,
+                    "outcome": "failure",
+                    "reason": "refresh_missing",
+                },
+            )
+            raise CliAuthError("refresh_rejected")
+
         try:
             token = await asyncio.to_thread(lambda: SupabaseAuth().refresh_token())
         except AuthRefreshTimeout as e:

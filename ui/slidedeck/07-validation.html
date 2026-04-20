@@ -1,6 +1,43 @@
 <!doctype html>
-<html lang="en"><head><meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>OpenVegas Deck 07</title><link rel="preconnect" href="https://fonts.googleapis.com" /><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin /><link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@300;400;500;700&display=swap" rel="stylesheet" /><link rel="stylesheet" href="/ui/assets/theme.css?v=20260330" /><link rel="stylesheet" href="/ui/assets/deck.css?v=20260330" />
-    <script defer src="/ui/assets/theme-fallback.js?v=20260330"></script></head><body>
+<html lang="en"><head>
+    <link rel="icon" type="image/svg+xml" href="/ui/assets/brand/favicon.svg" />
+    <link rel="alternate icon" type="image/jpeg" href="/ui/assets/brand/favicon.jpg" />
+    <link rel="apple-touch-icon" href="/ui/assets/brand/openvegas-logo-circle.jpg" />
+<meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>OpenVegas Deck 07</title><link rel="preconnect" href="https://fonts.googleapis.com" /><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin /><link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@300;400;500;700&display=swap" rel="stylesheet" /><link rel="stylesheet" href="/ui/assets/theme.css?v=20260330" /><link rel="stylesheet" href="/ui/assets/deck.css?v=20260330" />
+    <script defer src="/ui/assets/theme-fallback.js?v=20260330"></script>
+    <style>
+      .validation-reels {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 12px;
+        margin-top: 0.9rem;
+      }
+      .validation-reel {
+        border: 1px solid var(--line);
+        background: var(--surface-2);
+        border-radius: 12px;
+        padding: 0.55rem;
+        display: grid;
+        gap: 0.45rem;
+      }
+      .validation-reel iframe {
+        width: 100%;
+        aspect-ratio: 9 / 16;
+        border: 0;
+        border-radius: 10px;
+        background: var(--bg-main);
+      }
+      .validation-reel .caption {
+        font-family: var(--font-mono);
+        font-size: 10px;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        color: var(--grey-light);
+      }
+      @media (max-width: 1100px) {
+        .validation-reels { grid-template-columns: 1fr; }
+      }
+    </style></head><body>
 <main class="slide-root">
   <div class="slide-kicker">VALIDATION</div>
   <h1 class="slide-title">The behavior is already here.</h1>
@@ -10,10 +47,37 @@
       <li>AI usage is becoming habitual, frequent, and operational.</li>
       <li>OpenVegas sits at the point where friction converts into value.</li>
     </ul>
-    <div class="placeholder-list">
-      <div>[Insert TikTok clip: Normies waiting for Claude reset #1]</div>
-      <div>[Insert TikTok clip: Normies waiting for Claude reset #2]</div>
-      <div>[Insert TikTok clip: Normies waiting for Claude reset #3]</div>
+    <div class="validation-reels">
+      <article class="validation-reel">
+        <iframe
+          src="https://www.instagram.com/reel/DVzr-CkETJ_/embed"
+          title="Validation Reel 1"
+          loading="lazy"
+          allowtransparency="true"
+          allowfullscreen>
+        </iframe>
+        <div class="caption">Reel 1 · Runtime limit pain / reset waiting behavior</div>
+      </article>
+      <article class="validation-reel">
+        <iframe
+          src="https://www.instagram.com/reel/DXLcluJjBsR/embed"
+          title="Validation Reel 2"
+          loading="lazy"
+          allowtransparency="true"
+          allowfullscreen>
+        </iframe>
+        <div class="caption">Reel 2 · Users asking for more credits to keep going</div>
+      </article>
+      <article class="validation-reel">
+        <iframe
+          src="https://www.instagram.com/reel/DWHdAylETQr/embed"
+          title="Validation Reel 3"
+          loading="lazy"
+          allowtransparency="true"
+          allowfullscreen>
+        </iframe>
+        <div class="caption">Reel 3 · Real-world demand for continuity over interruption</div>
+      </article>
     </div>
   </section>
   <footer class="deck-footer"><a data-nav="prev" href="/ui/slidedeck/06-product.html">← Prev</a><span>07 / 12</span><a data-nav="next" href="/ui/slidedeck/08-market-size.html">Next →</a></footer>

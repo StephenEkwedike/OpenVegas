@@ -23,6 +23,24 @@ function normalizeTheme(value) {
   return String(value || "").toLowerCase() === "dark" ? "dark" : "light";
 }
 
+
+function applyFaviconTheme(theme) {
+  var normalized = normalizeTheme(theme);
+  var isDark = normalized === "dark";
+  var svgHref = isDark ? "/ui/assets/brand/favicon-dark.svg" : "/ui/assets/brand/favicon.svg";
+  var jpgHref = isDark ? "/ui/assets/brand/favicon-dark.jpg" : "/ui/assets/brand/favicon.jpg";
+  var appleHref = isDark ? "/ui/assets/brand/openvegas-logo-circle-dark.jpg" : "/ui/assets/brand/openvegas-logo-circle.jpg";
+
+  var svg = document.querySelector('link[rel="icon"][type="image/svg+xml"]');
+  if (svg) svg.setAttribute("href", svgHref);
+
+  var jpg = document.querySelector('link[rel="alternate icon"][type="image/jpeg"]');
+  if (jpg) jpg.setAttribute("href", jpgHref);
+
+  var apple = document.querySelector('link[rel="apple-touch-icon"]');
+  if (apple) apple.setAttribute("href", appleHref);
+}
+
 function getStoredTheme() {
   try {
     return normalizeTheme(window.localStorage.getItem(THEME_KEY) || THEME_DEFAULT);
@@ -56,6 +74,7 @@ export function applyTheme(theme) {
   const normalized = normalizeTheme(theme);
   document.documentElement.dataset.theme = normalized;
   document.documentElement.style.colorScheme = normalized;
+  applyFaviconTheme(normalized);
   updateThemeToggleState();
 }
 
