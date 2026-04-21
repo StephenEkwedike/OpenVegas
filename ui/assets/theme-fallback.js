@@ -16,22 +16,54 @@
     return String(value || "").toLowerCase() === "dark" ? "dark" : "light";
   }
 
-  
-function applyFaviconTheme(theme) {
+  function applyFaviconTheme(theme) {
   var normalized = normalizeTheme(theme);
   var isDark = normalized === "dark";
-  var svgHref = isDark ? "/ui/assets/brand/favicon-dark.svg" : "/ui/assets/brand/favicon.svg";
-  var jpgHref = isDark ? "/ui/assets/brand/favicon-dark.jpg" : "/ui/assets/brand/favicon.jpg";
-  var appleHref = isDark ? "/ui/assets/brand/openvegas-logo-circle-dark.jpg" : "/ui/assets/brand/openvegas-logo-circle.jpg";
+  var svgBase = isDark ? "/ui/assets/brand/favicon-dark.svg" : "/ui/assets/brand/favicon.svg";
+  var jpgBase = isDark ? "/ui/assets/brand/favicon-dark.jpg" : "/ui/assets/brand/favicon.jpg";
+  var appleBase = isDark ? "/ui/assets/brand/openvegas-logo-circle-dark.jpg" : "/ui/assets/brand/openvegas-logo-circle.jpg";
+  var svgHref = svgBase + "?theme=" + normalized;
+  var jpgHref = jpgBase + "?theme=" + normalized;
+  var appleHref = appleBase + "?theme=" + normalized;
 
-  var svg = document.querySelector('link[rel="icon"][type="image/svg+xml"]');
-  if (svg) svg.setAttribute("href", svgHref);
+  function refreshLink(node, href) {
+    if (!node) return;
+    node.setAttribute("href", href);
+    var clone = node.cloneNode(true);
+    if (node.parentNode) node.parentNode.replaceChild(clone, node);
+  }
 
-  var jpg = document.querySelector('link[rel="alternate icon"][type="image/jpeg"]');
-  if (jpg) jpg.setAttribute("href", jpgHref);
+  function ensureLink(rel, type, href) {
+    var selector = 'link[rel="' + rel + '"]' + (type ? '[type="' + type + '"]' : "");
+    var node = document.querySelector(selector);
+    if (!node) {
+      node = document.createElement("link");
+      node.setAttribute("rel", rel);
+      if (type) node.setAttribute("type", type);
+      node.setAttribute("href", href);
+      document.head.appendChild(node);
+    }
+    return node;
+  }
 
-  var apple = document.querySelector('link[rel="apple-touch-icon"]');
-  if (apple) apple.setAttribute("href", appleHref);
+  Array.prototype.forEach.call(
+    document.querySelectorAll('link[rel="alternate icon"][type="image/jpeg"]'),
+    function (node) {
+      node.setAttribute("rel", "icon");
+    }
+  );
+
+  var svg = ensureLink("icon", "image/svg+xml", svgHref);
+  refreshLink(svg, svgHref);
+
+  var jpg = ensureLink("icon", "image/jpeg", jpgHref);
+  refreshLink(jpg, jpgHref);
+
+  var shortcut = ensureLink("shortcut icon", "image/jpeg", jpgHref);
+  refreshLink(shortcut, jpgHref);
+
+  var apple = ensureLink("apple-touch-icon", null, appleHref);
+  refreshLink(apple, appleHref);
 }
 
 function getTheme() {

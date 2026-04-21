@@ -152,6 +152,23 @@ def _env_enabled(name: str, default: str = "0") -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+def _db_connect_timeout_sec() -> float:
+    raw = str(os.getenv("OPENVEGAS_DB_CONNECT_TIMEOUT_SEC", "20") or "").strip()
+    try:
+        value = float(raw)
+    except Exception:
+        return 20.0
+    return max(3.0, min(120.0, value))
+
+
+def _db_fail_open_enabled() -> bool:
+    explicit = os.getenv("OPENVEGAS_DB_FAIL_OPEN")
+    if explicit is not None:
+        return _env_enabled("OPENVEGAS_DB_FAIL_OPEN", "0")
+    # Local/dev default: start API for partial workflows even if DB is blocked.
+    return _runtime_env_name() in {"local", "dev", "development", "test"}
+
+
 @lru_cache(maxsize=1)
 def current_flags() -> FeatureFlags:
     return FeatureFlags(
@@ -415,8 +432,30 @@ async def init_runtime_deps() -> None:
 
     import asyncpg
 
-    pool = await asyncpg.create_pool(dsn=database_url, min_size=1, max_size=10)
-    _db = PostgresDB(pool)
+    try:
+        pool = await asyncpg.create_pool(
+            dsn=database_url,
+            min_size=1,
+            max_size=10,
+            timeout=_db_connect_timeout_sec(),
+        )
+        _db = PostgresDB(pool)
+    except Exception as exc:
+        env_name = _runtime_env_name() or "unknown"
+        emit_metric("startup_db_connect_failed_total", {"env": env_name})
+        if _db_fail_open_enabled():
+            _log.warning(
+                "DB connect failed (%s). Starting in degraded mode with placeholder DB. "
+                "Set OPENVEGAS_DB_FAIL_OPEN=0 to enforce strict startup.",
+                exc,
+            )
+            _db = _Placeholder()
+            _redis = _Placeholder()
+            return
+        raise RuntimeError(
+            "Database connection failed during startup. "
+            "Check DATABASE_URL/network/firewall, or set OPENVEGAS_DB_FAIL_OPEN=1 for local dev."
+        ) from exc
 
     if redis_url:
         import redis.asyncio as redis
