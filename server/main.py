@@ -253,6 +253,7 @@ UI_ASSETS = {
 }
 
 SLIDES = {
+    "00-founders.html": UI_DIR / "slidedeck" / "00-founders.html",
     "01-cover.html": UI_DIR / "slidedeck" / "01-cover.html",
     "02-vibecoding-hook.html": UI_DIR / "slidedeck" / "02-vibecoding-hook.html",
     "03-problem.html": UI_DIR / "slidedeck" / "03-problem.html",
@@ -261,6 +262,7 @@ SLIDES = {
     "06-product.html": UI_DIR / "slidedeck" / "06-product.html",
     "07-validation.html": UI_DIR / "slidedeck" / "07-validation.html",
     "08-market-size.html": UI_DIR / "slidedeck" / "08-market-size.html",
+    "08b-market-opportunity.html": UI_DIR / "slidedeck" / "08b-market-opportunity.html",
     "09-business-model.html": UI_DIR / "slidedeck" / "09-business-model.html",
     "10-moat.html": UI_DIR / "slidedeck" / "10-moat.html",
     "11-why-now.html": UI_DIR / "slidedeck" / "11-why-now.html",

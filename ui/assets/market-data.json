@@ -19,8 +19,20 @@
   },
   "copilot_fortune100": {
     "claim": "GitHub Copilot is used by 90% of Fortune 100",
-    "source_url": "https://techcrunch.com/2025/01/22/github-copilot-now-has-over-20m-users/",
+    "source_url": "https://techcrunch.com/2025/07/30/github-copilot-crosses-20-million-all-time-users/",
     "source_type": "TechCrunch report on Microsoft earnings commentary",
-    "as_of": "2025-01-22"
+    "as_of": "2025-07-30"
+  },
+  "gartner_ai_spend_2026": {
+    "claim": "Worldwide AI spending is forecast to total $2.52 trillion in 2026",
+    "source_url": "https://www.gartner.com/en/newsroom/press-releases/2026-1-15-gartner-says-worldwide-ai-spending-will-total-2-point-5-trillion-dollars-in-2026",
+    "source_type": "Gartner press release",
+    "as_of": "2026-01-15"
+  },
+  "gartner_agentic_apps_2026": {
+    "claim": "40% of enterprise applications will feature task-specific AI agents by end of 2026",
+    "source_url": "https://www.gartner.com/en/newsroom/press-releases/2025-08-26-gartner-predicts-40-percent-of-enterprise-apps-will-feature-task-specific-ai-agents-by-2026-up-from-less-than-5-percent-in-2025",
+    "source_type": "Gartner press release",
+    "as_of": "2025-08-26"
   }
 }

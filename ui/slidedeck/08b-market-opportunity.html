@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en"><head>
+    <link rel="icon" type="image/svg+xml" href="/ui/assets/brand/favicon.svg" />
+    <link rel="icon" type="image/jpeg" href="/ui/assets/brand/favicon.jpg" />
+    <link rel="apple-touch-icon" href="/ui/assets/brand/openvegas-logo-circle.jpg" />
+<meta charset="UTF-8" /><meta name="viewport" content="width=device-width, initial-scale=1.0" /><title>OpenVegas Deck 08B</title><link rel="preconnect" href="https://fonts.googleapis.com" /><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin /><link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@300;400;500;700&display=swap" rel="stylesheet" /><link rel="stylesheet" href="/ui/assets/theme.css?v=20260330" /><link rel="stylesheet" href="/ui/assets/deck.css?v=20260330" />
+    <script defer src="/ui/assets/theme-fallback.js?v=20260330"></script>
+    <style>
+      .market-grid {
+        display: grid;
+        grid-template-columns: 1.2fr 0.8fr;
+        gap: 14px;
+        margin-top: 0.8rem;
+      }
+      .market-card {
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        background: var(--surface-2);
+        padding: 0.8rem;
+      }
+      .bars {
+        display: grid;
+        gap: 0.5rem;
+      }
+      .bar-row {
+        display: grid;
+        gap: 0.2rem;
+      }
+      .bar-label {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-family: var(--font-mono);
+        font-size: 10px;
+        color: var(--grey-light);
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+      .bar-track {
+        height: 14px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.08);
+        overflow: hidden;
+      }
+      .bar-fill {
+        height: 100%;
+        border-radius: 999px;
+      }
+      .bar-tam { width: 100%; background: linear-gradient(90deg, #4fd1ff, #67e2fa); }
+      .bar-sam { width: 42%; background: linear-gradient(90deg, #58f7c0, #35d49a); }
+      .bar-som { width: 8%; background: linear-gradient(90deg, #ffd47a, #ffb74d); }
+      .signals {
+        margin: 0;
+        padding-left: 1rem;
+      }
+      .signals li { margin: 0.28rem 0; }
+      .tiny {
+        font-family: var(--font-mono);
+        font-size: 10px;
+        color: var(--grey-light);
+        line-height: 1.45;
+        margin-top: 0.55rem;
+      }
+      @media (max-width: 1100px) {
+        .market-grid { grid-template-columns: 1fr; }
+      }
+    </style></head><body>
+<main class="slide-root">
+  <div class="slide-kicker">MARKET OPPORTUNITY</div>
+  <h1 class="slide-title">A $2.52T market, a focused wedge, and repeatable expansion.</h1>
+  <section class="slide-body">
+    <div class="market-grid">
+      <article class="market-card">
+        <div class="bars">
+          <div class="bar-row">
+            <div class="bar-label"><span>TAM · Global AI Spend (2026)</span><span>$2.52T</span></div>
+            <div class="bar-track"><div class="bar-fill bar-tam"></div></div>
+          </div>
+          <div class="bar-row">
+            <div class="bar-label"><span>SAM · AI Software + Models (2026)</span><span>$478.8B</span></div>
+            <div class="bar-track"><div class="bar-fill bar-sam"></div></div>
+          </div>
+          <div class="bar-row">
+            <div class="bar-label"><span>SOM · Initial Wedge</span><span>~$100B+</span></div>
+            <div class="bar-track"><div class="bar-fill bar-som"></div></div>
+          </div>
+        </div>
+      </article>
+      <article class="market-card">
+        <ul class="signals">
+          <li><strong>Adoption tailwind:</strong> 76% of developers are using or planning AI tooling.</li>
+          <li><strong>Platform shift:</strong> Gartner projects 40% of enterprise apps include task-specific AI agents by end of 2026.</li>
+          <li><strong>Category thesis:</strong> AI workflows need wallet, budget, and continuity infrastructure, not just model access.</li>
+          <li><strong>Wedge to expansion:</strong> top-up continuity for individuals, then team policy controls and enterprise treasury rails.</li>
+        </ul>
+      </article>
+    </div>
+    <div class="tiny">
+      Sources: Gartner AI Spending Forecast (Jan 15, 2026), Gartner Agentic Enterprise Apps Forecast (Aug 26, 2025), Stack Overflow Developer Survey 2024.
+    </div>
+  </section>
+  <footer class="deck-footer"><a data-nav="prev" href="/ui/slidedeck/08-market-size.html">← Prev</a><span>10 / 14</span><a data-nav="next" href="/ui/slidedeck/09-business-model.html">Next →</a></footer>
+</main>
+<script src="/ui/assets/deck.js?v=20260330"></script>
+</body></html>

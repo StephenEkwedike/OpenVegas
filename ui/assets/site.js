@@ -398,7 +398,7 @@ export function renderTopNav(targetId = "siteNav") {
 export function renderFounderLinks(targetId = "founderLinks") {
   const node = document.getElementById(targetId);
   if (!node) return;
-  node.innerHTML = `<a href="/ui/slidedeck/01-cover.html" class="text-mono-sm">[ FOUNDER DECK ]</a>`;
+  node.innerHTML = `<a href="/ui/slidedeck/00-founders.html" class="text-mono-sm">[ FOUNDER DECK ]</a>`;
 }
 
 export function installAssetGuard() {
