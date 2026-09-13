@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -45,7 +46,7 @@ def _early_dotenv_override(root: Path) -> bool:
         return _early_truthy(explicit, "0")
     file_val = None
     try:
-        file_val = dotenv_values(root / ".env").get("OPENVEGAS_DOTENV_OVERRIDE")
+        file_val = dotenv_values(_environment_file(root)).get("OPENVEGAS_DOTENV_OVERRIDE")
     except Exception:
         file_val = None
     if file_val is not None:
@@ -55,8 +56,18 @@ def _early_dotenv_override(root: Path) -> bool:
     return _early_truthy(None, default)
 
 
+def _environment_file(root: Path) -> Path:
+    selected = os.getenv("OPENVEGAS_ENV_FILE")
+    if selected is not None:
+        path = Path(selected).expanduser().resolve()
+        if not path.is_file():
+            raise RuntimeError("Explicit OPENVEGAS_ENV_FILE does not exist")
+        return path
+    return root / ".env"
+
+
 EARLY_ROOT_DIR = _early_resolve_root_dir()
-load_dotenv(EARLY_ROOT_DIR / ".env", override=_early_dotenv_override(EARLY_ROOT_DIR))
+load_dotenv(_environment_file(EARLY_ROOT_DIR), override=_early_dotenv_override(EARLY_ROOT_DIR))
 
 from server.routes import mint as mint_routes
 from server.routes import games as game_routes
@@ -123,7 +134,7 @@ def _dotenv_override_enabled() -> bool:
 
     file_val = None
     try:
-        file_val = dotenv_values(ROOT_DIR / ".env").get("OPENVEGAS_DOTENV_OVERRIDE")
+        file_val = dotenv_values(_environment_file(ROOT_DIR)).get("OPENVEGAS_DOTENV_OVERRIDE")
     except Exception:
         file_val = None
     if file_val is not None:
@@ -134,9 +145,8 @@ def _dotenv_override_enabled() -> bool:
     default = "1" if runtime_env in {"local", "dev", "development", "test"} else "0"
     return _env_truthy("OPENVEGAS_DOTENV_OVERRIDE", default)
 
-# Allow `uvicorn server.main:app --reload` to work without manually sourcing env vars.
-# In local/dev, override is enabled by default to avoid stale exported env var surprises.
-load_dotenv(ROOT_DIR / ".env", override=_dotenv_override_enabled())
+# Environment is loaded once, before route imports. A value inside that file
+# must not redirect a second load to another file containing live credentials.
 
 
 @asynccontextmanager
@@ -148,27 +158,20 @@ async def lifespan(app: FastAPI):
     )
     app.state.http_client = http_client
     bind_http_client(http_client)
-    await init_runtime_deps()
     try:
+        await init_runtime_deps()
         flags = current_flags()
-        upload_mime = str(os.getenv("OPENVEGAS_FILE_UPLOAD_ALLOWED_MIME", "")).strip()
-        logger.info(
-            "startup_flags files_enabled=%s speech_to_text=%s upload_mime_allowlist=%s",
-            bool(getattr(flags, "files_enabled", False)),
-            str(os.getenv("OPENVEGAS_ENABLE_SPEECH_TO_TEXT", "1")),
-            upload_mime or "<default>",
-        )
-    except Exception:
-        pass
-    qr_ok, qr_reason = ensure_qrcode_available()
-    if not qr_ok:
-        logger.warning("QR runtime unavailable at startup: %s", qr_reason)
-    try:
+        logger.info("startup_flags files_enabled=%s", flags.files_enabled)
+        qr_ok, qr_reason = ensure_qrcode_available()
+        if not qr_ok:
+            logger.warning("QR runtime unavailable at startup: %s", qr_reason)
         yield
     finally:
         bind_http_client(None)
-        await close_runtime_deps()
-        await http_client.aclose()
+        try:
+            await close_runtime_deps()
+        finally:
+            await http_client.aclose()
 
 app = FastAPI(
     title="OpenVegas API",
@@ -316,9 +319,16 @@ async def health_ready():
     human_casino_enabled = bool(flags.human_casino_enabled)
     human_casino_schema_ready = bool(flags.human_casino_enabled)
 
-    if os.getenv("OPENVEGAS_TEST_MODE", "0") == "1":
+    try:
         await assert_db_ready()
-        await assert_schema_compatible(get_db(), flags)
+        if os.getenv("OPENVEGAS_TEST_MODE", "0") != "1":
+            await assert_redis_ready()
+        await asyncio.wait_for(assert_schema_compatible(get_db(), flags), timeout=10)
+    except Exception as exc:
+        logger.warning("Readiness failed: %s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Required application dependencies are not ready") from None
+
+    if os.getenv("OPENVEGAS_TEST_MODE", "0") == "1":
         return {
             "status": "ready",
             "mode": "test",
@@ -327,9 +337,6 @@ async def health_ready():
             "human_casino_schema_ready": human_casino_schema_ready,
         }
 
-    await assert_db_ready()
-    await assert_redis_ready()
-    await assert_schema_compatible(get_db(), flags)
     return {
         "status": "ready",
         "mode": "runtime",

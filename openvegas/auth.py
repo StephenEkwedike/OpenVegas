@@ -5,7 +5,8 @@ from __future__ import annotations
 import httpx
 from supabase import Client, create_client
 
-from openvegas.config import clear_session, get_session, load_config, save_session
+from openvegas.config import clear_session, get_backend_url, get_session, load_config, save_session
+from openvegas.auth_config import public_auth_config
 
 
 class AuthError(Exception):
@@ -48,9 +49,16 @@ class SupabaseAuth:
         url = config.get("supabase_url", "")
         key = config.get("supabase_anon_key", "")
         if not url or not key:
-            raise AuthError(
-                "Supabase not configured. Run: openvegas config set supabase_url <url>"
-            )
+            try:
+                response = httpx.get(get_backend_url().rstrip("/") + "/auth/config", timeout=10,
+                                     follow_redirects=False)
+                response.raise_for_status()
+                discovered = response.json()
+                safe = public_auth_config(discovered.get("supabase_url", ""),
+                                          discovered.get("supabase_anon_key", ""))
+                url, key = safe["supabase_url"], safe["supabase_anon_key"]
+            except Exception as exc:
+                raise AuthError("Cannot load OpenVegas login settings. Check backend connectivity and try again.") from exc
         self.client: Client = create_client(url, key)
 
     def login_with_email(self, email: str, password: str) -> dict:

@@ -91,7 +91,7 @@ class WalletService:
         )
 
         if not demo_admin_autofund_enabled() or not is_demo_admin_account(account_id):
-            return await self.get_balance(account_id)
+            return await self.get_balance(account_id, tx=tx)
 
         min_floor = self._money(demo_admin_autofund_min())
         topup = self._money(demo_admin_autofund_topup())
@@ -101,7 +101,7 @@ class WalletService:
         target = self._money(min_floor + pending_debit)
 
         if topup <= 0:
-            return await self.get_balance(account_id)
+            return await self.get_balance(account_id, tx=tx)
 
         async def _run(conn):
             await conn.execute(
@@ -440,10 +440,11 @@ class WalletService:
                 tx=tx,
             )
 
-    async def get_balance(self, account_id: str) -> Decimal:
+    async def get_balance(self, account_id: str, *, tx=None) -> Decimal:
         """Get current $V balance for an account.
         account_id: full prefixed ID (e.g., 'user:abc' or 'agent:xyz')."""
-        row = await self.db.fetchrow(
+        conn = tx if tx is not None else self.db
+        row = await conn.fetchrow(
             "SELECT balance FROM wallet_accounts WHERE account_id = $1",
             account_id,
         )
@@ -478,23 +479,36 @@ class WalletService:
             if amount <= 0:
                 raise ValueError("Ledger amount must be > 0")
 
+            accounts = sorted({entry.debit_account, entry.credit_account})
+            for account in accounts:
+                await conn.execute(
+                    "INSERT INTO wallet_accounts (account_id, balance) VALUES ($1, 0) "
+                    "ON CONFLICT DO NOTHING",
+                    account,
+                )
+            # Opposite-direction transfers must acquire account locks in the same order.
             await conn.execute(
-                "INSERT INTO wallet_accounts (account_id, balance) VALUES ($1, 0) "
-                "ON CONFLICT DO NOTHING",
-                entry.debit_account,
+                "SELECT account_id FROM wallet_accounts WHERE account_id = ANY($1::text[]) "
+                "ORDER BY account_id FOR UPDATE",
+                accounts,
             )
-            await conn.execute(
-                "INSERT INTO wallet_accounts (account_id, balance) VALUES ($1, 0) "
-                "ON CONFLICT DO NOTHING",
-                entry.credit_account,
-            )
-            await conn.execute(
+            inserted = await conn.execute(
                 "INSERT INTO ledger_entries "
                 "(id, debit_account, credit_account, amount, entry_type, reference_id) "
-                "VALUES ($1, $2, $3, $4, $5, $6)",
+                "VALUES ($1, $2, $3, $4, $5, $6) "
+                "ON CONFLICT (reference_id, entry_type, debit_account, credit_account) DO NOTHING",
                 entry.id, entry.debit_account, entry.credit_account,
                 amount, entry.entry_type, entry.reference_id,
             )
+            if inserted == "INSERT 0 0":
+                existing = await conn.fetchrow(
+                    "SELECT amount FROM ledger_entries WHERE reference_id = $1 AND entry_type = $2 "
+                    "AND debit_account = $3 AND credit_account = $4",
+                    entry.reference_id, entry.entry_type, entry.debit_account, entry.credit_account,
+                )
+                if existing is None or self._money(existing["amount"]) != amount:
+                    raise ValueError("Ledger idempotency amount mismatch")
+                return
             await conn.execute(
                 "UPDATE wallet_accounts SET balance = balance - $1, updated_at = now() "
                 "WHERE account_id = $2",
@@ -508,18 +522,27 @@ class WalletService:
 
         try:
             if tx is not None:
-                await _do(tx)
+                # A rejected debit must not poison a caller's larger transaction.
+                savepoint = "wallet_" + uuid.uuid4().hex
+                await tx.execute(f"SAVEPOINT {savepoint}")
+                try:
+                    await _do(tx)
+                except BaseException:
+                    await tx.execute(f"ROLLBACK TO SAVEPOINT {savepoint}")
+                    await tx.execute(f"RELEASE SAVEPOINT {savepoint}")
+                    raise
+                else:
+                    await tx.execute(f"RELEASE SAVEPOINT {savepoint}")
             else:
                 async with self.db.transaction() as own_tx:
                     await _do(own_tx)
         except Exception as e:
-            err_str = str(e).lower()
-            if "check" in err_str or "violates check" in err_str:
+            constraint = getattr(e, "constraint_name", None)
+            if getattr(e, "sqlstate", None) == "23514" and constraint in {
+                "ck_wallet_nonnegative_user_agent", "wallet_accounts_balance_check",
+            }:
                 raise InsufficientBalance(
                     f"Account {entry.debit_account} has insufficient balance "
                     f"for {entry.amount} $V"
                 ) from e
-            if "unique" in err_str or "duplicate" in err_str:
-                # Idempotent — already processed, silently succeed
-                return
             raise

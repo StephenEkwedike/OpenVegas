@@ -14,9 +14,15 @@ class _FakeTx:
     async def __aexit__(self, exc_type, exc, tb):
         return False
 
+    async def fetchrow(self, query, *args):
+        return None
+
     async def execute(self, query: str, *args):
         if query.startswith("UPDATE wallet_accounts SET balance = balance -") and str(args[1]).startswith("agent:"):
-            raise Exception("violates check constraint ck_wallet_nonnegative_user_agent")
+            error = Exception("insufficient agent balance")
+            error.sqlstate = "23514"
+            error.constraint_name = "ck_wallet_nonnegative_user_agent"
+            raise error
         return "OK"
 
 

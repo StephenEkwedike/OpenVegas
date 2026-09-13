@@ -100,7 +100,10 @@ class _FakeDB:
             cur = self.balances.get(str(acc), _d("0"))
             nxt = _d(cur - _d(amount))
             if (str(acc).startswith("user:") or str(acc).startswith("agent:")) and nxt < 0:
-                raise Exception("violates check constraint ck_wallet_nonnegative_user_agent")
+                error = Exception("insufficient wallet balance")
+                error.sqlstate = "23514"
+                error.constraint_name = "ck_wallet_nonnegative_user_agent"
+                raise error
             self.balances[str(acc)] = nxt
             return "OK"
 

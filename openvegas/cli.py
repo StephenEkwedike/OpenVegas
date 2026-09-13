@@ -250,6 +250,12 @@ def _load_openvegas_env_defaults_from_dotenv() -> None:
         Path.cwd() / ".env",
         Path(__file__).resolve().parents[1] / ".env",
     ]
+    explicit_env = os.getenv("OPENVEGAS_ENV_FILE")
+    if explicit_env is not None:
+        selected = Path(explicit_env).expanduser().resolve()
+        if not selected.is_file():
+            raise click.ClickException("Explicit OPENVEGAS_ENV_FILE does not exist")
+        candidates = [selected]
     loaded: set[str] = set()
     for env_path in candidates:
         try:
@@ -4406,8 +4412,7 @@ def login(otp: bool):
     try:
         auth = SupabaseAuth()
     except AuthError as e:
-        console.print(f"[red]{e}[/red]")
-        return
+        raise click.ClickException(str(e)) from e
 
     if not otp:
         try:
@@ -4448,7 +4453,7 @@ def login(otp: bool):
                 f"[dim]user_id: {result.get('user_id', '')}[/dim]"
             )
         except Exception as e:
-            console.print(f"[red]Login failed: {e}[/red]")
+            raise click.ClickException("Login failed. Check your credentials and backend connectivity.") from e
 
 
 @cli.command("doctor-auth")

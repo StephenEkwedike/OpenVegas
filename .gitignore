@@ -6,6 +6,9 @@
 *.swo
 
 # Local tool state
+.local/
+dev/supabase/.temp/
+dev/supabase/.branches/
 .history/
 .claude/
 
@@ -39,6 +42,8 @@ ENV/
 .env
 .env.*
 !.env.example
+!.env.local.example
+!.env.railway.example
 *.pem
 *.key
 *.p12

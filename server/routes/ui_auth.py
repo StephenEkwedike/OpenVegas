@@ -12,10 +12,24 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from openvegas.telemetry import emit_metric, emit_once_process
+from openvegas.auth_config import public_auth_config
 from server.services.dependencies import current_flags, request_with_http_client
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+@router.get("/auth/config")
+async def client_auth_config():
+    """Public client settings only; never publish a server/service-role key."""
+    try:
+        config = public_auth_config(
+            os.getenv("SUPABASE_PUBLIC_URL") or os.getenv("SUPABASE_URL", ""),
+            os.getenv("SUPABASE_ANON_KEY", ""),
+        )
+    except ValueError:
+        raise HTTPException(503, "Public authentication configuration is unavailable") from None
+    return JSONResponse(config, headers={"Cache-Control": "no-store"})
 
 RUNTIME_FLAGS = current_flags()  # frozen at process boot via @lru_cache
 TRUST_PROXY_HEADERS = bool(RUNTIME_FLAGS.trusted_proxy_headers_enabled)
@@ -243,16 +257,13 @@ async def _supabase_signup(
 ) -> dict[str, Any]:
     supabase_url, supabase_anon = _supabase_cfg()
     payload: dict[str, Any] = {"email": email, "password": password}
-    if email_redirect_to:
-        # GoTrue compatibility across versions: include both fields.
-        payload["email_redirect_to"] = email_redirect_to
-        payload["redirect_to"] = email_redirect_to
     try:
         res = await request_with_http_client(
             "POST",
             f"{supabase_url}/auth/v1/signup",
             headers={"apikey": supabase_anon, "Content-Type": "application/json"},
             json=payload,
+            params={"redirect_to": email_redirect_to} if email_redirect_to else {},
             timeout=12,
         )
     except Exception as e:  # pragma: no cover - defensive network wrapper

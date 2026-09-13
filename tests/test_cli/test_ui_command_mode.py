@@ -26,4 +26,5 @@ def test_ui_full_flag_is_rejected():
     result = runner.invoke(cli, ["ui", "--full"])
 
     assert result.exit_code != 0
-    assert "No such option: --full" in result.output
+    assert "No such option" in result.output
+    assert "--full" in result.output

@@ -252,12 +252,13 @@ class BillingService:
             topup_id,
             reason[:200],
         )
-        if row:
-            emit_metric(
-                "topup_status_transition_total",
-                {"from": "expired", "to": "manual_reconciliation_required", "mode": mode},
-            )
-            emit_metric("topup_late_settlement_manual_review_total", {"mode": mode})
+        if not row:
+            raise BillingError("Unable to persist top-up reconciliation marker")
+        emit_metric(
+            "topup_status_transition_total",
+            {"from": "expired", "to": "manual_reconciliation_required", "mode": mode},
+        )
+        emit_metric("topup_late_settlement_manual_review_total", {"mode": mode})
 
     @staticmethod
     def _render_qr_svg(value: str) -> bytes:
@@ -567,10 +568,11 @@ class BillingService:
             expires_at,
         )
         if not row:
-            if resume_existing:
-                latest = await self.db.fetchrow("SELECT * FROM fiat_topups WHERE id = $1", topup_id)
-                if latest:
-                    return self._format_topup(latest)
+            latest = await self.db.fetchrow("SELECT * FROM fiat_topups WHERE id = $1", topup_id)
+            if latest and (resume_existing or self._row_get(latest, "status") in {
+                "paid", "manual_reconciliation_required",
+            }):
+                return self._format_topup(latest)
             emit_metric("topup_checkout_session_total", {"mode": mode, "status": "failure", "reason": "persist_failed"})
             raise BillingError("Unable to persist checkout session")
 
@@ -715,7 +717,7 @@ class BillingService:
                 """
                 UPDATE fiat_topups
                 SET status = 'failed', failure_reason = $2, updated_at = now()
-                WHERE id = $1
+                WHERE id = $1 AND status IN ('created', 'checkout_created', 'failed')
                 """,
                 topup_id,
                 str(e)[:500],
@@ -733,7 +735,7 @@ class BillingService:
                     stripe_payment_intent_id = COALESCE($2, stripe_payment_intent_id),
                     failure_reason = $3,
                     updated_at = now()
-                WHERE id = $1
+                WHERE id = $1 AND status IN ('created', 'checkout_created', 'failed')
                 """,
                 topup_id,
                 intent_id or None,
@@ -1659,21 +1661,34 @@ class BillingService:
                     raise BillingError(f"Webhook payload hash mismatch for event {event_id}")
                 return {"status": "duplicate"}
 
-            await tx.execute(
+            inserted = await tx.execute(
                 """
                 INSERT INTO stripe_webhook_events(event_id, event_type, payload_hash)
                 VALUES ($1, $2, $3)
+                ON CONFLICT (event_id) DO NOTHING
                 """,
                 event_id,
                 event_type,
                 payload_hash,
             )
+            if inserted == "INSERT 0 0":
+                existing = await tx.fetchrow(
+                    "SELECT payload_hash FROM stripe_webhook_events WHERE event_id = $1", event_id,
+                )
+                if not existing or existing["payload_hash"] != payload_hash:
+                    raise BillingError(f"Webhook payload hash mismatch for event {event_id}")
+                return {"status": "duplicate"}
 
-            if event_type == "checkout.session.completed":
+            if event_type in {"checkout.session.completed", "checkout.session.async_payment_succeeded"}:
                 return await self._handle_checkout_completed(
                     tx=tx,
                     session=obj,
                     event_created=self._provider_paid_at_from_event(event, fallback=self._utc_now()),
+                )
+            if event_type == "payment_intent.succeeded":
+                return await self._settle_topup_from_payment_intent(
+                    tx=tx, intent=obj,
+                    provider_paid_at=self._provider_paid_at_from_event(event, fallback=self._utc_now()),
                 )
             if event_type in {
                 "customer.subscription.created",
@@ -1708,7 +1723,27 @@ class BillingService:
             session_id,
         )
         if not row:
-            return {"status": "already-settled-or-missing"}
+            topup_id = self._provider_topup_id(session)
+            if topup_id is None:
+                return {"status": "ignored"}
+            row = await tx.fetchrow("SELECT * FROM fiat_topups WHERE id = $1 FOR UPDATE", topup_id)
+            if not row:
+                # Roll back the event journal too, allowing Stripe to retry the mapping race.
+                raise BillingError("TOPUP_PROVIDER_MAPPING_NOT_READY")
+            self._validate_recovery_payload(row=row, payload=session, amount_key="amount_total")
+            bound_session = self._row_get(row, "stripe_checkout_session_id")
+            if bound_session and str(bound_session) != session_id:
+                raise BillingError("PROVIDER_REFERENCE_CONFLICT")
+            if not isinstance(session.get("payment_intent"), str) or not session["payment_intent"]:
+                raise BillingError("TOPUP_PROVIDER_REFERENCE_MISSING")
+            row = await tx.fetchrow(
+                """UPDATE fiat_topups SET stripe_checkout_session_id = $2,
+                   stripe_customer_id = COALESCE(stripe_customer_id, $3), updated_at = now()
+                   WHERE id = $1 RETURNING *""",
+                topup_id, session_id, session["customer"],
+            )
+            if not row:
+                raise BillingError("TOPUP_PROVIDER_MAPPING_NOT_READY")
         row = await self._mark_expired_if_needed(tx=tx, row=row)
         return await self._settle_topup_paid(
             tx=tx,
@@ -1716,6 +1751,59 @@ class BillingService:
             provider_ref=session.get("payment_intent"),
             settlement_surface="stripe",
             provider_paid_at=provider_paid_at or self._utc_now(),
+        )
+
+    @staticmethod
+    def _provider_topup_id(payload: dict) -> str | None:
+        metadata = payload.get("metadata") or {}
+        topup_id = metadata.get("topup_id") or payload.get("client_reference_id")
+        if not topup_id:
+            return None
+        if metadata.get("topup_id") and payload.get("client_reference_id") not in {None, topup_id}:
+            raise BillingError("TOPUP_PROVIDER_METADATA_MISMATCH")
+        try:
+            return str(uuid.UUID(str(topup_id)))
+        except ValueError as exc:
+            raise BillingError("TOPUP_PROVIDER_METADATA_INVALID") from exc
+
+    def _validate_recovery_payload(self, *, row: Any, payload: dict, amount_key: str) -> None:
+        if self._row_get(row, "mode") != "stripe":
+            raise BillingError("TOPUP_PROVIDER_MODE_MISMATCH")
+        expected = Decimal(str(self._row_get(row, "amount_usd"))) * 100
+        amount = payload.get(amount_key)
+        if type(amount) is not int or Decimal(amount) != expected:
+            raise BillingError("TOPUP_PROVIDER_AMOUNT_MISMATCH")
+        currency = str(self._row_get(row, "currency", "usd")).lower()
+        if payload.get("currency") != currency:
+            raise BillingError("TOPUP_PROVIDER_CURRENCY_MISMATCH")
+        customer = payload.get("customer")
+        expected_customer = self._row_get(row, "stripe_customer_id")
+        if not isinstance(customer, str) or not customer or (
+            expected_customer and customer != str(expected_customer)
+        ):
+            raise BillingError("TOPUP_PROVIDER_CUSTOMER_MISMATCH")
+
+    async def _settle_topup_from_payment_intent(
+        self, *, tx: Any, intent: dict, provider_paid_at: datetime,
+    ) -> dict:
+        if intent.get("status") != "succeeded":
+            return {"status": "not-paid"}
+        topup_id = self._provider_topup_id(intent)
+        if topup_id is None:
+            return {"status": "ignored"}
+        row = await tx.fetchrow("SELECT * FROM fiat_topups WHERE id = $1 FOR UPDATE", topup_id)
+        if not row:
+            raise BillingError("TOPUP_PROVIDER_MAPPING_NOT_READY")
+        self._validate_recovery_payload(row=row, payload=intent, amount_key="amount")
+        self._validate_recovery_payload(row=row, payload=intent, amount_key="amount_received")
+        if not isinstance(intent.get("id"), str) or not intent["id"]:
+            raise BillingError("TOPUP_PROVIDER_REFERENCE_MISSING")
+        if not self._row_get(row, "stripe_customer_id"):
+            raise BillingError("TOPUP_PROVIDER_CUSTOMER_MISMATCH")
+        row = await self._mark_expired_if_needed(tx=tx, row=row)
+        return await self._settle_topup_paid(
+            tx=tx, row=row, provider_ref=intent["id"], settlement_surface="stripe",
+            provider_paid_at=provider_paid_at,
         )
 
     async def complete_fake_topup(self, *, topup_id: str) -> dict:
@@ -1754,6 +1842,12 @@ class BillingService:
         status_before = str(self._row_get(row, "status", ""))
         mode = str(self._row_get(row, "mode", self._resolve_mode()))
 
+        if mode != settlement_surface:
+            raise BillingError("TOPUP_PROVIDER_MODE_MISMATCH")
+        bound_reference = self._row_get(row, "stripe_payment_intent_id")
+        if bound_reference and provider_ref and str(bound_reference) != str(provider_ref):
+            raise BillingError("PROVIDER_REFERENCE_CONFLICT")
+
         if status_before == "paid":
             emit_metric("topup_settlement_idempotent_replay_total", {"mode": mode})
             return {"status": "paid", "topup_id": topup_id, "idempotent": True}
@@ -1782,8 +1876,16 @@ class BillingService:
                     mode=mode,
                     reason="STRIPE_LATE_SETTLEMENT_WINDOW_EXCEEDED",
                 )
-                raise BillingError("STRIPE_LATE_SETTLEMENT_REQUIRES_MANUAL_REVIEW")
-        if status_before not in {"created", "checkout_created", "expired"}:
+                await tx.execute(
+                    "UPDATE fiat_topups SET stripe_payment_intent_id = COALESCE($2, stripe_payment_intent_id) "
+                    "WHERE id = $1", topup_id, str(provider_ref) if provider_ref else None,
+                )
+                return {"status": "manual_reconciliation_required", "topup_id": topup_id}
+        allowed_statuses = {"created", "checkout_created", "expired"}
+        if settlement_surface == "stripe" and provider_ref:
+            # A timeout/failed request does not override a verified successful payment.
+            allowed_statuses.add("failed")
+        if status_before not in allowed_statuses:
             raise BillingError(f"TOPUP_STATUS_NOT_SETTLEABLE:{status_before}")
 
         if provider_ref:

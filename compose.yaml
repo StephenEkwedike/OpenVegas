@@ -1,0 +1,54 @@
+name: ov-restoration
+
+services:
+  app:
+    image: openvegas-restoration:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    init: true
+    env_file:
+      - .env.local
+    environment:
+      OPENVEGAS_RUNTIME_ENV: development
+      OPENVEGAS_TEST_MODE: "0"
+      OPENVEGAS_DB_FAIL_OPEN: "0"
+      OPENVEGAS_REDIS_REQUIRED: "1"
+      OPENVEGAS_DOTENV_OVERRIDE: "0"
+      PORT: "8000"
+      DATABASE_URL: postgresql://postgres:postgres@host.docker.internal:54322/postgres
+      SUPABASE_URL: http://host.docker.internal:54321
+      REDIS_URL: redis://redis:6379/0
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=256m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+  # Fraud/rate-limit counters must be shared, not the in-process placeholder.
+  redis:
+    image: redis:7-alpine@sha256:ff02b58f971e7d7d156a1267e283fcbbeee91773b6aa36c49dac28ecfe28eadf
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:16379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  redis-data:

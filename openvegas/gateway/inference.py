@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import asyncio
 import io
 import os
 import hashlib
 import time
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -82,6 +84,14 @@ class AIGateway:
         self.catalog = catalog
         self.http_client = http_client
 
+    @asynccontextmanager
+    async def _transaction(self, tx=None):
+        if tx is not None:
+            yield tx
+        else:
+            async with self.db.transaction() as conn:
+                yield conn
+
     async def infer(self, req: InferenceRequest) -> InferenceResult:
         ctx, replay = await self._prepare_inference_execution(req)
         if replay is not None:
@@ -89,10 +99,10 @@ class AIGateway:
 
         try:
             result = await self._route_to_provider(req, ctx.provider_api_key)
-        except Exception:
-            await self._abort_inference_execution(ctx)
+            return await self._finalize_inference_execution(ctx, req, result)
+        except (Exception, asyncio.CancelledError):
+            await self._cleanup_inference_after_failure(ctx)
             raise
-        return await self._finalize_inference_execution(ctx, req, result)
 
     async def stream_infer(self, req: InferenceRequest) -> AsyncGenerator[dict[str, Any], None]:
         ctx, replay = await self._prepare_inference_execution(req)
@@ -127,11 +137,12 @@ class AIGateway:
                 result = await self._route_to_provider(req, ctx.provider_api_key)
                 if str(result.text or "").strip():
                     yield {"type": "text_delta", "text": str(result.text)}
-        except Exception:
-            await self._abort_inference_execution(ctx)
+            finalized = await self._finalize_inference_execution(ctx, req, result)
+        except (Exception, asyncio.CancelledError, GeneratorExit):
+            # Closing a stream is not an Exception; release its durable wallet hold too.
+            await self._cleanup_inference_after_failure(ctx)
             raise
 
-        finalized = await self._finalize_inference_execution(ctx, req, result)
         yield {"type": "completed", "result": finalized}
 
     async def _prepare_inference_execution(
@@ -159,72 +170,72 @@ class AIGateway:
             )
             reserve_v = max((max_v_cost - estimated_grant_v), Decimal("0")).quantize(V_SCALE)
 
-        balance = await self.wallet.get_balance(req.account_id)
-        if balance < reserve_v:
-            raise InsufficientBalance(f"Need {reserve_v} $V reserved, have {balance} $V")
-
-        request_id, replay = await self._begin_inference_request(
-            user_id=user_id,
-            idempotency_key=req.idempotency_key,
-            payload_hash=payload_hash,
-        )
-        if replay is not None:
-            return (
-                _InferenceExecutionContext(
-                    account_id=req.account_id,
-                    model_config=model_config,
-                    user_id=user_id,
-                    provider_api_key=provider_api_key,
-                    reserve_v=reserve_v,
-                    request_id=request_id,
-                    preauth_id="",
-                    reservation_ref=request_id,
-                ),
-                replay,
-            )
-
-        preauth_id = str(uuid.uuid4())
-        reservation_ref = request_id
-
+        ctx = None
         try:
             async with self.db.transaction() as tx:
-                await tx.execute(
-                    """
-                    INSERT INTO inference_preauthorizations
-                      (id, account_id, user_id, request_id, provider, model_id, reserved_v, status)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, 'reserved')
-                    """,
-                    preauth_id,
-                    req.account_id,
-                    user_id,
-                    request_id,
-                    req.provider,
-                    req.model,
-                    reserve_v,
+                request_id, replay = await self._begin_inference_request(
+                    user_id=user_id, idempotency_key=req.idempotency_key,
+                    payload_hash=payload_hash, tx=tx,
                 )
+                ctx = _InferenceExecutionContext(
+                    account_id=req.account_id, model_config=model_config, user_id=user_id,
+                    provider_api_key=provider_api_key, reserve_v=reserve_v, request_id=request_id,
+                    preauth_id=str(uuid.uuid4()), reservation_ref="",
+                )
+                ctx.reservation_ref = f"infer-preauth:{ctx.preauth_id}"
+                if replay is not None:
+                    return ctx, replay
+
+                previous = await tx.fetchrow(
+                    "SELECT * FROM inference_preauthorizations WHERE request_id = $1 FOR UPDATE", request_id,
+                )
+                if previous:
+                    if str(previous["account_id"]) != req.account_id or str(previous["status"]) in {
+                        "settled", "refunded",
+                    }:
+                        raise ContractError(APIErrorCode.HOLD_CONFLICT, "Prior inference settlement requires reconciliation.")
+                    previous_id = str(previous["id"])
+                    previous_ref = f"infer-preauth:{previous_id}"
+                    has_attempt_reserve = await tx.fetchrow(
+                        "SELECT id FROM ledger_entries WHERE reference_id = $1 AND entry_type = 'reserve'",
+                        previous_ref,
+                    )
+                    if not has_attempt_reserve:
+                        # Legacy reservations used the logical request ID instead of an attempt ID.
+                        previous_ref = request_id
+                    await self._void_preauth(
+                        preauth_id=previous_id, reservation_ref=previous_ref,
+                        account_id=req.account_id, reserved_v=Decimal(str(previous["reserved_v"])), tx=tx,
+                    )
+
+                balance = await self.wallet.get_balance(req.account_id, tx=tx)
+                if balance < reserve_v:
+                    raise InsufficientBalance(f"Need {reserve_v} $V reserved, have {balance} $V")
+                if previous:
+                    # This row identifies the current attempt; its historical ledger stays immutable.
+                    await tx.execute(
+                        """UPDATE inference_preauthorizations SET id=$2, provider=$3, model_id=$4,
+                           reserved_v=$5, settled_v=0, status='reserved', updated_at=now()
+                           WHERE id=$1""",
+                        previous["id"], ctx.preauth_id, req.provider, req.model, reserve_v,
+                    )
+                else:
+                    await tx.execute(
+                        """INSERT INTO inference_preauthorizations
+                           (id, account_id, user_id, request_id, provider, model_id, reserved_v, status)
+                           VALUES ($1, $2, $3, $4, $5, $6, $7, 'reserved')""",
+                        ctx.preauth_id, req.account_id, user_id, request_id, req.provider, req.model, reserve_v,
+                    )
                 if reserve_v > 0:
                     await self.wallet.reserve(
-                        account_id=req.account_id,
-                        amount=reserve_v,
-                        reference_id=reservation_ref,
-                        tx=tx,
+                        account_id=req.account_id, amount=reserve_v,
+                        reference_id=ctx.reservation_ref, tx=tx,
                     )
-        except Exception:
-            await self._mark_request_failed(request_id=request_id)
+        except (Exception, asyncio.CancelledError):
+            if ctx is not None:
+                await self._cleanup_inference_after_failure(ctx)
             raise
-        return (
-            _InferenceExecutionContext(
-                account_id=req.account_id,
-                model_config=model_config,
-                user_id=user_id,
-                provider_api_key=provider_api_key,
-                reserve_v=reserve_v,
-                request_id=request_id,
-                preauth_id=preauth_id,
-                reservation_ref=reservation_ref,
-            ),
-            None,
-        )
+        return ctx, None
 
     async def _finalize_inference_execution(
         self,
@@ -252,6 +263,16 @@ class AIGateway:
         charge_v = actual_v
 
         async with self.db.transaction() as tx:
+            request_row = await tx.fetchrow(
+                "SELECT * FROM inference_requests WHERE id = $1 FOR UPDATE", request_id,
+            )
+            if request_row and str(request_row["status"]) == "succeeded":
+                return self._deserialize_result(request_row)
+            preauth = await tx.fetchrow(
+                "SELECT status FROM inference_preauthorizations WHERE id = $1 FOR UPDATE", preauth_id,
+            )
+            if not request_row or str(request_row["status"]) != "processing" or not preauth or str(preauth["status"]) != "reserved":
+                raise ContractError(APIErrorCode.HOLD_CONFLICT, "Inference attempt no longer owns its reservation.")
             if user_id and total_tokens > 0:
                 grant_used_tokens = await self._consume_grants(
                     tx=tx,
@@ -391,18 +412,40 @@ class AIGateway:
 
         return result
 
+    async def _cleanup_inference_after_failure(self, ctx: _InferenceExecutionContext) -> None:
+        # Finish bounded cleanup even if an HTTP disconnect cancels the caller again.
+        cleanup = asyncio.create_task(asyncio.wait_for(self._abort_inference_execution(ctx), timeout=10))
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                continue
+        cleanup.result()
+
     async def _abort_inference_execution(
         self,
         ctx: _InferenceExecutionContext,
     ) -> None:
-        if str(ctx.preauth_id or "").strip():
+        async with self.db.transaction() as tx:
+            request_row = await tx.fetchrow(
+                "SELECT status FROM inference_requests WHERE id = $1 FOR UPDATE", ctx.request_id,
+            )
+            # A failed commit acknowledgement is not proof that settlement rolled back.
+            if not request_row or str(request_row["status"]) != "processing":
+                return
+            preauth = await tx.fetchrow(
+                "SELECT status FROM inference_preauthorizations WHERE id = $1 FOR UPDATE", ctx.preauth_id,
+            )
+            if not preauth or str(preauth["status"]) not in {"reserved", "voided"}:
+                return
             await self._void_preauth(
                 preauth_id=ctx.preauth_id,
                 reservation_ref=ctx.reservation_ref,
                 account_id=ctx.account_id,
                 reserved_v=ctx.reserve_v,
+                tx=tx,
             )
-        await self._mark_request_failed(request_id=ctx.request_id)
+            await self._mark_request_failed(request_id=ctx.request_id, tx=tx)
 
     async def _begin_inference_request(
         self,
@@ -410,11 +453,12 @@ class AIGateway:
         user_id: str | None,
         idempotency_key: str | None,
         payload_hash: str,
+        tx=None,
     ) -> tuple[str, InferenceResult | None]:
         request_id = str(uuid.uuid4())
         idem_key = idempotency_key or request_id
         if not user_id:
-            async with self.db.transaction() as tx:
+            async with self._transaction(tx) as tx:
                 await tx.execute(
                     """
                     INSERT INTO inference_requests
@@ -428,7 +472,7 @@ class AIGateway:
                 )
             return request_id, None
 
-        async with self.db.transaction() as tx:
+        async with self._transaction(tx) as tx:
             inserted = await tx.fetchrow(
                 """
                 INSERT INTO inference_requests
@@ -493,8 +537,8 @@ class AIGateway:
                 return rid, None
             return request_id, None
 
-    async def _mark_request_failed(self, request_id: str) -> None:
-        async with self.db.transaction() as tx:
+    async def _mark_request_failed(self, request_id: str, *, tx=None) -> None:
+        async with self._transaction(tx) as tx:
             await tx.execute(
                 """
                 UPDATE inference_requests
@@ -660,8 +704,18 @@ class AIGateway:
         reservation_ref: str,
         account_id: str,
         reserved_v: Decimal,
+        *,
+        tx=None,
     ) -> None:
-        async with self.db.transaction() as tx:
+        async with self._transaction(tx) as tx:
+            row = await tx.fetchrow(
+                "SELECT status, account_id, reserved_v FROM inference_preauthorizations WHERE id = $1 FOR UPDATE",
+                preauth_id,
+            )
+            if not row or str(row["status"]) != "reserved":
+                return
+            if str(row["account_id"]) != account_id or Decimal(str(row["reserved_v"])) != reserved_v:
+                raise ContractError(APIErrorCode.HOLD_CONFLICT, "Inference reservation identity mismatch.")
             if reserved_v > 0:
                 await self.wallet.settle_reservation(
                     account_id=account_id,
@@ -676,6 +730,7 @@ class AIGateway:
                     status = 'voided',
                     updated_at = now()
                 WHERE id = $1
+                  AND status = 'reserved'
                 """,
                 preauth_id,
             )
