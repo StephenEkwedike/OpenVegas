@@ -24,6 +24,7 @@ RUN python -m pip install --no-cache-dir -c requirements.lock ".[server]"
 COPY ui/ ./ui/
 COPY supabase/migrations/ ./supabase/migrations/
 COPY scripts/ ./scripts/
+RUN python scripts/ci/check_emote_ui_assets.py
 
 USER 10001:10001
 EXPOSE 8000

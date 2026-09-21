@@ -133,9 +133,13 @@ def main(argv=None):
                 capture_output=True,
                 text=True,
                 timeout=120,
-                check=True,
+                check=False,
             )
-            (output / (arguments[-1].replace("--", "") + ".txt")).write_text(result.stdout)
+            # Keep clean-environment failure diagnostics before raising, not just successes.
+            (output / (arguments[-1].replace("--", "") + ".txt")).write_text(
+                result.stdout + result.stderr, encoding="utf-8"
+            )
+            result.check_returncode()
     package = output / "npm"
     (package / "bin").mkdir(parents=True)
     shutil.copy2(binary, package / "bin" / binary.name)

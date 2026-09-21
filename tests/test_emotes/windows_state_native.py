@@ -280,6 +280,37 @@ def test_native_parent_retained_read_and_atomic_replace(tmp_path):
     path.rename(tmp_path / "moved")
 
 
+@pytest.mark.parametrize("name", ["state.json", "state-\u00e9.json", "state-\U0001f600.json"])
+def test_native_atomic_publish_uses_source_directory_not_cwd(tmp_path, monkeypatch, name):
+    path, decoy = tmp_path / "private", tmp_path / "working-directory"
+    decoy.mkdir()
+    outside = decoy / name
+    outside.write_bytes(b"must not change")
+    monkeypatch.chdir(decoy)
+    with _locked(path) as directory:
+        atomic_write(directory, name, b"first")
+        before = state_stat(directory, name)
+        atomic_write(directory, name, b"second")
+        assert _read(directory, name, 6) == b"second"
+        assert state_stat(directory, name).st_ino != before.st_ino
+        assert set(state_names(directory)) == {".lock", name}
+        win.validate_info(state_stat(directory, name), directory=False)
+    assert outside.read_bytes() == b"must not change"
+    assert {p.name for p in decoy.iterdir()} == {name}
+
+
+def test_native_failed_publish_preserves_old_file_and_removes_owned_temp(tmp_path, monkeypatch):
+    with _locked(tmp_path / "private") as directory:
+        atomic_write(directory, "state.json", b"old")
+        before = state_stat(directory, "state.json")
+        monkeypatch.setattr(directory.api, "_set_native", lambda *args: -1073741790)
+        with pytest.raises(OSError, match="NTSTATUS=0xC0000022, Win32=5"):
+            atomic_write(directory, "state.json", b"new")
+        assert _read(directory, "state.json", 3) == b"old"
+        assert state_stat(directory, "state.json") == before
+        assert set(state_names(directory)) == {".lock", "state.json"}
+
+
 def test_native_default_paths_use_only_isolated_profile():
     from openvegas.emotes.spool import default_state_dir
 

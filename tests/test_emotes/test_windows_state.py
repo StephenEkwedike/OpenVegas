@@ -358,19 +358,43 @@ def test_lock_abi_has_fail_immediately_and_exclusive_flags():
     assert C.sizeof(win._Overlapped) == (32 if C.sizeof(C.c_void_p) == 8 else 20)
 
 
-def test_rename_abi_is_handle_relative_exact_utf16():
+@pytest.mark.parametrize("name", ["state.json", "state-\u00e9.json", "state-\U0001f600.json"])
+def test_rename_abi_is_source_handle_relative_exact_utf16(name):
     api = object.__new__(win.WindowsStateAPI)
     calls = []
 
-    def apply(handle, kind, buffer, size):
+    def apply(handle, io, buffer, size, kind):
         info = win._Rename.from_buffer(buffer)
         data = C.string_at(C.addressof(buffer) + win._Rename.FileName.offset, info.FileNameLength)
+        assert size >= C.sizeof(win._Rename) + len(data)
+        assert C.cast(io, C.POINTER(resource._IOStatusBlock)).contents.Result.Status == 0
         calls.append((handle, kind, info.Flags, info.RootDirectory, data))
-        return 1
+        return 0
 
-    api._set = apply
-    api.rename(3, 2, "state-\u00e9.json")
-    assert calls == [(3, 3, 1, 2, "state-\u00e9.json".encode("utf-16-le"))]
+    api._set_native = apply
+    api.rename(3, 2, name)
+    assert calls == [(3, 10, 1, None, name.encode("utf-16-le"))]
+
+
+@pytest.mark.parametrize("status,error", [(-1073741790, 5), (-1073741811, 87), (259, 997)])
+def test_rename_native_failure_or_pending_is_not_success(status, error):
+    api = object.__new__(win.WindowsStateAPI)
+    api._set_native = lambda *args: status
+    api._dos_error = lambda actual: error if actual == status else pytest.fail("wrong status")
+    with pytest.raises(OSError) as caught:
+        api.rename(3, 2, "state.json")
+    assert str(caught.value) == (
+        "Cannot atomically publish private state "
+        f"(NTSTATUS=0x{status & 0xFFFFFFFF:08X}, Win32={error})"
+    )
+
+
+@pytest.mark.parametrize("name", ["../target", "C:\\target", "a\\b", "a/b", "a:stream", ".."])
+def test_rename_rejects_paths_before_native_call(name):
+    api = object.__new__(win.WindowsStateAPI)
+    api._set_native = lambda *args: pytest.fail("unsafe name reached kernel")
+    with pytest.raises(OSError):
+        api.rename(3, 2, name)
 
 
 def test_open_abi_is_relative_private_nofollow_noninheritable():

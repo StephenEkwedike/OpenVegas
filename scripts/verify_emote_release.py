@@ -15,7 +15,6 @@ import importlib.metadata
 import io
 import json
 import os
-import platform
 import runpy
 import subprocess
 import sys
@@ -54,7 +53,10 @@ def install_guard() -> list[str]:
     violations: list[str] = []
 
     def audit(event, args):
-        forbidden = event.startswith("socket.") and event not in {"socket.__new__"}
+        # gethostname reads local OS identity; unlike DNS lookups it does no network I/O.
+        forbidden = event.startswith("socket.") and event not in {
+            "socket.__new__", "socket.gethostname",
+        }
         forbidden |= event in {"subprocess.Popen", "os.system", "os.posix_spawn", "os.exec"}
         if event == "open" and isinstance(args[0], (str, bytes)):
             name = Path(os.fsdecode(args[0])).name.lower()
@@ -111,8 +113,11 @@ def run_dispatch(dist, kind: str, args: list[str]) -> tuple[int, str]:
 def probe() -> dict:
     violations = install_guard()
     result = {
-        "schema": 1, "status": "fail", "platform": platform.system(),
-        "python": platform.python_version(), "scope": LIMITATION,
+        "schema": 1, "status": "fail",
+        "platform": {"win32": "Windows", "darwin": "Darwin", "linux": "Linux"}.get(
+            sys.platform, sys.platform
+        ),
+        "python": ".".join(map(str, sys.version_info[:3])), "scope": LIMITATION,
         "checks": [], "failures": [],
     }
 

@@ -214,3 +214,33 @@ def test_bad_interpreter_reports_failure(tmp_path):
     report = tmp_path / "report.json"
     assert verifier.main(["--python", str(tmp_path / "missing"), "--json", str(report)]) == 1
     assert json.loads(report.read_text())["status"] == "fail"
+
+
+def test_probe_metadata_does_not_run_platform_detection(installed):
+    python, _, root = installed
+    code = (
+        "import runpy, platform, json; "
+        "m = runpy.run_path(" + repr(str(SCRIPT)) + "); "
+        "platform.system = lambda: (_ for _ in ()).throw(RuntimeError('platform probe')); "
+        "m['importlib'].metadata.distribution = lambda _: "
+        "(_ for _ in ()).throw(m['importlib'].metadata.PackageNotFoundError()); "
+        "print(json.dumps(m['probe']()))"
+    )
+    result = subprocess.run([str(python), "-I", "-B", "-c", code], cwd=root,
+                            env=verifier.clean_environment(root), capture_output=True,
+                            text=True, timeout=10, check=False)
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report['failures'] == ['installed-origin']
+    assert report['python'] == '.'.join(map(str, sys.version_info[:3]))
+
+
+def test_offline_guard_allows_local_hostname_query(tmp_path):
+    code = (
+        "import runpy, socket; m = runpy.run_path(" + repr(str(SCRIPT)) + "); "
+        "violations = m['install_guard'](); socket.gethostname(); assert not violations"
+    )
+    result = subprocess.run([sys.executable, "-I", "-B", "-c", code], cwd=tmp_path,
+                            env=verifier.clean_environment(tmp_path), capture_output=True,
+                            text=True, timeout=10, check=False)
+    assert result.returncode == 0, result.stderr

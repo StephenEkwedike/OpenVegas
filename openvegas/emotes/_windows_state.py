@@ -11,6 +11,8 @@ https://learn.microsoft.com/windows/win32/api/winternl/nf-winternl-ntcreatefile
 https://learn.microsoft.com/windows/win32/api/aclapi/nf-aclapi-getsecurityinfo
 https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-lockfileex
 https://learn.microsoft.com/windows/win32/api/winbase/ns-winbase-file_rename_info
+https://learn.microsoft.com/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information
+https://learn.microsoft.com/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntsetinformationfile
 """
 
 from __future__ import annotations
@@ -152,6 +154,11 @@ class WindowsStateAPI(R._WindowsAPI):
         self._dos_error = bind(native, "RtlNtStatusToDosError", [C.c_int32], DWORD)
         self._write = bind(kernel, "WriteFile", [HANDLE, ptr, DWORD, C.POINTER(DWORD), ptr])
         self._set = bind(kernel, "SetFileInformationByHandle", [HANDLE, C.c_int32, ptr, DWORD])
+        self._set_native = bind(
+            native,
+            "NtSetInformationFile",
+            [HANDLE, C.POINTER(R._IOStatusBlock), ptr, DWORD, C.c_int32],
+        )
         self._lock = bind(
             kernel, "LockFileEx", [HANDLE, DWORD, DWORD, DWORD, DWORD, C.POINTER(_Overlapped)]
         )
@@ -392,10 +399,19 @@ class WindowsStateAPI(R._WindowsAPI):
         encoded = name.encode("utf-16-le")
         buffer = C.create_string_buffer(C.sizeof(_Rename) + len(encoded))
         info = _Rename.from_buffer(buffer)
-        info.Flags, info.RootDirectory, info.FileNameLength = 1, parent, len(encoded)
+        # Native FileRenameInformation with NULL RootDirectory and a single
+        # component renames within the source handle's directory, not the CWD.
+        # The caller retains `parent` without delete sharing throughout. Avoid
+        # the Win32 wrapper's pathname conversion; never close/reopen by path.
+        info.Flags, info.RootDirectory, info.FileNameLength = 1, None, len(encoded)
         C.memmove(C.addressof(buffer) + _Rename.FileName.offset, encoded, len(encoded))
-        if not self._set(handle, 3, buffer, len(buffer)):
-            raise OSError("Cannot atomically publish private state")
+        io = R._IOStatusBlock()
+        status = self._set_native(handle, C.byref(io), buffer, len(buffer), 10)
+        if status != 0:
+            raise OSError(
+                "Cannot atomically publish private state "
+                f"(NTSTATUS=0x{status & 0xFFFFFFFF:08X}, Win32={self._dos_error(status)})"
+            )
 
     def delete(self, handle):
         flag = C.c_ubyte(1)
