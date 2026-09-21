@@ -7,6 +7,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -35,7 +36,17 @@ jobs:
           OPENVEGAS_ENABLE_TOUCHID: "0"
           PYTHON_KEYRING_BACKEND: keyring.backends.null.Keyring
         run: |
-          pytest -q
+          set -o pipefail
+          pytest -vv -o faulthandler_timeout=60 2>&1 | tee pytest-results.txt
+
+      - name: Preserve test failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-failure-diagnostics
+          path: pytest-results.txt
+          retention-days: 7
+          if-no-files-found: ignore
 
       - name: Safe offline checks
         run: python scripts/check_local.py fast
