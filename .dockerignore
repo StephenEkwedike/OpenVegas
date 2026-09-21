@@ -8,6 +8,9 @@
 !openvegas/
 !openvegas/**/
 !openvegas/**/*.py
+!openvegas/emotes/assets/*/manifest.json
+!openvegas/emotes/assets/*/sheet.png
+!openvegas/emotes/assets/*/provenance.json
 !server/
 !server/**/
 !server/**/*.py

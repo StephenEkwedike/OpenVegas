@@ -306,10 +306,11 @@ async def test_ensure_user_customer_uses_only_real_stripe_customer_ids():
 
 
 @pytest.mark.asyncio
-async def test_create_topup_checkout_recovers_from_legacy_sim_customer_id(monkeypatch):
+@pytest.mark.parametrize("rate", ["100", "100.00000051"])
+async def test_create_topup_checkout_recovers_from_legacy_sim_customer_id(monkeypatch, rate):
     monkeypatch.setenv("TOPUP_MIN_USD", "1")
     monkeypatch.setenv("TOPUP_MAX_USD", "500")
-    monkeypatch.setenv("V_PER_USD", "100")
+    monkeypatch.setenv("V_PER_USD", rate)
 
     class _Tx(_FakeTx):
         async def fetchrow(self, query: str, *args):
@@ -370,6 +371,10 @@ async def test_create_topup_checkout_recovers_from_legacy_sim_customer_id(monkey
     assert out["mode"] == "stripe"
     assert gateway.calls == 2
     assert gateway.seen_customers == ["sim_u1", "cus_live_1"]
+    from openvegas.store.catalog import cosmetic_price_v
+
+    credit = next(args[3] for query, args in tx.execute_calls if "INSERT INTO fiat_topups" in query)
+    assert credit == 4 * cosmetic_price_v({"price_usd": Decimal(5)})
 
 
 @pytest.mark.asyncio
@@ -437,10 +442,11 @@ async def test_get_saved_payment_method_status_returns_card_details():
 
 
 @pytest.mark.asyncio
-async def test_charge_saved_topup_settles_paid_topup(monkeypatch):
+@pytest.mark.parametrize("rate", ["100", "100.00000051"])
+async def test_charge_saved_topup_settles_paid_topup(monkeypatch, rate):
     monkeypatch.setenv("TOPUP_MIN_USD", "1")
     monkeypatch.setenv("TOPUP_MAX_USD", "500")
-    monkeypatch.setenv("V_PER_USD", "100")
+    monkeypatch.setenv("V_PER_USD", rate)
     wallet = _DummyWallet()
     tx = _FakeTx()
     tx.mode["subscription_customer_row"] = {"stripe_customer_id": "cus_saved_1"}
@@ -487,6 +493,10 @@ async def test_charge_saved_topup_settles_paid_topup(monkeypatch):
     assert out["status"] == "paid"
     assert wallet.calls
     assert wallet.calls[0][0] == "user:u1"
+    from openvegas.store.catalog import cosmetic_price_v
+
+    credit = next(args[3] for query, args in tx.execute_calls if "INSERT INTO fiat_topups" in query)
+    assert credit == 2 * cosmetic_price_v({"price_usd": Decimal(6)})
 
 
 @pytest.mark.asyncio

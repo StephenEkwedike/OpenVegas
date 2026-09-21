@@ -1,0 +1,45 @@
+/* Static semantic pages; the browser engine only animates authored frame crops. */
+import fs from 'node:fs/promises';
+import {campaigns,slides,assetNotice} from './content.mjs';
+const escape=s=>s.replaceAll('&','&amp;').replaceAll('"','&quot;').replaceAll('<','&lt;');
+const sprite=(pack,cls='',offset=0,extra='')=>`<canvas class="sprite ${cls}" data-pack="${pack}" data-offset="${offset}" role="img" aria-label="${pack.replaceAll('-',' ')} authored pose" ${extra}>${pack.replaceAll('-',' ')} authored pixel companion.</canvas>`;
+const svg=(body,cls='diagram')=>`<svg class="${cls}" viewBox="0 0 948 680" aria-hidden="true" fill="none" xmlns="http://www.w3.org/2000/svg">${body}</svg>`;
+const ring=(cx,cy,r)=>`<circle cx="${cx}" cy="${cy}" r="${r}"/>`;
+const stamp=(text,cls='')=>`<div class="stamp ${cls}">${text}</div>`;
+const orbit=svg([120,190,260,330].map(r=>ring(474,340,r)).join(''),'orbit');
+const sports=s=>sprite(`sports/${s.sportsSlot}`,'sports-hero',0,`data-sports-slot="${s.sportsSlot}"`);
+const filmstrip=s=>{
+ const poses=s.sportsSlot==='bicycle-finish'?[0,3,5,10]:[0,4,7,11];
+ const labels=s.sportsSlot==='skyline-dunk'?['DRIBBLE','GATHER','DUNK','CELEBRATE']:s.sportsSlot==='bicycle-finish'?['SET UP','FLIGHT','STRIKE','CELEBRATE']:['SET UP','RELEASE','BASKET','CELEBRATE'];
+ return `<div class="sports-name">[ ${s.sportsSlot.replaceAll('-',' ').toUpperCase()} ]</div><div class="filmstrip">${poses.map((pose,i)=>`<div>${sprite('sports/'+s.sportsSlot,'film-pose',0,`data-pose="${pose}"`)}<span>${String(pose+1).padStart(2,'0')} / ${labels[i]}</span></div>`).join('')}</div>`;
+};
+const art={
+ cast:s=>`<div class="cast-floor"></div><div class="giant-type" aria-hidden="true">03</div>${sprite('pixel-courier','cast-one',0)}${sprite('beat-maker','cast-two',2)}${sprite('visor-explorer','cast-three',4)}<div class="cast-names"><span>Pixel Courier</span><span>Beat Maker</span><span>Visor Explorer</span></div>`,
+ rhythm:s=>`${orbit}<div class="record-label" aria-hidden="true">OV<br>02</div>${sprite('beat-maker','echo echo-one',0)}${sprite('beat-maker','solo',2)}${sprite('beat-maker','echo echo-two',4)}${stamp('SIDE A / DEEP FOCUS','side-a')}${stamp('SIDE B / GOOD COMPANY','side-b')}`,
+ horizon:s=>`<div class="portal"></div>${svg('<path d="M0 540H948M0 590H948M0 640H948M474 310L50 680M474 310L898 680M474 310L290 680M474 310L658 680"/>','horizon-grid')}${sprite('visor-explorer','explorer',4)}${sprite('pixel-courier','satellite left',1)}${sprite('beat-maker','satellite right',6)}${stamp('NEXT HORIZON','horizon-stamp')}`,
+ warmup:s=>`${svg('<rect x="22" y="25" width="904" height="420" rx="200"/><path d="M474 25V445M22 235H926"/>'+ring(474,235,130),'court')}${sports(s)}${filmstrip(s)}`,
+ finish:s=>`${svg('<path d="M65 450V30H883V450M260 450V225H688V450M65 90H883M155 30V450M245 30V225M335 30V225M425 30V225M515 30V225M605 30V225M695 30V450M785 30V450"/>','goal-grid')}${sports(s)}${filmstrip(s)}`,
+ cooldown:s=>`<div class="spotlight"></div>${sports(s)}${filmstrip(s)}<div class="lifecycle"><span data-state="waiting">WAITING</span><span data-state="complete">COMPLETE</span><span data-state="idle">IDLE</span></div>`,
+ fund:s=>`${svg('<path d="M155 565V350Q155 300 205 300H550Q600 300 600 250V145Q600 105 645 105H890M600 300H890M600 300V500Q600 550 650 550H890"/>'+[[155,565],[380,300],[890,105],[890,300],[890,550]].map(([x,y])=>ring(x,y,12)).join(''),'route')}<div class="route-label balance">OPENVEGAS<br><b>BALANCE</b></div><div class="route-label backend">FUNDED<br><b>BACKEND</b></div><div class="route-label destination top">AVAILABLE<br>MODEL A</div><div class="route-label destination middle">AVAILABLE<br>MODEL B</div><div class="route-label destination lower">AVAILABLE<br>MODEL C</div>${sprite('pixel-courier','map-courier',1)}`,
+ switch:s=>`${svg('<path d="M-40 600H310Q420 600 420 490V200Q420 100 520 100H950M420 385Q420 335 490 335H950M420 440Q420 570 570 570H950"/>'+ring(420,335,24),'junction')}<div class="station st-one">OPENAI</div><div class="station st-two">ANTHROPIC</div><div class="station st-three">AVAILABLE CATALOG</div>${sprite('visor-explorer','switch-explorer',5)}${stamp('MODEL SELECTION / YOUR DIRECTION','map-key')}`,
+ perspective:s=>`<div class="lens lens-one">${sprite('pixel-courier','',0)}<span>01 / CONSIDER</span></div><div class="lens lens-two">${sprite('beat-maker','',2)}<span>02 / CHOOSE</span></div><div class="lens lens-three">${sprite('visor-explorer','',4)}<span>03 / CONTINUE</span></div>`,
+ direct:s=>`${svg('<path d="M65 575L665 75H915M400 295L760 590H915"/>'+ring(65,575,14)+ring(665,75,14),'direct-path')}<div class="path-label start">CREDITS</div><div class="path-label end">COMPUTE</div><div class="path-label detour">OPTIONAL<br>ARCADE</div>${sprite('pixel-courier','direct-courier',2)}<div class="arrowhead" aria-hidden="true">↗</div>`,
+ play:s=>`<div class="roulette-disc"><div class="roulette-inner"><span>[ PLAY ]</span></div></div>${sprite('beat-maker','play-beat',6)}${sprite('pixel-courier','play-courier',3)}`,
+ choice:s=>`${svg('<path d="M470 680V465Q470 380 395 305L155 70M470 465Q470 380 560 300L810 70"/>','fork')}<div class="choice-label compute-label">[ COMPUTE ]</div><div class="choice-label play-label">[ OPTIONAL PLAY ]</div>${sprite('pixel-courier','choice-one',1)}${sprite('beat-maker','choice-two',6)}${sprite('visor-explorer','choice-three',3)}`,
+};
+for(const s of slides){
+ const c=campaigns.find(c=>c.id===s.campaign);
+ const html=`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escape(s.title.replace(/<[^>]*>/g,' '))} | OpenVegas</title><meta name="description" content="${escape(s.caption)}"><link rel="stylesheet" href="campaign.css"><script src="campaign.js" defer></script></head><body><main class="art ${s.layout}" data-theme="${s.theme}" data-campaign="${s.campaign}" data-cover-ms="${s.coverTime??420}" aria-label="${escape(s.alt)}"><header class="brand">[ OPENVEGAS ]</header><div class="edition">${c.name} / ${s.id.slice(-2)}</div><section class="headline"><p class="eyebrow">${s.eyebrow}</p><h1>${s.title}</h1><p class="lede">${s.lede}</p></section><figure class="scene" aria-label="${escape(s.alt)}">${art[s.layout](s)}<figcaption class="sr-only">${escape(s.alt)}</figcaption></figure><footer class="bottom"><p>${s.footer}</p>${s.risk?`<p class="risk">${s.risk}</p>`:''}<span class="page-number">${s.id.slice(-2)} / 03</span></footer><p class="sr-only">Campaign preview. ${escape(c.status)} ${escape(s.caption)}</p></main></body></html>\n`;
+ await fs.writeFile(new URL(s.id+'.html',import.meta.url),html);
+}
+// Retain the original semantic entrypoints without keeping obsolete artwork.
+for(const [name,id] of [['slide-01','companions-01'],['slide-02','companions-02'],['slide-03','arcade-03']])await fs.copyFile(new URL(id+'.html',import.meta.url),new URL(name+'.html',import.meta.url));
+let index=`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Four Campaigns | OpenVegas</title><link rel="stylesheet" href="campaign.css"></head><body class="preview"><header class="preview-header"><div><p class="eyebrow">[ OPENVEGAS ] / ART DIRECTION</p><h1>Four worlds.<br>One pixel universe.</h1></div><div class="controls"><button id="play" aria-pressed="false">Play authored frames</button><button id="reset">Reset</button><button id="format" aria-pressed="false">Reel / 9:16</button><button id="theme">Swap light / dark</button><a href="README.md">Review notes</a><a href="captions.txt">Captions + alt text</a></div></header><p class="preview-intro">Twelve editorial compositions. Local fonts. Authored sprites. Each format is individually composed at native size. These are campaign previews, not a release announcement. ${assetNotice}</p><nav class="campaign-nav">${campaigns.map(c=>`<a href="#${c.id}">${c.name}</a>`).join('')}</nav><main>`;
+for(const c of campaigns){index+=`<section class="campaign-section" id="${c.id}"><header class="section-heading"><div><p class="eyebrow">${c.kicker}</p><h2>${c.name}</h2><p>${c.description}</p></div><p class="release-note">${c.status}</p></header><div class="gallery">`;
+for(const s of slides.filter(s=>s.campaign===c.id))index+=`<article class="preview-card"><div class="viewport"><iframe title="${escape(s.alt)}" src="${s.id}.html?t=${s.coverTime??420}"></iframe></div><h3>${s.id.toUpperCase()}</h3><p class="caption">${s.caption}</p><details><summary>Image description</summary><p>${s.alt}</p></details><a class="open-slide" href="${s.id}.html">Open native composition</a></article>`;
+index+='</div></section>';
+}
+index+='</main><script src="preview.js"></script></body></html>\n';
+await fs.writeFile(new URL('index.html',import.meta.url),index);
+await fs.writeFile(new URL('captions.txt',import.meta.url),slides.map(s=>`${s.id.toUpperCase()}\nCAPTION: ${s.caption}\nALT: ${s.alt}\n`).join('\n'));
+console.log('Built 12 semantic campaign pages, 3 legacy entrypoints, index, and captions.');

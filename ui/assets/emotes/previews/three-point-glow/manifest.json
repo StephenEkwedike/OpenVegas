@@ -1,0 +1,90 @@
+{
+  "schema_version": 1,
+  "pack_id": "openvegas.three-point-glow",
+  "version": "0.1.1",
+  "display_name": "Three Point Glow",
+  "license_id": "openvegas-original-sports-review",
+  "sheet": "sheet.png",
+  "sha256": "26dc179cf22a1ef44d7cb79afd26d20eb3a03ff4c4591c2de54e2d851f7421ce",
+  "frame": {
+    "width": 160,
+    "height": 120,
+    "anchor": [
+      80,
+      117
+    ]
+  },
+  "animations": {
+    "idle": {
+      "frames": [
+        0
+      ],
+      "frame_ms": 1000,
+      "loop": true
+    },
+    "waiting": {
+      "frames": [
+        0
+      ],
+      "frame_ms": 1000,
+      "loop": true
+    },
+    "complete": {
+      "frames": [
+        0,
+        0,
+        0,
+        0,
+        1,
+        1,
+        1,
+        2,
+        2,
+        3,
+        3,
+        4,
+        4,
+        4,
+        5,
+        5,
+        6,
+        6,
+        7,
+        7,
+        8,
+        8,
+        9,
+        9,
+        9,
+        10,
+        10,
+        10,
+        10,
+        10,
+        11,
+        11,
+        11,
+        11,
+        11,
+        11,
+        11,
+        11,
+        11,
+        11,
+        11,
+        11,
+        11,
+        11,
+        11
+      ],
+      "frame_ms": 120,
+      "loop": false
+    }
+  },
+  "reduced_motion_frame": 11,
+  "tags": [
+    "completion",
+    "sports",
+    "original"
+  ]
+}

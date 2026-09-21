@@ -10,7 +10,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 
-from openvegas.payments.service import BillingError, IdempotencyConflict, NotFoundError
+from openvegas.payments.service import BillingError, IdempotencyConflict, NotFoundError, WebhookVerificationError
 from server.middleware.auth import get_current_user
 from server.services.dependencies import get_billing_service, get_db
 
@@ -385,6 +385,9 @@ async def stripe_webhook(request: Request):
     svc = get_billing_service()
     try:
         return await svc.handle_webhook(raw_body=raw, signature=sig)
-    except Exception as e:
-        # Avoid leaking internal details to webhook caller
-        raise HTTPException(status_code=400, detail=f"Webhook error: {e}")
+    except WebhookVerificationError:
+        raise HTTPException(status_code=400, detail="Unable to verify Stripe webhook") from None
+    except Exception:
+        # A signed delivery whose transaction failed must be retried, not accepted.
+        # Provider/DB errors can contain private request data and settings.
+        raise HTTPException(status_code=503, detail="Unable to process Stripe webhook; retry later") from None

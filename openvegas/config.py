@@ -513,6 +513,8 @@ def get_default_model(provider: str) -> str:
     models = config.get("default_model_by_provider", {})
     if provider == "openai":
         return models.get(provider, DEFAULT_OPENAI_MODEL)
+    if provider in {"openrouter", "mistral"}:
+        return str(models.get(provider) or "")
     return models.get(provider, "gpt-4o-mini")
 
 

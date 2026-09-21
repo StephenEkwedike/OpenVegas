@@ -1,0 +1,438 @@
+{
+  "generatedAt": "2026-09-14T07:10:17.629Z",
+  "dimensions": [
+    {
+      "file": "companions-01-slide.png",
+      "width": 1080,
+      "height": 1350,
+      "timeMs": 420
+    },
+    {
+      "file": "companions-02-slide.png",
+      "width": 1080,
+      "height": 1350,
+      "timeMs": 420
+    },
+    {
+      "file": "companions-03-slide.png",
+      "width": 1080,
+      "height": 1350,
+      "timeMs": 420
+    },
+    {
+      "file": "sports-01-slide.png",
+      "width": 1080,
+      "height": 1350,
+      "timeMs": 6250
+    },
+    {
+      "file": "sports-02-slide.png",
+      "width": 1080,
+      "height": 1350,
+      "timeMs": 5700
+    },
+    {
+      "file": "sports-03-slide.png",
+      "width": 1080,
+      "height": 1350,
+      "timeMs": 8200
+    },
+    {
+      "file": "models-01-slide.png",
+      "width": 1080,
+      "height": 1350,
+      "timeMs": 420
+    },
+    {
+      "file": "models-02-slide.png",
+      "width": 1080,
+      "height": 1350,
+      "timeMs": 420
+    },
+    {
+      "file": "models-03-slide.png",
+      "width": 1080,
+      "height": 1350,
+      "timeMs": 420
+    },
+    {
+      "file": "arcade-01-slide.png",
+      "width": 1080,
+      "height": 1350,
+      "timeMs": 420
+    },
+    {
+      "file": "arcade-02-slide.png",
+      "width": 1080,
+      "height": 1350,
+      "timeMs": 420
+    },
+    {
+      "file": "arcade-03-slide.png",
+      "width": 1080,
+      "height": 1350,
+      "timeMs": 420
+    },
+    {
+      "file": "companions-01-reel.png",
+      "width": 1080,
+      "height": 1920,
+      "timeMs": 420
+    },
+    {
+      "file": "companions-02-reel.png",
+      "width": 1080,
+      "height": 1920,
+      "timeMs": 420
+    },
+    {
+      "file": "companions-03-reel.png",
+      "width": 1080,
+      "height": 1920,
+      "timeMs": 420
+    },
+    {
+      "file": "sports-01-reel.png",
+      "width": 1080,
+      "height": 1920,
+      "timeMs": 6250
+    },
+    {
+      "file": "sports-02-reel.png",
+      "width": 1080,
+      "height": 1920,
+      "timeMs": 5700
+    },
+    {
+      "file": "sports-03-reel.png",
+      "width": 1080,
+      "height": 1920,
+      "timeMs": 8200
+    },
+    {
+      "file": "models-01-reel.png",
+      "width": 1080,
+      "height": 1920,
+      "timeMs": 420
+    },
+    {
+      "file": "models-02-reel.png",
+      "width": 1080,
+      "height": 1920,
+      "timeMs": 420
+    },
+    {
+      "file": "models-03-reel.png",
+      "width": 1080,
+      "height": 1920,
+      "timeMs": 420
+    },
+    {
+      "file": "arcade-01-reel.png",
+      "width": 1080,
+      "height": 1920,
+      "timeMs": 420
+    },
+    {
+      "file": "arcade-02-reel.png",
+      "width": 1080,
+      "height": 1920,
+      "timeMs": 420
+    },
+    {
+      "file": "arcade-03-reel.png",
+      "width": 1080,
+      "height": 1920,
+      "timeMs": 420
+    }
+  ],
+  "checks": [
+    "24 native-size PNG exports",
+    "48 format/theme text-bound and exact-font checks",
+    "24 repeat-seek byte-identity checks",
+    "6 completion lifecycle keyframes",
+    "2 contact sheets from actual exports",
+    "390px mobile gallery: no horizontal overflow",
+    "all runtime requests local; external requests blocked"
+  ],
+  "sportsSlots": [
+    {
+      "slug": "skyline-dunk",
+      "pack": "sports/skyline-dunk",
+      "status": "humans-only-cleaned-preview; final-art-and-native-animation-review-pending",
+      "placeholder": false,
+      "completeDurationMs": 5400
+    },
+    {
+      "slug": "bicycle-finish",
+      "pack": "sports/bicycle-finish",
+      "status": "humans-only-cleaned-preview; final-art-and-native-animation-review-pending",
+      "placeholder": false,
+      "completeDurationMs": 5400
+    },
+    {
+      "slug": "three-point-glow",
+      "pack": "sports/three-point-glow",
+      "status": "humans-only-cleaned-preview; final-art-and-native-animation-review-pending",
+      "placeholder": false,
+      "completeDurationMs": 5400
+    }
+  ],
+  "videos": [
+    {
+      "file": "openvegas-companions-reel.mp4",
+      "width": 1080,
+      "height": 1920,
+      "fps": 15,
+      "duration": 18,
+      "codec": "H.264",
+      "audio": "silent"
+    },
+    {
+      "file": "openvegas-models-reel.mp4",
+      "width": 1080,
+      "height": 1920,
+      "fps": 15,
+      "duration": 18,
+      "codec": "H.264",
+      "audio": "silent"
+    },
+    {
+      "file": "openvegas-arcade-reel.mp4",
+      "width": 1080,
+      "height": 1920,
+      "fps": 15,
+      "duration": 18,
+      "codec": "H.264",
+      "audio": "silent"
+    },
+    {
+      "file": "openvegas-sports-reel.mp4",
+      "width": 1080,
+      "height": 1920,
+      "fps": 15,
+      "duration": 18,
+      "codec": "H.264",
+      "audio": "silent"
+    }
+  ],
+  "releaseReady": false,
+  "lifecycle": [
+    {
+      "timeMs": 3999,
+      "width": 1080,
+      "height": 1920,
+      "frames": [
+        0,
+        0,
+        3,
+        5,
+        10
+      ],
+      "clips": [
+        "waiting",
+        "waiting",
+        "waiting",
+        "waiting",
+        "waiting"
+      ],
+      "packs": [
+        "sports/bicycle-finish",
+        "sports/bicycle-finish",
+        "sports/bicycle-finish",
+        "sports/bicycle-finish",
+        "sports/bicycle-finish"
+      ],
+      "sportsSlots": [
+        {
+          "slug": "bicycle-finish",
+          "pack": "sports/bicycle-finish",
+          "status": "humans-only-cleaned-preview; final-art-and-native-animation-review-pending",
+          "placeholder": false,
+          "completeDurationMs": 5400
+        }
+      ],
+      "theme": "light"
+    },
+    {
+      "timeMs": 4000,
+      "width": 1080,
+      "height": 1920,
+      "frames": [
+        0,
+        0,
+        3,
+        5,
+        10
+      ],
+      "clips": [
+        "complete",
+        "complete",
+        "complete",
+        "complete",
+        "complete"
+      ],
+      "packs": [
+        "sports/bicycle-finish",
+        "sports/bicycle-finish",
+        "sports/bicycle-finish",
+        "sports/bicycle-finish",
+        "sports/bicycle-finish"
+      ],
+      "sportsSlots": [
+        {
+          "slug": "bicycle-finish",
+          "pack": "sports/bicycle-finish",
+          "status": "humans-only-cleaned-preview; final-art-and-native-animation-review-pending",
+          "placeholder": false,
+          "completeDurationMs": 5400
+        }
+      ],
+      "theme": "light"
+    },
+    {
+      "timeMs": 4900,
+      "width": 1080,
+      "height": 1920,
+      "frames": [
+        2,
+        0,
+        3,
+        5,
+        10
+      ],
+      "clips": [
+        "complete",
+        "complete",
+        "complete",
+        "complete",
+        "complete"
+      ],
+      "packs": [
+        "sports/bicycle-finish",
+        "sports/bicycle-finish",
+        "sports/bicycle-finish",
+        "sports/bicycle-finish",
+        "sports/bicycle-finish"
+      ],
+      "sportsSlots": [
+        {
+          "slug": "bicycle-finish",
+          "pack": "sports/bicycle-finish",
+          "status": "humans-only-cleaned-preview; final-art-and-native-animation-review-pending",
+          "placeholder": false,
+          "completeDurationMs": 5400
+        }
+      ],
+      "theme": "light"
+    },
+    {
+      "timeMs": 9399,
+      "width": 1080,
+      "height": 1920,
+      "frames": [
+        11,
+        0,
+        3,
+        5,
+        10
+      ],
+      "clips": [
+        "complete",
+        "complete",
+        "complete",
+        "complete",
+        "complete"
+      ],
+      "packs": [
+        "sports/bicycle-finish",
+        "sports/bicycle-finish",
+        "sports/bicycle-finish",
+        "sports/bicycle-finish",
+        "sports/bicycle-finish"
+      ],
+      "sportsSlots": [
+        {
+          "slug": "bicycle-finish",
+          "pack": "sports/bicycle-finish",
+          "status": "humans-only-cleaned-preview; final-art-and-native-animation-review-pending",
+          "placeholder": false,
+          "completeDurationMs": 5400
+        }
+      ],
+      "theme": "light"
+    },
+    {
+      "timeMs": 9400,
+      "width": 1080,
+      "height": 1920,
+      "frames": [
+        0,
+        0,
+        3,
+        5,
+        10
+      ],
+      "clips": [
+        "idle",
+        "idle",
+        "idle",
+        "idle",
+        "idle"
+      ],
+      "packs": [
+        "sports/bicycle-finish",
+        "sports/bicycle-finish",
+        "sports/bicycle-finish",
+        "sports/bicycle-finish",
+        "sports/bicycle-finish"
+      ],
+      "sportsSlots": [
+        {
+          "slug": "bicycle-finish",
+          "pack": "sports/bicycle-finish",
+          "status": "humans-only-cleaned-preview; final-art-and-native-animation-review-pending",
+          "placeholder": false,
+          "completeDurationMs": 5400
+        }
+      ],
+      "theme": "light"
+    },
+    {
+      "timeMs": 9600,
+      "width": 1080,
+      "height": 1920,
+      "frames": [
+        0,
+        0,
+        3,
+        5,
+        10
+      ],
+      "clips": [
+        "idle",
+        "idle",
+        "idle",
+        "idle",
+        "idle"
+      ],
+      "packs": [
+        "sports/bicycle-finish",
+        "sports/bicycle-finish",
+        "sports/bicycle-finish",
+        "sports/bicycle-finish",
+        "sports/bicycle-finish"
+      ],
+      "sportsSlots": [
+        {
+          "slug": "bicycle-finish",
+          "pack": "sports/bicycle-finish",
+          "status": "humans-only-cleaned-preview; final-art-and-native-animation-review-pending",
+          "placeholder": false,
+          "completeDurationMs": 5400
+        }
+      ],
+      "theme": "light"
+    }
+  ]
+}

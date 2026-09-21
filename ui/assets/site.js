@@ -2,6 +2,7 @@ const NAV_LINKS = [
   ["/ui", "Home"],
   ["/ui/how-it-works", "How it works"],
   ["/ui/pricing", "Pricing"],
+  ["/ui/emotes", "Emotes"],
   ["/ui/balance", "Balance"],
   ["/ui/faq", "FAQ"],
   ["/ui/how-to-play", "HOW TO PLAY"],
@@ -380,6 +381,13 @@ export function renderTopNav(targetId = "siteNav") {
   const current = window.location.pathname;
   const existingAnchors = Array.from(nav.querySelectorAll("a[href]"));
   if (existingAnchors.length) {
+    if (!existingAnchors.some((anchor) => anchor.getAttribute("href") === "/ui/emotes")) {
+      const emotes = document.createElement("a");
+      emotes.href = "/ui/emotes";
+      emotes.textContent = "Emotes";
+      nav.appendChild(emotes);
+      existingAnchors.push(emotes);
+    }
     for (const anchor of existingAnchors) {
       const href = anchor.getAttribute("href") || "";
       const active = href === current;

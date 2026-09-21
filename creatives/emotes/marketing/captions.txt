@@ -1,0 +1,47 @@
+COMPANIONS-01
+CAPTION: Meet the OpenVegas pixel companions: a courier, a beat maker, and an explorer. Original concept-approved art in a campaign preview; terminal animation and release review are pending. All companion and sports assets are preview-only. Sales are disabled. External companions require an explicit structured integration and a separately launched companion pane, not universal automatic native hooks. Gemini hooks are observation-only: no live waiting or completion animation. Claude hooks are activity-only and never trigger completion celebrations. The explicit process wrapper observes whole-process exit, not individual answers.
+ALT: Three original pixel companions stand across an aqua editorial stage: Pixel Courier, Beat Maker and Visor Explorer.
+
+COMPANIONS-02
+CAPTION: You compute. They keep time. Beat Maker brings personality to this companion-pane concept. Authored animation, not live terminal footage or a promise of universal overlay support. Separate companion pane conditionally approved for first release; final animation review and later same-window UX remain outstanding. All companion and sports assets are preview-only. Sales are disabled. External companions require an explicit structured integration and a separately launched companion pane, not universal automatic native hooks. Gemini hooks are observation-only: no live waiting or completion animation. Claude hooks are activity-only and never trigger completion celebrations. The explicit process wrapper observes whole-process exit, not individual answers.
+ALT: Beat Maker dances in front of concentric record grooves, with two smaller authored poses framing the rhythm.
+
+COMPANIONS-03
+CAPTION: Make room for wonder. Visor Explorer, Pixel Courier and Beat Maker are original character previews, not purchasable premium packs. Final terminal-art and animation approval remains pending. All companion and sports assets are preview-only. Sales are disabled. External companions require an explicit structured integration and a separately launched companion pane, not universal automatic native hooks. Gemini hooks are observation-only: no live waiting or completion animation. Claude hooks are activity-only and never trigger completion celebrations. The explicit process wrapper observes whole-process exit, not individual answers.
+ALT: Visor Explorer stands in a large orbital portal. Pixel Courier and Beat Maker appear as small constellation companions.
+
+SPORTS-01
+CAPTION: Skyline Dunk. An original human player dribbles, leaps, dunks and celebrates past a generic human defender. The emote uses twelve authored poses over a 5.4-second completion clip. Unreleased preview, not live CLI footage; final art approval and terminal animation review pending. No real athlete or team endorsement. All companion and sports assets are preview-only. Sales are disabled. External companions require an explicit structured integration and a separately launched companion pane, not universal automatic native hooks. Gemini hooks are observation-only: no live waiting or completion animation. Claude hooks are activity-only and never trigger completion celebrations. The explicit process wrapper observes whole-process exit, not individual answers.
+ALT: Skyline Dunk: an original blue-and-amber human basketball player dunks past a generic human defender. Four genuine authored poses form a dribble, leap, dunk and celebration filmstrip.
+
+SPORTS-02
+CAPTION: Task done. What a finish. Bicycle Finish shows an original human footballer and a generic human goalkeeper in a 5.4-second authored action. Process completion does not certify task correctness. Unreleased emote preview, not live product footage; final art approval and terminal animation review remain pending. All companion and sports assets are preview-only. Sales are disabled. External companions require an explicit structured integration and a separately launched companion pane, not universal automatic native hooks. Gemini hooks are observation-only: no live waiting or completion animation. Claude hooks are activity-only and never trigger completion celebrations. The explicit process wrapper observes whole-process exit, not individual answers.
+ALT: Bicycle Finish: an original human footballer performs an overhead kick toward a generic human goalkeeper. A four-pose filmstrip shows setup, flight, strike and celebration.
+
+SPORTS-03
+CAPTION: One celebration. Then, ready. Three Point Glow shows an original human basketball player and human defender. In this authored preview, the 5.4-second completion clip plays once, then returns to idle. Unreleased preview: final art approval, trigger integration and native-terminal review remain release dependencies. No real team or athlete endorsement. All companion and sports assets are preview-only. Sales are disabled. External companions require an explicit structured integration and a separately launched companion pane, not universal automatic native hooks. Gemini hooks are observation-only: no live waiting or completion animation. Claude hooks are activity-only and never trigger completion celebrations. The explicit process wrapper observes whole-process exit, not individual answers.
+ALT: Three Point Glow: an original human basketball player takes a shot against a generic human defender, then celebrates. Four authored poses show setup, release, basket and celebration beneath the large action frame.
+
+MODELS-01
+CAPTION: Choose your route. Campaign preview of backend-funded compute through OpenVegas: balance, backend, available model. Availability depends on account, funding, catalog, and provider configuration. Not a provider subscription, quota reset, or promise of unlimited use. All companion and sports assets are preview-only. Sales are disabled. Backend model routing is separate from external CLI emote compatibility.
+ALT: Pixel Courier stands at the origin of an illustrated transit map: OpenVegas balance routes through the backend to available models.
+
+MODELS-02
+CAPTION: Different models. Your call. Backend-funded multi-model switching campaign preview, subject to the enabled catalog, account and provider availability. The route map is illustrative. No automatic routing, universal model access, or shared cross-provider context is implied. All companion and sports assets are preview-only. Sales are disabled. Backend model routing is separate from external CLI emote compatibility.
+ALT: Visor Explorer stands at an aqua transit junction with branches marked OpenAI, Anthropic and available catalog. Routes are illustrative, not a product screenshot.
+
+MODELS-03
+CAPTION: Same desk. Another lens. A campaign concept for choosing an available model for a request with OpenVegas-funded compute. Cross-model context continuity and automatic switching are not claimed. Review backend funding and account availability before publication. All companion and sports assets are preview-only. Sales are disabled. Backend model routing is separate from external CLI emote compatibility.
+ALT: Three tall perspective windows surround the companion cast, suggesting three different model viewpoints without depicting a real application.
+
+ARCADE-01
+CAPTION: Credits in. Ideas out. OpenVegas credits can be used directly for AI compute. Games are optional, not a prerequisite. Illustration only; account and provider availability apply. No guarantee of output quality, runtime extension, or financial return. All companion and sports assets are preview-only. Sales are disabled.
+ALT: Pixel Courier follows a bright direct path from credits to compute, with a small side branch marked optional arcade.
+
+ARCADE-02
+CAPTION: Work has a side quest. OpenVegas offers horse, blackjack, roulette and other games as an optional credit path. Games can win or lose credits. This is original campaign artwork, not a live game, offer, payout claim, or promise of profit. All companion and sports assets are preview-only. Sales are disabled.
+ALT: Beat Maker and Pixel Courier frame a large abstract roulette-inspired disc and editorial labels for horse, blackjack and roulette. No game outcome is shown.
+
+ARCADE-03
+CAPTION: Make room for more. Fund AI usage directly, track balance and activity, or choose optional games. Games can win or lose credits; no guaranteed profit, runtime multiplier, or provider usage-limit reset. Product-flow illustration; current account and provider availability apply. All companion and sports assets are preview-only. Sales are disabled.
+ALT: The three pixel companions meet at a fork in the road, with a solid compute route and a separate optional play route. The composition emphasizes user choice, not winnings.

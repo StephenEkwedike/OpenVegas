@@ -1,0 +1,464 @@
+version = 1
+title = "OpenVegas: Sprites, Emotes, Model Switching And Marketing"
+max_workers = 3
+objective = '''Build purchasable pixel companions and completion emotes, a searchable Emotes storefront, safe integrations with supported external coding terminals, easy backend-funded model switching, and art-led marketing exports. Reuse the existing OpenVegas code and brand. Show real visual prototypes for approval before expanding the art catalog. This document is the implementation assignment, not a claim that these features already exist.'''
+
+[[workstreams]]
+id = "recon"
+owner = "Coordinator with Workers A, B and C (read-only first pass)"
+objective = "Revalidate the baseline and expose integration limits before implementation."
+paths = ["Existing terminal/avatar, store/payment, gateway/model, website, packaging and creative paths listed below; read-only initially."]
+deliverables = ["Revision and dirty-state baseline; current executable/package path; actual runtime and dependency versions.", "Evidence-backed gap map with no credentials; installed external CLI hook/capability matrix.", "User-visible prototype plan, paid-service access/rights questions, and locked ownership for shared files."]
+checks = ["Confirm which existing features work rather than inferring from file names or HTTP 200.", "Record available test services and separate local, staging and production resources."]
+
+[[workstreams]]
+id = "contracts"
+owner = "Coordinator"
+depends_on = ["recon"]
+objective = "Agree on the small shared contracts before workers edit in parallel."
+paths = ["Proposed openvegas/emotes/ manifest/event interfaces; API schemas; Supabase migrations; shared CLI entry points; dependency/package manifests."]
+deliverables = ["Versioned asset manifest, runtime event contract, entitlement state machine and capability catalog interfaces.", "Explicit decisions on renderer compatibility, purchase currency, offline licenses, feature flags and rollout."]
+checks = ["No shared-file collisions or secret-bearing hook payloads; schema fixtures available to all workers.", "Data migrations are additive and production application remains a separate approval gate."]
+
+[[workstreams]]
+id = "art"
+owner = "Worker A: visual assets and animation engine"
+depends_on = ["contracts"]
+objective = "Create and show original sprite and completion-animation prototypes."
+paths = ["scripts/generate_dealer_sheet.py (reference only); proposed asset import/preview scripts; proposed emote source packs; ui/assets/avatar-* compatibility adapters."]
+deliverables = ["Three original character concepts with contact sheets, native-size terminal previews and short dancing loops.", "Three 4-7 second original sports emote storyboards and at least one polished runnable preview before catalog expansion.", "Artist submission kit, validated PNG/JSON pack, provenance and editable source assets; user approval recorded."]
+checks = ["SPR-ART-01: original artwork and native-terminal previews receive explicit user approval; the old procedural generator is not the quality baseline.", "SPR-DANCE-02: authored pose-changing dance frames pass contact-sheet, repeated-loop and real-terminal review; moving or scaling one static sprite does not pass.", "Stable silhouettes, fixed anchor, pixel-grid alignment, alpha correctness and smooth loop seam on light/dark backgrounds.", "No athlete/team/logo asset published for sale without documented clearance; no generator watermark removal.", "A fresh valid designer pack imports and previews without changes to runtime code."]
+
+[[workstreams]]
+id = "runtime"
+owner = "Worker A after the art gate; Coordinator integrates shared CLI changes"
+depends_on = ["art"]
+objective = "Ship the emote command and safe terminal lifecycle integrations."
+paths = ["Proposed openvegas/emotes/ runtime, import, renderers and adapters; openvegas/tui/sprite_render.py; assigned CLI integration patch; tests/test_tui/ and new emote tests."]
+deliverables = ["One-line openvegas emote entry point, owned-pack picker, previews, selection and diagnostics.", "Waiting and completion state integration within OpenVegas; tested adapters for external CLI versions.", "Opt-in setup/uninstall with config backup and non-destructive merge; documented fallback when a terminal cannot support overlays."]
+checks = ["SPR-LIFE-03: busy animation follows real turn lifecycle, celebrates exactly once per successful logical turn and stops on cancellation/failure.", "SPR-TERM-04: a single render owner preserves input, cursor, selection, scrollback and streamed output; no overlapping animation loops.", "No duplicate completion events; errors, cancellation, retries and individual tool finishes never masquerade as whole-task success.", "User can type, select, resize and scroll without snap-to-bottom, erased content or focus loss.", "Non-TTY/NO_COLOR/reduced-motion behavior, offline entitlement behavior, event bounds and cleanup pass."]
+
+[[workstreams]]
+id = "commerce"
+owner = "Worker B: storefront, payments and entitlements; Coordinator owns migrations"
+depends_on = ["contracts"]
+objective = "Make sprites and completion emotes discoverable, purchasable and owned."
+paths = ["openvegas/store/; server/routes/store.py; server/routes/payments.py and openvegas/payments/ only as required; proposed ui/emotes.html; entitlement tests."]
+deliverables = ["Searchable Emotes tab with preview, compatibility, price, Owned/Equip and accessible light/dark styling.", "Server-authoritative durable entitlements, private pack delivery, restore-on-new-device and auditable purchase history.", "Stripe test-mode top-up to $V purchase to entitlement to terminal activation end-to-end evidence.", "Free local administrator previews without a client-controlled production bypass."]
+checks = ["Insufficient funds, concurrent clicks, idempotent replay, canceled checkout, pending payment, refund/revocation and cross-user access pass.", "One confirmed purchase means exactly one wallet debit and entitlement; checkout redirect alone cannot grant anything.", "Live Stripe credentials and production customer balances are never used by the test suite."]
+
+[[workstreams]]
+id = "models"
+owner = "Worker C: provider routing and model switching"
+depends_on = ["contracts"]
+objective = "Offer real validated model switching using OpenVegas-managed provider API access."
+paths = ["openvegas/gateway/; server/routes/models.py; server/services/provider_threads.py; provider catalog/credential contracts; assigned CLI model-picker patch; gateway tests."]
+deliverables = ["Discoverable model picker with explicit provider/model choice, availability and capability handling.", "Mistral provider integration and dynamic reviewed model catalogs alongside existing OpenAI, Anthropic and Gemini routes.", "Canonical conversation continuity across switches, per-user isolation, cancellation and single-charge accounting.", "Operator setup/runbook for company-owned API organizations/credentials, without customer BYOK or consumer-session scraping."]
+checks = ["Switching is enabled in intended supported environments, validates before state change and does not silently lose context.", "Unsupported tools/images/context windows and unavailable models produce actionable fallbacks, not crashes or false parity claims.", "Mocked contracts cover every provider; actual paid provider calls remain NOT RUN until separately authorized."]
+
+[[workstreams]]
+id = "marketing"
+owner = "Worker A after runtime; Worker B supplies storefront captures"
+depends_on = ["art", "runtime", "commerce", "models"]
+objective = "Produce art-led social campaigns using approved assets and working product footage."
+paths = ["creatives/; my-video/; reusable source compositions and export scripts; ui/index.html and ui/assets/theme.css as read-only brand references."]
+deliverables = ["Approved moodboard and art-heavy keyframes before full campaign production.", "Four distinct campaigns: pixel companions, completion emotes, model switching, and OpenVegas games/product value.", "Editable compositions, PNG carousels, MP4 reels, contact sheets, captions and one-command reproducible exports."]
+checks = ["Real terminal/UI footage, readable mobile copy, exact brand fonts, no internal Hook/Proof labels or note-bar boilerplate.", "No false implication that emotes reset Claude Code/Codex subscription quotas, guarantee gambling profits or have celebrity endorsement.", "Exported frames and videos are visually reviewed, not merely reported as rendered successfully."]
+
+[[workstreams]]
+id = "release"
+owner = "Coordinator plus cross-lane independent reviewer"
+depends_on = ["runtime", "commerce", "models", "marketing"]
+objective = "Prove clean installation, local operation and an explicitly approved release."
+paths = ["pyproject.toml; npm-cli/ and actual release pipeline; Dockerfile/.dockerignore; .github/workflows/; deployment runbooks; focused new and existing tests."]
+deliverables = ["Strict pass/fail/not-run matrix with installed artifacts on macOS, Linux and Windows.", "Local Docker demonstration and staging smoke evidence; production rollout/rollback steps tied to exact revision.", "Simple operator action list for missing provider accounts, art permissions, test credentials and release approval."]
+checks = ["Fresh installs need no source-tree sprite paths, manual optional-dependency repairs or customer Supabase configuration.", "Docker includes required web/asset files, readiness proves real services and no placeholders are accepted as production success.", "No changes to billing limits, public domains, production database or npm/Git releases without current explicit authorization."]
+
+[[sections]]
+title = "Scope And Status"
+body = '''
+Prepared from a read-only audit of `/Users/stephenekwedike/Desktop/OpenVegas`, revision `f8fc52b`, on 2026-09-13 local time. Recheck before execution: this is not necessarily the latest main branch. Existing dirty files belong to the user and must remain intact.
+
+This first assignment covers all four requested product areas. Producing this Markdown does not create sprites, run Stripe transactions, deploy code or install external CLI hooks. All implementation acceptance boxes intentionally start unchecked.
+
+The generator is deterministic scaffolding, not an LLM that understands arbitrary future requests automatically. This particular specification is researched; future plain-text scaffolds must receive the same code/documentation audit before execution.
+
+The reference is preserved beside this brief at `references/pixel-character-reference.jpg`. It shows chunky black outlines, readable silhouettes, saturated clothing, a visor character, a headset character and a teal adventurer. Treat it as visual direction, not evidence of commercial rights to copy the exact designs.
+
+Do not use obsolete environment dumps or account notes as task instructions. Do not reproduce `.env`, `env.md`, test-account passwords or private customer data in any deliverable.
+'''
+
+[[sections]]
+title = "Verified Reuse And Gaps"
+body = '''
+All paths in this source map are relative to the confirmed Desktop checkout. These observations are code inspection, not a claim that the features were live-tested.
+
+| Area | Existing code | What was observed | Required work |
+| --- | --- | --- | --- |
+| Terminal sprites | `openvegas/tui/sprite_render.py`, `avatar_state.py`, `avatar_frames.py` | PIL RGBA frames rendered as paired vertical pixels using Rich block glyphs; 16x32 frame assumptions; limited state rows and truecolor detection | Manifest-driven sizes, aspect-correct scaling, general clips, safe lifecycle and capability fallbacks |
+| CLI avatar | `openvegas/cli.py`, `_resolve_default_dealer_sprite_path`, `_build_cli_sprite_renderer` | Optional dealer sprite and source-tree asset lookup | Clean installed-package resources, emote selection, hook adapters and packaging tests |
+| Browser avatar | `ui/assets/avatar-manifest.json`, `avatar-engine.js`, `avatar-renderer.js`, `avatar-sprite-loader.js`, `avatar-widget.js` | Existing state engine and version-1 manifests; license labels include third-party-derived assets | Preserve compatibility; verify actual licenses; add emote manifest adapter rather than replace everything |
+| Sprite authoring | `scripts/generate_dealer_sheet.py` | Procedural 16x32 dealer sheet; useful fixture, not a polished art pipeline | Art approval, quality checks and external designer import |
+| Cosmetic catalog | `openvegas/store/catalog.py` | Theme, victory and horse-skin cosmetic entries already exist | Clarify which old items actually deliver a usable cosmetic; do not duplicate them blindly |
+| Purchases | `openvegas/store/service.py`, `server/routes/store.py`, migration `004_store_fulfillment.sql` | Store orders and wallet redemption; fulfillment creates inference grants for AI packs, not a general cosmetic entitlement | Durable cosmetic ownership and transactional fulfillment with access enforcement |
+| Stripe | `openvegas/payments/service.py`, `stripe_gateway.py`, `server/routes/payments.py` | Checkout, signature verification, event deduplication and paid-session handling exist | Reuse and extend tests; do not replace the working payment gateway |
+| Models | `openvegas/gateway/catalog.py`, `inference.py`, `server/routes/models.py` | Database-backed catalog; provider dispatch recognizes OpenAI, Anthropic and Gemini | Add Mistral, account-visible model discovery, capability/pricing review and consistent errors |
+| Switching | `openvegas/cli.py`, `/provider`, `/model` | `OPENVEGAS_CHAT_ALLOW_MODEL_SWITCH` defaults to 0; provider switch resets current context thread after confirmation; three-provider allowlist | Supported default UX, validation, canonical history transfer and clear context limits |
+| Provider credentials | `openvegas/gateway/inference.py`, `_resolve_provider_api_key` | Latest active provider/environment credential record resolves a server environment alias | This is not a pool of logged-in consumer accounts; extend authorized API routing if needed |
+| Provider context | `server/services/provider_threads.py` | Scoped context storage/compaction exists | Cross-provider continuity without leaking other users' messages or replaying completed tools |
+| Branding | `ui/index.html`, `ui/assets/theme.css`, `layout.css` | Space Grotesk, IBM Plex Mono, bracketed wordmark and light/dark theme | Reuse exact assets/type, not an invented new brand |
+| Creatives | `creatives/design-skill.md`, carousel folders; `my-video/src/Root.tsx`, `Composition.tsx`, `HorseRace.tsx` | Existing HTML carousels and a Remotion horse-race composition at 1920x1080/30 fps | Art-led templates, correct output ratios, frame-driven motion and polished exports |
+| Distribution | `pyproject.toml`, `npm-cli/package.json`, `.github/workflows/ci.yml`, `.dockerignore` | Source/package versions and launcher naming differ; asset inclusion needs attention | Verify the actual published npm/binary release source; do not assume this manifest alone updates every user |
+
+Useful existing test anchors: `tests/test_tui/test_sprite_render.py`, `tests/test_auth/test_avatar_manifest_validation.py`, `tests/test_auth/test_avatar_ui_contract.py`, `tests/test_store/test_service.py`, `tests/test_billing/test_billing_service.py`, `tests/test_security/test_provider_thread_service.py`, and `tests/test_deployment/test_npm_launcher.py`. Locate additional gateway and billing coverage before changing contracts.
+'''
+
+[[sections]]
+title = "External Research And Feasibility Decisions"
+body = '''
+Revalidate these sources and the installed application versions at implementation time.
+
+1. OpenArt can help explore sprite concepts, but its landing page does not establish a guaranteed export contract for aligned animation frames. Its marketing FAQ and current terms differ on commercial use. The terms currently restrict commercial output to Plus-or-higher subscriptions and prohibit automated service access; do not build a scraping integration or assume free generations can be sold. Confirm the chosen model/plan and keep license evidence. Sources: [sprite page](https://openart.ai/generator/sprite), [current terms](https://openart.ai/suite/terms).
+2. Aseprite supports batch exports of sheets and JSON metadata, making it a useful optional artist tool rather than a required runtime dependency. Accept standard PNG + JSON so other editors also work. Do not require users to buy authoring software. Source: [Aseprite CLI](https://www.aseprite.org/docs/cli/).
+3. Claude Code documents `UserPromptSubmit`, `Stop` and failure/lifecycle hooks. Notifications are not arbitrary graphics: its `terminalSequence` allowlist excludes cursor/color/image drawing, and direct `/dev/tty` access is unavailable to hooks. Use a passive hook that signals an owned renderer, not terminal painting inside the hook. Source: [Claude hooks](https://code.claude.com/docs/en/hooks).
+4. Gemini CLI documents `BeforeAgent` and `AfterAgent`; the latter can also trigger retries if a hook rejects a response. The emote adapter must never deny a response, change context, stop the agent or return exit code 2. Use only passive event delivery. Source: [Gemini hook reference](https://geminicli.com/docs/hooks/reference/).
+5. Codex documents a user-level `notify` command receiving JSON. Project-local configuration cannot override it. Inspect the installed version's actual notification event schema and test it before promising turn-completion or start events; this research verified the configuration surface, not every payload/version. Preserve an existing user's notifier rather than overwriting it. Source: [Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).
+6. Kitty defines image layering and cursor-preserving placement, but that is a terminal-specific protocol, not a universal transparent overlay API. Test only supported protocol/version combinations and clean up only OpenVegas-owned image IDs. Source: [Kitty graphics protocol](https://sw.kovidgoyal.net/kitty/graphics-protocol/).
+7. Mistral exposes account-accessible model listings. Discover model IDs rather than embedding a stale Mixtral/model-name list; do not enable a model before access, capabilities and pricing are verified. Source: [Mistral models API](https://docs.mistral.ai/api/endpoint/models).
+8. Stripe supports isolated testing environments. Use test credentials/cards and test webhook delivery for this project, with explicit checks preventing accidental live mode. Fake-gateway unit tests are useful but are not proof of a Stripe integration. Source: [Stripe testing](https://docs.stripe.com/testing).
+
+Engineering conclusion: one universal command is achievable as an entry point, but a non-blocking animation over every third-party terminal UI is not established. Keep that requirement behind a feasibility gate. First prove an owned layout inside OpenVegas and a separate renderer pane/window for external CLIs. Offer in-place effects only where tested; explain the fallback before selling compatibility. Do not silently substitute a side pane for the requested full-width experience and call it identical.
+'''
+
+[[sections]]
+title = "Mandatory Sprite Remediation Gates"
+body = '''
+The user reports that the current generator produces poor artwork, does not actually dance, and does not synchronize sensibly with terminal activity. Reproduce and record those failures first; do not assume they all originate in asset generation rather than rendering or lifecycle wiring. These four requirements are release-blocking, not optional polish. They apply to the default shipped experience, not only an isolated demo command.
+
+Reusing `scripts/generate_dealer_sheet.py` is optional. Replace the production authoring path and/or runtime components if they cannot pass these gates. Keep an old asset only for explicitly labeled compatibility/test fixtures; do not ship it as the new default and claim the issue is resolved. Preserve purchases and valid user preferences when migrating to new pack versions.
+
+### SPR-ART-01: Better artwork
+
+- [ ] Produce three original, deliberately designed pixel-character concepts with readable anatomy, expressive silhouettes, consistent outlines, restrained palettes and transparent backgrounds. Crude procedural placeholders are not finished store assets.
+- [ ] Show the user a contact sheet, an animated preview and an actual terminal capture on both light and dark backgrounds. Include native display size and nearest-neighbor enlargement so detail and real readability can both be judged.
+- [ ] Keep previews tied to the exact pack/version that will ship; do not obtain approval on a high-resolution mockup and silently replace it with an inferior terminal reduction.
+- [ ] Record the user's explicit art approval and the chosen pack/version before expanding the catalog or labeling the art production-ready. Unapproved artwork remains pending even if all automated tests pass.
+
+### SPR-DANCE-02: Actual dancing
+
+- [ ] Author a recognizable full-body dance cycle with changing limb/body poses: weight shifts, bent knees/steps and coordinated arm movement. For the first approved loop, supply at least six authored frames containing at least four visibly distinct body poses; repeated holds can be added for timing.
+- [ ] Reject an implementation whose only motion is translating, bobbing, rotating, recoloring or resizing the same static image. Extra frame files or differing hashes alone do not prove pose animation; inspect the contact sheet and slowed playback.
+- [ ] Verify foot/anchor consistency, complete limb silhouettes and a smooth last-to-first transition. Run at least ten consecutive cycles in the real renderer with no visible snap, accidental blank frame, drift or clipping.
+- [ ] Keep the loop phase continuous across repeated busy/tool/stream events. A new token or status message must not continually restart the dance at frame zero. The reduced-motion/static accessibility option is separate and does not count as passing the normal dance requirement.
+
+### SPR-LIFE-03: Intelligent timing
+
+- [ ] Start the chosen busy/dance animation when an accepted task/turn actually begins. Keep it coherent across provider processing, streamed output, tool calls and retries within that same turn; do not confuse those intermediate events with completion.
+- [ ] Pause the busy dance and show a quiet waiting state when the agent needs approval or user input. Resume only on an authoritative execution-resumed event. Do not show perpetual work during idle, disconnected or failed states.
+- [ ] Play one 4-7 second completion emote only after the top-level turn's authoritative successful terminal outcome. An individual tool result, subagent completion, partial answer or canceled turn must not trigger success.
+- [ ] Enforce at most one celebration per `(source, session_id, turn_id)`, including reconnects and duplicate notifications with different event IDs. Preserve the semantic completion guard for the session lifetime (or a bounded persisted replay window); event-ID deduplication is a separate transport concern.
+- [ ] Cancellation, final failure, session exit and a newly started turn cancel any pending or active celebration and retire the old animation task. Target visible response within 150 ms after the renderer receives the state-change event; measure this separately from provider/network latency.
+- [ ] Reject late events from an old turn using session/turn identity and the adapter's authoritative ordering or generation token. A completion arriving after cancellation must not resurrect a celebration; concurrent terminal sessions must not trigger each other's sprites.
+- [ ] Unsupported or missing lifecycle hooks yield an honest manual/limited-support mode, not a timer, text heuristic or false success signal. Record limitations per tested CLI/version.
+
+### SPR-TERM-04: Proper terminal integration
+
+- [ ] Route every OpenVegas frame through one compositor/render owner. Do not let separate Rich Live displays, prompt-toolkit refresh loops or repeated toggles compete to write the same terminal region.
+- [ ] Reserve an explicitly owned, visible animation region. The sprite must not sit underneath a toolbar, cover the prompt, obscure the response or move the cursor. Retire old frame tasks before switching packs or starting another effect.
+- [ ] Keep typed text, cursor position, multiline edits, history navigation, paste, selection, voice-prefill insertion and Enter submission intact while animation runs. Cosmetics must neither capture input focus nor delay provider output.
+- [ ] Keep scrollback content intact and let the user remain scrolled up, including with the scrollbar, during activity and completion. No snap-to-bottom, clear-screen tricks, blank terminal bars, duplicated prompts/responses or redraw-generated scrollback spam.
+- [ ] If primary-terminal repainting cannot preserve scroll position safely, use a demonstrated owned companion pane/window or disable unsafe in-place animation with a clear compatibility message. Do not claim universal overlays or silently treat a materially different fallback as the approved UX.
+- [ ] Exercise rapid toggles, resize/narrow windows, high-volume streaming, pack-load failure, renderer exceptions and Ctrl+C. The coding session remains usable, animation resources are released, and terminal modes/colors/cursor are restored on exit.
+
+### Required regression evidence
+
+| Test ID | Scenario | Strict acceptance evidence |
+| --- | --- | --- |
+| SPR-ART-01 | Compare new art with the reported poor baseline | Approved contact sheet plus recordings of the same pack in a real terminal; browser mockups alone fail |
+| SPR-DANCE-02 | Ten dance loops while receiving repeated busy events | Authored pose review, frame-clock checks and native playback show a continuous, recognizable dance without frame-zero resets |
+| SPR-LIFE-03 | Start -> stream -> tool -> retry -> approval pause -> resume -> final success | One coherent active state, quiet approval pause and exactly one completion effect, never one per tool/token |
+| SPR-LIFE-03 | Duplicate final events with different event IDs; reconnect/replay | One celebration for the logical turn; no extra clip after replay |
+| SPR-LIFE-03 | Cancel/fail -> late success, new turn during completion, two sessions | No stale success, no cross-session animation, prompt recovery within the measured local-response target |
+| SPR-TERM-04 | Type mid-sentence, move cursor, paste and insert a voice transcript during animation | Exact expected input text/cursor retained; one submitted prompt and one normal response |
+| SPR-TERM-04 | Scroll up with wheel and side scrollbar during streaming and completion | Position stays where the user left it; selection and historical output remain intact |
+| SPR-TERM-04 | Resize, rapid toggle, missing pack, render exception and exit | No overlapping tasks/frames, hidden sprite, leaked process, stuck cursor or broken terminal state |
+
+Use fake-clock/event-sequence tests and a PTY terminal harness where appropriate, plus real terminal recordings for visual, mouse-selection and scrollback behavior that unit tests cannot establish. Run the claimed macOS/Linux/Windows and external-CLI combinations, and mark unavailable combinations NOT RUN. For each gate, record the exact artifact, test result and remaining limitation; no generic 'sprites work' sign-off.
+'''
+
+[[sections]]
+title = "Sprites And Visual Approval"
+body = '''
+Create original characters with the reference's pixel density, expressive silhouettes and confident colors, not photographic backgrounds. Suggested initial concepts: a visor-wearing terminal explorer, a headset beat-maker and an aqua courier. No tracing or reproducing identifiable third-party characters.
+
+- Show a contact sheet of all three concepts on light/dark terminal backgrounds and at actual terminal display size, not just enlarged mockups.
+- Start with a 32x48 or 32x64 logical-pixel experiment and test the existing 16x32 renderer adapter; final geometry is chosen from readability evidence, not assumed compatibility.
+- Use integer nearest-neighbor scaling, a small deliberate palette, transparent backgrounds and a fixed foot anchor. Preserve pixel aspect ratio when using two vertical pixels per terminal cell.
+- Prepare idle/blink, waiting/dance, working, success and error poses. A 6-12 frame dance loop at approximately 8-12 fps is an initial art target, not a universal frame-rate guarantee.
+- Deliver animated previews and sprite sheets, then ask which direction to polish. Do not produce dozens of paid assets before the first art direction is accepted.
+- Use an available authorized image-generation tool for concepts if allowed; the tool-specific rules still apply. Converting concepts into temporally stable pixel frames needs review and often manual authoring.
+- If the art is not good enough, supply the designer kit and honest limitations instead of presenting primitive placeholder rectangles as finished artwork.
+
+Completion sequences requested by the user must remain represented in the creative backlog:
+
+| Requested concept | 4-7 second storyboard | Public unlicensed prototype |
+| --- | --- | --- |
+| LeBron James, Lakers jersey/stadium, dunk over an NPC | Dribble/approach, leap, dunk, landing/celebration, fade | Original power-forward character in an original arena, no real player/team marks |
+| Cristiano Ronaldo, Champions League bicycle kick and iconic celebration | Cross approaches, bicycle kick, goal, landing/celebration, fade | Original striker with an original kit and celebration |
+| Steph Curry, GSW jersey, three-pointer and camera-facing celebration | Set feet, release, ball arc/net, camera-facing celebration, fade | Original sharpshooter with original colors and celebratory gesture |
+
+Real athlete likenesses, names, team/competition marks, broadcast footage and music need a documented commercial-rights review before sale or promotion. A paid AI plan is not evidence of those rights. Keep recognizable concepts private/pending clearance; do not imply an endorsement. The goal is an engine that accepts cleared versions later without code changes.
+
+Animation beats use authored timing, not motion inferred from random jitter. Add anticipation, readable action silhouettes, impact accents and a clean exit. Default silent, no flashing strobe; provide reduced-motion/static alternatives and a global off switch for emotes.
+'''
+
+[[sections]]
+title = "Designer Import Contract"
+body = '''
+Proposed new contract, not existing code. Keep the browser avatar version-1 schema working via an adapter. Store final manifests with the pack; resolve display names and prices from the server catalog rather than trusting downloaded metadata.
+
+```json
+{
+  "schema_version": 1,
+  "pack_id": "openvegas.pixel-courier",
+  "version": "1.0.0",
+  "display_name": "Pixel Courier",
+  "license_id": "original-commission-pending-review",
+  "sheet": "sheet.png",
+  "sha256": "REPLACE_WITH_COMPUTED_SHA256",
+  "frame": {"width": 32, "height": 48, "anchor": [16, 47]},
+  "animations": {
+    "idle": {"frames": [0, 1, 2, 3], "frame_ms": 180, "loop": true},
+    "waiting": {"frames": [4, 5, 6, 7, 8, 9, 10, 11], "frame_ms": 100, "loop": true},
+    "complete": {"frames": [12, 13, 14, 15, 16, 17], "frame_ms": 800, "loop": false}
+  },
+  "reduced_motion_frame": 0,
+  "tags": ["companion", "dance", "original"]
+}
+```
+
+The complete clip above totals 4.8 seconds and illustrates schema shape only; six held poses are not the final quality target for sports animation. Richer scene packs can compose separately authored foreground, arena, ball and effects layers after the single-sheet contract works. Do not add a general scripting language to asset packs.
+
+Designer handoff: editable `.aseprite` or equivalent source, transparent PNG sheet, frame durations/tags, static thumbnail, preview GIF/MP4, license/author record and a validated runtime manifest. For example, with an installed licensed Aseprite executable:
+
+```sh
+aseprite -b pixel-courier.aseprite --sheet sheet.png --data aseprite.json --format json-array
+```
+
+Proposed engine tooling should convert editor metadata, validate packs, emit a contact sheet and show browser/terminal previews. It must compute checksums itself; reject the placeholder above. Artist import is a local/staging workflow, not an unauthenticated public upload endpoint.
+
+Validation requirements: supported schema version; safe relative paths; no traversal, symlinks, remote file references or executables; archive expansion and decoded-pixel limits; valid PNG dimensions/frame bounds; finite positive durations; loop policy; anchored frames; clip length; hash match; safe filenames/titles with no terminal escape sequences. No arbitrary JavaScript, Python, shell or SVG scripts in packs. New valid assets must work without editing the renderer.
+
+Keep public catalog thumbnails/previews separate from entitlement-protected full-resolution packs. Signed downloads, checksum validation, atomic cache writes and versioned rollback protect delivery integrity. Downloaded art can still be copied; do not promise impossible DRM.
+'''
+
+[[sections]]
+title = "Terminal Runtime And External CLI UX"
+body = '''
+Proposed user experience (commands are specifications to implement, not available today):
+
+```sh
+openvegas emote                         # discover/select; no surprise configuration edits
+openvegas emote preview pixel-courier
+openvegas emote equip pixel-courier
+openvegas emote setup                   # detect supported CLIs, show changes, ask before installing hooks
+openvegas emote doctor                  # versions, capability/fallback, entitlement state; no secrets
+openvegas emote off
+openvegas emote uninstall-hooks
+```
+
+Provide one shared implementation included with the normal OpenVegas install. External CLI users can use emotes without running OpenVegas chat or switching their AI provider. Initially reuse the existing distribution rather than maintain a second incompatible runtime. Verify the actual published npm package name before writing installation copy; a smaller standalone package can reuse the same engine later if size evidence justifies it.
+
+Do not hook into the user's current Codex/Claude/Gemini configuration while building this feature. The future `setup` command must show a diff, preserve existing hooks, back up files with restrictive permissions, and remove only OpenVegas-owned entries on uninstall. Deal with JSON/TOML and shell quoting on each OS explicitly. Codex's single notifier may need an opt-in multiplexer preserving the old command; never silently replace it.
+
+Internal event proposal:
+
+```json
+{
+  "schema_version": 1,
+  "source": "openvegas",
+  "session_id": "opaque-local-session-id",
+  "turn_id": "opaque-local-turn-id",
+  "event_id": "stable-source-event-id",
+  "phase": "turn_completed",
+  "outcome": "success"
+}
+```
+
+Use a short-lived passive hook process to validate event metadata and send it to a separately owned renderer. Do not send prompt text, responses, environment dumps or API credentials. Bound payload size, queue length and send time; use a user-private Unix socket or Windows named-pipe equivalent. Any loopback alternative needs a per-user session capability, not an unauthenticated public listener. Treat hook input as untrusted; never execute payload content or arbitrary asset paths.
+
+Adapter exit behavior is fail-open for cosmetics: renderer missing/busy must not interrupt the coding agent. No blocking sleeps, model calls, access-token refresh or downloads inside a completion hook; cache verified packs beforehand. Do not output art or logs to an upstream hook protocol stdout. Use the host's documented success response shape only.
+
+State machine: OFF -> IDLE -> ACTIVE_DANCE on a verified turn-start; ACTIVE_DANCE -> AWAITING_USER on a verified approval/input pause and back on resume; ACTIVE_DANCE -> COMPLETE for 4-7 seconds only on final successful turn -> IDLE. ERROR/CANCEL are separate neutral states that stop the active animation. The manifest's waiting dance maps to ACTIVE_DANCE, not to AWAITING_USER. Deduplicate transport events separately, and enforce completion once per `(source, session_id, turn_id)` even when event IDs differ. Reject stale events, keep no more than one eligible celebration, cancel on the next turn and clean up on disconnect. The detailed SPR-LIFE-03 gate governs event ordering and recovery. A final answer is not proof that all user goals passed tests; the celebration means the CLI turn finished successfully, not that the code is correct.
+
+For providers/CLIs without reliable start events, do not fake a waiting indicator. A wrapper process exiting signals session completion, not each answer; a shell prompt returning is not a universal LLM-turn hook. Never guess from silence, text content or changing terminal output.
+
+Renderer compatibility gate:
+
+| Surface | First supported approach | Required proof |
+| --- | --- | --- |
+| OpenVegas chat | Single owner of composer/render area; reuse state events | No competing Rich Live/prompt-toolkit refresh loops; voice and normal output unaffected |
+| External CLI with hooks | Owned companion pane/window fed by passive IPC | Input, selection and scrollback in primary CLI remain unchanged; explain pane fallback to users |
+| Graphics-capable terminal | Optional graphics backend behind explicit detection/opt-in | Cursor/layer cleanup and compatibility with the host's repaint behavior; only owned image IDs deleted |
+| Plain ANSI terminal | Half-block sprite in an owned region, otherwise static/manual preview | Color/Unicode and cell-aspect checks; no drawing over foreign content |
+| SSH/tmux/non-TTY | Explicitly tested support or graceful unavailable/static state | No emitted escape garbage to pipes/logs; no hidden dependency on macOS |
+
+Test Terminal.app, iTerm2, VS Code terminal, Linux/Kitty, Windows Terminal/PowerShell, and representative tmux/SSH combinations. Do not report a matrix cell as supported without running it on the actual platform/version. Automatic detection of the user's scrollback position is not portable; avoid repainting the primary external terminal as the baseline solution.
+
+Use monotonic time and bounded frame rates, decode/cache frames off the input event loop, stop idle redraws when disabled/hidden, handle resize/SIGINT/EOF, restore cursor/color modes in `finally`, and never clear the primary screen or scrollback for a celebration. Target passive-hook overhead under 100 ms and responsive input; measure p95 and CPU/memory rather than claiming an untested performance budget.
+'''
+
+[[sections]]
+title = "Storefront, Ownership And Stripe Test Flow"
+body = '''
+Proposed `/ui/emotes` and navigation entry should fit existing UI routes, page-auth behavior, themes and mobile layout. Keep the main website `[ OpenVegas ]` wordmark, exact fonts and favicon behavior. The storefront should be usable without starting chat.
+
+- Browse/search by name, category (Companions / Completion Emotes), style and verified compatibility; include Owned filter and useful empty/loading/error states.
+- Each card includes a real animated preview, static reduced-motion alternative, duration/type, supported terminals, price in $V, and Buy/Owned/Equip states.
+- Preview before login; authenticate before purchase or downloading protected assets. Expired sessions produce a clear re-login action and preserve shopping intent.
+- Default commercial design: buy emotes with $V using the existing store; Stripe funds the $V wallet through existing top-ups. This is a proposed default, not approval of prices. Ask before introducing separate USD item checkouts.
+- A new emote-only customer gets the normal identity and wallet flow without having to use OpenVegas AI or games. Restore ownership on a second device with the same account.
+- Cache a server-verifiable, bounded offline entitlement for downloaded packs if approved; define expiry, offline grace, logout, refund and revocation behavior honestly. Client flags cannot grant production ownership.
+
+Add an additive entitlement schema after checking existing auth/RLS conventions. Separate SKU ownership from downloadable pack version and per-session equipped preferences. Enforce user ownership server-side and retain source-order/audit evidence; public price, customer identity and ownership must not be accepted from client metadata.
+
+Transaction sketch, not drop-in code:
+
+```python
+async with db.transaction() as tx:
+    # Serialize by account + SKU and enforce unique idempotency constraints in SQL.
+    await lock_purchase_scope(tx, user_id, sku)
+    order = await get_or_create_order(tx, user_id, sku, idempotency_key, payload_hash)
+    if order.fulfilled:
+        return await owned_result(tx, order)
+    if await already_owned(tx, user_id, sku):
+        return await resolve_duplicate_without_debit(tx, order)
+    await debit_wallet(tx, user_id, server_catalog_price(sku), order.id)
+    await grant_entitlement(tx, user_id, sku, source_order_id=order.id)
+    await mark_fulfilled(tx, order.id)
+```
+
+Specify both replay of the same request and concurrent purchases with different idempotency keys. A rollback at any step must not leave a debit without an entitlement. Existing AI token grants remain unchanged. Cancellation/pending states must not look like ownership. Refund/reversal needs explicit policy and an auditable state transition, not deletion of the order.
+
+Stripe test sequence:
+
+1. Preflight a disposable local/staging Supabase project, test user, test wallet, Stripe sandbox/test API key and matching test webhook signing secret. Refuse live-mode resources. Never print key values.
+2. Run existing fake-gateway/unit tests first; these are not the external Stripe pass.
+3. Start the real backend in isolated test mode. Register or forward a Stripe test webhook to the exact route discovered in `server/routes/payments.py`.
+4. Buy test $V through Checkout using Stripe's documented test payment details. Complete the browser flow; wait for a signed paid webhook, not just the success redirect.
+5. Prove the expected wallet credit, purchase an emote for an approved test price, prove one debit and one entitlement, then download/equip it in the terminal.
+6. Deliver duplicate/out-of-order events and concurrent buy requests; verify no double credit/debit/grant. Test declined/canceled/delayed checkout and signature failures.
+7. Verify other users cannot access the pack; verify approved refund/revocation behavior and purchase history. Test re-login and a clean second device.
+8. Record anonymized event/order references, revision, test environment and balances before/after. Never test this by charging a real card or manipulating a production customer's balance.
+
+Free admin testing: make a developer preview mode that reads local packs without creating purchases, gated to an explicitly local development runtime. For any server-side admin entitlement use authenticated server roles and audit logs; do not trust a browser flag, a query parameter, an email hardcoded in the client, or an environment variable sent from a customer machine. Production tests must prove the local preview shortcut cannot authorize protected downloads.
+'''
+
+[[sections]]
+title = "Provider Routing And Model Switching"
+body = '''
+The desired UX is one OpenVegas account with company-funded provider access, not customer BYOK. The audited implementation resolves server-managed API credentials; it does not create multiple logged-in consumer Claude/ChatGPT accounts. Do not implement account farming, quota-limit evasion, browser-cookie harvesting or undocumented consumer session proxies. If an operator needs additional authorized API organizations/accounts, provision those through supported provider mechanisms and keep credentials on the server.
+
+Distinguish products correctly: Claude/Anthropic, Gemini/Google and Mistral are provider/model families; Codex is also a coding product, not a substitute name for every OpenAI model. Selecting an OpenAI model in OpenVegas does not necessarily reproduce the entire Codex CLI or transfer a ChatGPT subscription. External emote adapters are independent of inference routing. Do not market $V as restoring another company's consumer subscription quota.
+
+Implementation sequence:
+
+1. Inventory supported providers, actual enabled catalog IDs, credential aliases, prices and capabilities without printing keys. Record missing operator access instead of creating paid accounts automatically.
+2. Replace scattered provider allowlists with a central typed registry. Include OpenAI, Anthropic, Gemini and a new Mistral adapter; expose Mixtral only if available to the configured account.
+3. Validate `/models` results and provider access before accepting a choice. Default model switching on for intended product environments only after tests; retain a server-side disable/rollback flag.
+4. Add a searchable picker to `openvegas chat` plus clear `/provider` and `/model` commands. Show selected model intentionally, not noisy internal gateway metadata on every tool event. Preserve user input and existing cost footers.
+5. Keep canonical user/assistant/tool history independent of provider-specific thread IDs. On switch, translate supported messages, avoid replaying completed tool side effects, summarize explicitly when context windows differ, and disclose context transfer. Never copy another user's history or hidden provider reasoning.
+6. Define per-model tools, vision, streaming, web-search, JSON/schema, reasoning and context limits. Unsupported features get a clear action or safe downgrade, not fabricated cross-provider parity.
+7. Audit the current Gemini SDK/global configuration and streaming fallbacks. Adopt a supported per-client SDK only after verifying its official migration guidance and writing parity tests; do not perform a blanket dependency upgrade.
+8. On active generation, queue the switch for the next turn or require explicit cancel. Keep one final answer, accurate usage, idempotent billing and no accidental repeat generation. Rate-limit/timeout handling must not double-charge or automatically buy extra capacity.
+9. Refresh available model catalogs in a bounded operator-controlled job. New versions become selectable only after capability and pricing review; a newly listed model is not automatically safe or available to all users.
+
+Proposed registry boundary:
+
+```python
+class ProviderAdapter(Protocol):
+    async def list_models(self) -> list[ModelDescriptor]: ...
+    def capabilities(self, model_id: str) -> ModelCapabilities: ...
+    def stream(self, request: CanonicalRequest) -> AsyncIterator[GatewayEvent]: ...
+
+# Resolve a server-owned credential by provider/environment; never receive API keys
+# or another user's provider session IDs from the terminal's model-picker payload.
+```
+
+Keep the API credential and user conversation lifecycles separate. If multiple authorized backend credentials are needed, use explicit health/concurrency/rate-limit scheduling and attribution; do not rotate accounts to defeat provider policies. Review provider terms and billing arrangements before public model-resale claims.
+
+Test all four provider contracts using fixtures first. Real inference costs money: current implementation work must request a concrete per-provider call/token budget before live testing. Report untested providers as NOT RUN, even if mocked tests pass.
+'''
+
+[[sections]]
+title = "Marketing Art Direction And Export Engine"
+body = '''
+Do not simply regenerate the old carousels with more text. Art and real product demonstrations should dominate the frame. The brand already has Space Grotesk for display/prose, IBM Plex Mono for terminal/code accents, and a bracketed `[ OpenVegas ]` wordmark. Read the live source styles before designing; do not introduce substitute fonts, stretch logos or default everything to a new purple theme.
+
+Existing theme reference from this audit: light background `#f6f7fb`, ink `#151922`, aqua `#11788a`, green `#1d8c3a`; dark background `#040404`, light ink `#f5f5f5`, aqua `#44c6dd`, green `#7cdf7c`. Use verified current CSS tokens rather than duplicating these permanently if they change.
+
+Creative direction: pixel dioramas with dramatic scale, playful character staging, restrained atmospheric lighting, dimensional terminal windows and clear short headlines. Use actual approved sprites as the heroes. Leave breathing room; prioritize mobile readability. Distinct campaign palettes may support the art while retaining brand typography and identity.
+
+| Campaign | Visual narrative | Concrete output |
+| --- | --- | --- |
+| Give your terminal a companion | Hero character stepping out of a terminal; idle-to-dance reveal; three collectible silhouettes | Five-slide art-led carousel and 12-18 second reel |
+| Make done feel done | Small working scene expands into a 4-7 second sports celebration, then returns to untouched terminal text | Completion storyboard, three keyframes and reel built from actual supported rendering |
+| Change the model, keep the flow | One continuous workspace shifting among verified provider/model choices, with companion following the switch | Five-slide feature carousel and a short screen-capture-led reel |
+| The OpenVegas loop | Sprite-filled arcade diorama linking model choice, optional games, $V wallet and emotes | Five-slide overview and one montage; games show actual terminal pixel-block style |
+
+Avoid misleading claims: emotes do not improve inference accuracy or reset Claude/Codex limits; gambling is optional, not a guaranteed way to earn credits; no unauthorized team/player endorsement. Free-credit or price claims must match verified current product behavior. Show the external companion-pane presentation honestly if full-screen overlays are unsupported.
+
+Production requirements:
+
+- Reuse `creatives/` source structure and `my-video/` Remotion tooling where useful; a nicer visual system is needed, not a gratuitous replacement stack.
+- Parameterize art, copy, real product footage and safe zones. Drive Remotion motion from timeline frames with deterministic seeds, not wall-clock timers or `Math.random()` per render.
+- Keep fonts available during offline export and wait for assets before capture. Preserve artist/source licenses and do not bundle commercial authoring tools into the user runtime.
+- Export 1080x1350 PNG carousel slides and 1080x1920 H.264 MP4 reels with compatible pixel format; provide square variants only when requested. Recheck each platform's current constraints before publishing.
+- Supply editable source, transparent sprite PNGs, contact sheets, first/middle/last-frame previews, captions and a reproducible export command. Marketing text must never be baked into the only editable art master.
+- Remove visible internal labels such as Hook, Problem, Mechanism and Proof, as well as boilerplate note bars. Those may exist in metadata, never in ad exports.
+- Inspect every exported slide at native size and mobile scale; check clipping, aspect distortion, repeated layouts, tracking URLs, backticks, unreadable screenshots and blank media.
+- Art approval is a milestone. Show the user actual previews before claiming the campaign is done or scaling to all variants. Never publish posts automatically as part of rendering.
+'''
+
+[[sections]]
+title = "Integration, Docker And Release Test Matrix"
+body = '''
+Add focused tests in the most appropriate existing suites instead of silently rewriting the entire test setup. Exact new module names are proposals, to be confirmed by the coordinator.
+
+| Scenario | Automated checks | Manual / external evidence |
+| --- | --- | --- |
+| Pack import | Valid sheets, mixed sizes, invalid frame bounds/hashes, malformed JSON, traversal/zip bombs, unsupported schema, zero/NaN durations | Artist exports a new pack and sees identical poses in preview and terminal |
+| Animation | Fake monotonic clock, duration bounds, repeat/cancel/dedupe, no leaked tasks, resize and missing renderer | Real typing, selection, scrollback and screen recordings during 4-7 second effects |
+| External CLI | Recorded per-version hook fixtures, passive exit/output behavior, merge/uninstall backups, concurrent sessions | Actual supported Codex/Claude/Gemini versions; start/complete/cancel/error cases separately |
+| Commerce | Transaction rollback, insufficient funds, concurrent same/different request keys, RLS/ownership, expired token, revoked grant | Stripe sandbox checkout -> webhook -> wallet -> purchase -> equip -> second-device restore |
+| Security | Public preview versus private pack, unauthorized admin flags, injected terminal escapes, IPC ownership, no secret logging | Review of client/server boundary and clean-account purchase/download |
+| Models | Four adapter fixtures, validation, switching history/tools, cancellation, stale IDs, limits, accurate billing | Budget-approved real calls only; otherwise clearly NOT RUN |
+| UI | Search/filter states, keyboard access, reduced motion, mobile sizes, auth return, light/dark styling | Approved screenshots of Emotes page and every final creative |
+| Packaging | Python wheel/sdist content and launcher resolution; installed asset loading outside repo; optional dependency failure | Clean macOS/Linux/Windows installs using the actual public distribution artifact |
+| Docker | Build context includes assets; read-only runtime behavior; readiness; tests against disposable DB/Redis | `./dev/start` local stack if still applicable; website/CLI identity and backend target shown clearly |
+| Deployment | Staging migration/health/route checks; feature flags and rollback | Exact approved artifact on Railway; verified `/ui/emotes` and protected API, not just homepage 200 |
+
+Do not use production Supabase, production Stripe keys or live customer $V for integration tests. If Docker cannot reproduce real DB/Redis dependencies, report that as a failed/blocked integration gate rather than accepting a placeholder database.
+
+The current website/domains and Railway billing limits are operational constraints, not an invitation to change infrastructure. Do not increase limits, recreate services, switch backend URLs or alter DNS for this feature without need and authorization. Keep local CLI profiles isolated from production defaults.
+
+Deployment is a separate final stage. Use additive migrations, feature flags, a backed-up schema/data plan, verified asset cache versioning and a known-good app rollback. A UI flag does not undo a data migration or a wallet debit. Confirm successful artifact release and fresh installs before saying existing users get the feature automatically.
+'''
+
+[[sections]]
+title = "First Execution Steps And Owner Decisions"
+body = '''
+Start with the smallest convincing vertical slice: one original approved sprite, one completion animation, one local entitlement, an Emotes preview card and the OpenVegas-owned renderer. Reproduce the old generator/runtime failures and pass SPR-ART-01, SPR-DANCE-02, SPR-LIFE-03 and SPR-TERM-04 on that slice before expanding the catalog. In parallel, audit provider switching and payment gaps. Then prove an external CLI adapter and Stripe test-mode purchase before making broad compatibility claims. User-approved art and real-terminal evidence are required; successful asset generation or a green unit suite alone is insufficient.
+
+The coordinator should only ask the user for genuinely needed decisions, with simple steps:
+
+1. Approve the first three character previews and one sports storyboard, or choose to commission a designer using the submission kit.
+2. Approve any paid image-generation tool/account and a concrete cap before use. OpenArt is optional; do not buy a plan automatically.
+3. Confirm whether commercial athlete/team rights exist. Without evidence, publish original fictional sports packs only; retain the requested named concepts as pending rights clearance.
+4. Confirm proposed $V item prices and the offline/refund policy before exposing a real checkout. Stripe tests remain test mode only.
+5. For external CLIs, choose whether the demonstrated companion-pane fallback is acceptable on terminals that cannot safely support an overlay. Do not promise universal full-screen rendering without evidence.
+6. Supply missing company-owned provider access through secure server configuration, never by pasting keys into this document. Approve a tiny explicit paid-call budget only when ready for live model checks.
+7. Approve a specific commit/artifact, staging results, migration plan and rollout before publishing or deploying. Respect the existing instruction not to push Markdown files or secrets unless that changes explicitly.
+
+Completion report must distinguish: code implemented, art approved, automated tests passed, cross-platform manual tests run, actual Stripe test purchase passed, live model calls verified, and deployment performed. Any remaining unavailable environment, unlicensed asset or unsupported terminal must stay visibly pending. Finishing this generated brief is not finishing these product features.
+'''

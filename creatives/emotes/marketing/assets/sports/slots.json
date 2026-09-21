@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "slots": {
+    "skyline-dunk": {
+      "pack": "sports/skyline-dunk",
+      "status": "humans-only-cleaned-preview; final-art-and-native-animation-review-pending"
+    },
+    "bicycle-finish": {
+      "pack": "sports/bicycle-finish",
+      "status": "humans-only-cleaned-preview; final-art-and-native-animation-review-pending"
+    },
+    "three-point-glow": {
+      "pack": "sports/three-point-glow",
+      "status": "humans-only-cleaned-preview; final-art-and-native-animation-review-pending"
+    }
+  }
+}

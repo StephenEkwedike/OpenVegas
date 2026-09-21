@@ -1,0 +1,292 @@
+{
+  "scope": "creatives/emotes/marketing/** only",
+  "stageRoot": "/tmp/ov-emotes-phase3-marketing/creatives/emotes/marketing",
+  "complete": true,
+  "releaseReady": false,
+  "ownerDesignApproval": {
+    "approved": true,
+    "date": "2026-09-21",
+    "scope": "Visual direction of the 12 marketing slides only",
+    "reference": "exports/contact-sheet-slide.png",
+    "sha256": "9226b2b9e0889aa019e12c9e5bf31dd2245e72300abb078c219b0f908db270d0",
+    "publicationApproved": false,
+    "availabilityClaimsVerified": false
+  },
+  "campaigns": [
+    {
+      "id": "companions",
+      "name": "Pixel People",
+      "slides": [
+        "companions-01",
+        "companions-02",
+        "companions-03"
+      ]
+    },
+    {
+      "id": "sports",
+      "name": "The Finish Feels Different",
+      "slides": [
+        "sports-01",
+        "sports-02",
+        "sports-03"
+      ]
+    },
+    {
+      "id": "models",
+      "name": "Choose Your Route",
+      "slides": [
+        "models-01",
+        "models-02",
+        "models-03"
+      ]
+    },
+    {
+      "id": "arcade",
+      "name": "Work Has A Side Quest",
+      "slides": [
+        "arcade-01",
+        "arcade-02",
+        "arcade-03"
+      ]
+    }
+  ],
+  "outputs": {
+    "nativePNGs": 24,
+    "formats": [
+      [
+        1080,
+        1350
+      ],
+      [
+        1080,
+        1920
+      ]
+    ],
+    "reels": 4,
+    "reel": {
+      "width": 1080,
+      "height": 1920,
+      "seconds": 18,
+      "fps": 15,
+      "codec": "H.264",
+      "audio": "silent"
+    },
+    "contactSheets": [
+      "exports/contact-sheet-slide.png",
+      "exports/contact-sheet-reel.png"
+    ]
+  },
+  "tests": {
+    "passed": 33,
+    "failed": 0,
+    "skipped": 0,
+    "evidence": "exports/tests.tap"
+  },
+  "sports": [
+    {
+      "slug": "skyline-dunk",
+      "sheet": "assets/sports/skyline-dunk/sheet.png",
+      "sha256": "b25b5a67cb2b1700ada1539934c9e6b2b54dd5e0c9fbb52feac16c156fb0551a",
+      "frame": {
+        "width": 160,
+        "height": 120,
+        "anchor": [
+          80,
+          117
+        ]
+      },
+      "completionMs": 5400,
+      "provenanceSha256": "4120fec1f3964f9132304ce1a01ea1e6ee8611d1238934aa3473bd6a1e84eeb0",
+      "highlightReferenceSha256": "98b21bfb40778893d830b1b41f1d4be04623a8ec95f0011970543936faeb4e04"
+    },
+    {
+      "slug": "bicycle-finish",
+      "sheet": "assets/sports/bicycle-finish/sheet.png",
+      "sha256": "c2e2ba1c5296478b00941d735838dee85ce1c5316bb908b7f771e19a24db015b",
+      "frame": {
+        "width": 160,
+        "height": 120,
+        "anchor": [
+          80,
+          117
+        ]
+      },
+      "completionMs": 5400,
+      "provenanceSha256": "9b619ff54351fd34490b7df07ed0436d2231f20de3c1245bcfd2ebdd2b349800",
+      "highlightReferenceSha256": null,
+      "version": "0.1.1"
+    },
+    {
+      "slug": "three-point-glow",
+      "sheet": "assets/sports/three-point-glow/sheet.png",
+      "sha256": "26dc179cf22a1ef44d7cb79afd26d20eb3a03ff4c4591c2de54e2d851f7421ce",
+      "frame": {
+        "width": 160,
+        "height": 120,
+        "anchor": [
+          80,
+          117
+        ]
+      },
+      "completionMs": 5400,
+      "provenanceSha256": "7ca33d849b11460ecdea7712b650441d26865a294a7d96544a9d1a50fcf1d45d",
+      "highlightReferenceSha256": null,
+      "version": "0.1.1"
+    }
+  ],
+  "commands": [
+    "node build.mjs",
+    "node export.mjs --video",
+    "node verify-videos.mjs",
+    "node --test tests/*.test.mjs",
+    "node serve.mjs 8765"
+  ],
+  "remainingGates": [
+    "Final sports/companion art approval is not inferred from preview inspection.",
+    "Native-terminal animation and trigger integration review are outside marketing scope.",
+    "Separate companion pane is conditionally approved for first release; later same-window UX remains required.",
+    "Publication claims review; model/account/provider availability and optional-game loss disclosures must be preserved."
+  ],
+  "assetDependencyRequests": [],
+  "files": [
+    "CHANGED_FILES.txt",
+    "CLAIMS_AUDIT.md",
+    "README.md",
+    "arcade-01.html",
+    "arcade-02.html",
+    "arcade-03.html",
+    "assets/beat-maker/manifest.json",
+    "assets/beat-maker/provenance.json",
+    "assets/beat-maker/sheet.png",
+    "assets/fonts/IBM-Plex-Mono-OFL.txt",
+    "assets/fonts/Space-Grotesk-OFL.txt",
+    "assets/fonts/ibm-plex-mono-400.ttf",
+    "assets/fonts/space-grotesk-400.ttf",
+    "assets/fonts/space-grotesk-700.ttf",
+    "assets/fonts/upstream.css",
+    "assets/pixel-courier/manifest.json",
+    "assets/pixel-courier/provenance.json",
+    "assets/pixel-courier/sheet.png",
+    "assets/sports/bicycle-finish/complete-dark.gif",
+    "assets/sports/bicycle-finish/complete-light.gif",
+    "assets/sports/bicycle-finish/contact-dark.png",
+    "assets/sports/bicycle-finish/contact-light.png",
+    "assets/sports/bicycle-finish/manifest.json",
+    "assets/sports/bicycle-finish/provenance.json",
+    "assets/sports/bicycle-finish/sheet.png",
+    "assets/sports/skyline-dunk/complete-dark.gif",
+    "assets/sports/skyline-dunk/complete-light.gif",
+    "assets/sports/skyline-dunk/contact-dark.png",
+    "assets/sports/skyline-dunk/contact-light.png",
+    "assets/sports/skyline-dunk/manifest.json",
+    "assets/sports/skyline-dunk/provenance.json",
+    "assets/sports/skyline-dunk/sheet.png",
+    "assets/sports/slots.json",
+    "assets/sports/three-point-glow/complete-dark.gif",
+    "assets/sports/three-point-glow/complete-light.gif",
+    "assets/sports/three-point-glow/contact-dark.png",
+    "assets/sports/three-point-glow/contact-light.png",
+    "assets/sports/three-point-glow/manifest.json",
+    "assets/sports/three-point-glow/provenance.json",
+    "assets/sports/three-point-glow/sheet.png",
+    "assets/visor-explorer/manifest.json",
+    "assets/visor-explorer/provenance.json",
+    "assets/visor-explorer/sheet.png",
+    "build.mjs",
+    "campaign.css",
+    "campaign.js",
+    "captions.txt",
+    "companions-01.html",
+    "companions-02.html",
+    "companions-03.html",
+    "content.mjs",
+    "export.mjs",
+    "exports/arcade-01-reel.png",
+    "exports/arcade-01-slide.png",
+    "exports/arcade-02-reel.png",
+    "exports/arcade-02-slide.png",
+    "exports/arcade-03-reel.png",
+    "exports/arcade-03-slide.png",
+    "exports/arcade-video-keyframe-9.png",
+    "exports/arcade-video-keyframe.png",
+    "exports/companions-01-reel.png",
+    "exports/companions-01-slide.png",
+    "exports/companions-02-reel.png",
+    "exports/companions-02-slide.png",
+    "exports/companions-03-reel.png",
+    "exports/companions-03-slide.png",
+    "exports/companions-video-keyframe-9.png",
+    "exports/companions-video-keyframe.png",
+    "exports/contact-sheet-reel.html",
+    "exports/contact-sheet-reel.png",
+    "exports/contact-sheet-slide.html",
+    "exports/contact-sheet-slide.png",
+    "exports/mobile-composition.png",
+    "exports/mobile-preview.png",
+    "exports/mobile-reel-composition.png",
+    "exports/models-01-reel.png",
+    "exports/models-01-slide.png",
+    "exports/models-02-reel.png",
+    "exports/models-02-slide.png",
+    "exports/models-03-reel.png",
+    "exports/models-03-slide.png",
+    "exports/models-video-keyframe-9.png",
+    "exports/models-video-keyframe.png",
+    "exports/openvegas-arcade-reel.mp4",
+    "exports/openvegas-companions-reel.mp4",
+    "exports/openvegas-models-reel.mp4",
+    "exports/openvegas-sports-reel.mp4",
+    "exports/source-tests.tap",
+    "exports/sports-01-reel.png",
+    "exports/sports-01-slide.png",
+    "exports/sports-02-reel.png",
+    "exports/sports-02-slide.png",
+    "exports/sports-03-reel.png",
+    "exports/sports-03-slide.png",
+    "exports/sports-keyframe-3999.png",
+    "exports/sports-keyframe-4000.png",
+    "exports/sports-keyframe-4900.png",
+    "exports/sports-keyframe-9399.png",
+    "exports/sports-keyframe-9400.png",
+    "exports/sports-keyframe-9600.png",
+    "exports/sports-video-keyframe-14_2.png",
+    "exports/sports-video-keyframe-17_7.png",
+    "exports/sports-video-keyframe-2_2.png",
+    "exports/sports-video-keyframe-7_7.png",
+    "exports/tests.tap",
+    "exports/verification.json",
+    "exports/video-probe.json",
+    "index.html",
+    "models-01.html",
+    "models-02.html",
+    "models-03.html",
+    "preview.js",
+    "serve.mjs",
+    "slide-01.html",
+    "slide-02.html",
+    "slide-03.html",
+    "sports-01.html",
+    "sports-02.html",
+    "sports-03.html",
+    "tests/exports.test.mjs",
+    "tests/server.test.mjs",
+    "tests/source.test.mjs",
+    "verify-videos.mjs"
+  ],
+  "claimsAudit": "CLAIMS_AUDIT.md",
+  "assetStatus": "All companion and sports assets are preview-only. Sales are disabled.",
+  "integrationLimits": "External companions require an explicit structured integration and a separately launched companion pane, not universal automatic native hooks. Gemini hooks are observation-only: no live waiting or completion animation. Claude hooks are activity-only and never trigger completion celebrations. The explicit process wrapper observes whole-process exit, not individual answers.",
+  "modelBoundary": "Backend model routing is separate from external CLI emote compatibility.",
+  "serverRobustness": {
+    "testFile": "tests/server.test.mjs",
+    "tests": 4,
+    "malformedRequestStatus": 400,
+    "mimeTypes": {
+      ".mp4": "video/mp4",
+      ".gif": "image/gif",
+      ".mjs": "text/javascript"
+    },
+    "artRegenerated": false
+  },
+  "sportsRevision": "0.1.1: corrected bicycle orientation; overhead male three-point sequence with wider spacing"
+}

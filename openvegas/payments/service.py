@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from openvegas.payments.conversion import v_per_usd
 from openvegas.qr_runtime import ensure_qrcode_available
 from openvegas.telemetry import emit_metric
 from openvegas.wallet.ledger import WalletService
@@ -19,6 +20,10 @@ USD_SCALE = Decimal("0.01")
 
 
 class BillingError(Exception):
+    pass
+
+
+class WebhookVerificationError(BillingError):
     pass
 
 
@@ -104,7 +109,10 @@ class BillingService:
 
     @staticmethod
     def _v_per_usd() -> Decimal:
-        return Decimal(os.getenv("V_PER_USD", "100")).quantize(V_SCALE)
+        try:
+            return v_per_usd()
+        except ValueError as exc:
+            raise BillingError("Invalid V_PER_USD configuration") from exc
 
     @staticmethod
     def _checkout_ttl_sec() -> int:
@@ -452,7 +460,7 @@ class BillingService:
         if amount_usd < min_usd or amount_usd > max_usd:
             raise BillingError(f"Amount must be between {min_usd} and {max_usd} USD")
 
-        v_per_usd = Decimal(os.getenv("V_PER_USD", "100"))
+        v_per_usd = self._v_per_usd()
         v_credit = (amount_usd * v_per_usd).quantize(V_SCALE)
         payload_hash = self.canonical_payload_hash(
             {"amount_usd": amount_usd, "currency": "usd"}
@@ -663,7 +671,7 @@ class BillingService:
         if not customer_id or not payment_method_id:
             raise BillingError("Saved card is not configured correctly")
 
-        v_per_usd = Decimal(os.getenv("V_PER_USD", "100"))
+        v_per_usd = self._v_per_usd()
         v_credit = (amount_usd * v_per_usd).quantize(V_SCALE)
         payload_hash = self.canonical_payload_hash(
             {"amount_usd": amount_usd, "currency": "usd", "charge_type": "saved_card"}
@@ -1640,7 +1648,10 @@ class BillingService:
         return {"url": url}
 
     async def handle_webhook(self, *, raw_body: bytes, signature: str) -> dict:
-        event = self.stripe_gateway.construct_event(raw_body, signature)
+        try:
+            event = self.stripe_gateway.construct_event(raw_body, signature)
+        except Exception:
+            raise WebhookVerificationError("Invalid Stripe webhook signature or payload") from None
         return await self.handle_event(event)
 
     async def handle_event(self, event: dict) -> dict:
@@ -1678,6 +1689,14 @@ class BillingService:
                 if not existing or existing["payload_hash"] != payload_hash:
                     raise BillingError(f"Webhook payload hash mismatch for event {event_id}")
                 return {"status": "duplicate"}
+
+            from openvegas.payments.adjustments import EVENTS, AdjustmentError, handle_adjustment
+
+            if event_type in EVENTS:
+                key = str(getattr(getattr(self.stripe_gateway, "stripe", None), "api_key", ""))
+                if not key.startswith(("sk_test_", "sk_live_", "rk_test_", "rk_live_")):
+                    raise AdjustmentError("ADJUSTMENT_MODE_UNVERIFIED")
+                return await handle_adjustment(tx, event, expected_livemode="_live_" in key[:8])
 
             if event_type in {"checkout.session.completed", "checkout.session.async_payment_succeeded"}:
                 return await self._handle_checkout_completed(

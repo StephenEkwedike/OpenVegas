@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "pack_id": "openvegas.beat-maker",
+  "version": "0.1.1",
+  "display_name": "Beat Maker",
+  "license_id": "openvegas-original-concept-review",
+  "sheet": "sheet.png",
+  "sha256": "63087d3e7dfb74f587679ff6e2177f36cb97091e92f95a4e2cb40f1ccceec4d3",
+  "frame": {
+    "width": 64,
+    "height": 80,
+    "anchor": [
+      32,
+      77
+    ]
+  },
+  "animations": {
+    "idle": {
+      "frames": [
+        0
+      ],
+      "frame_ms": 1000,
+      "loop": true
+    },
+    "waiting": {
+      "frames": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "frame_ms": 140,
+      "loop": true
+    },
+    "complete": {
+      "frames": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7
+      ],
+      "frame_ms": 150,
+      "loop": false
+    }
+  },
+  "reduced_motion_frame": 0,
+  "tags": [
+    "companion",
+    "dance",
+    "original"
+  ]
+}

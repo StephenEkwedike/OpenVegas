@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -10,6 +14,15 @@ from openvegas.contracts.enums import EffectiveReason
 from openvegas.wallet.ledger import InsufficientBalance
 from server.middleware.auth import get_current_user
 from server.routes import inference as inference_routes
+
+
+@pytest.fixture(autouse=True)
+def _catalog_preflight_for_downstream_contracts(monkeypatch):
+    # These cases isolate downstream gateway errors. Real preflight ordering is
+    # covered independently in test_models/test_inference_prevalidation.py.
+    monkeypatch.setattr(inference_routes, "get_catalog", lambda: SimpleNamespace(
+        validate_selection=AsyncMock(return_value={}),
+    ))
 
 
 def _app_with_router() -> FastAPI:

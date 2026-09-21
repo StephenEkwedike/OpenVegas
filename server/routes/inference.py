@@ -29,6 +29,7 @@ from openvegas.security.policy import (
 from openvegas.telemetry import emit_metric, emit_run_metrics
 from server.middleware.auth import get_current_user
 from server.services.dependencies import (
+    get_catalog,
     get_file_upload_service,
     get_fraud_engine,
     get_gateway,
@@ -446,6 +447,25 @@ async def _prepare_ask_context(
             },
         )
 
+    if req.provider == "openrouter" and req.attachments:
+        return JSONResponse(
+            status_code=400,
+            content={"error": APIErrorCode.INVALID_TRANSITION.value,
+                     "detail": "OpenRouter attachment handling is not enabled. Remove attachments or choose a reviewed direct-provider model; no file was sent.",
+                     "run_id": run_id, **mode_payload},
+        )
+
+    if req.provider == "gemini" and (req.enable_tools or req.enable_web_search or req.attachments):
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": APIErrorCode.INVALID_TRANSITION.value,
+                "detail": "Gemini supports text only in this adapter. Remove tools, web search and attachments; nothing was flattened or sent.",
+                "run_id": run_id,
+                **mode_payload,
+            },
+        )
+
     thread_svc = get_provider_thread_service()
     context_enabled = bool(thread_svc.context_enabled())
     web_search_requested = bool(req.enable_web_search)
@@ -513,6 +533,8 @@ async def _prepare_ask_context(
     if attachments_requested and not attachments_gateway_effective:
         response_warnings.append("capability_unavailable:file_upload")
     try:
+        # Validate before creating/updating a provider thread; no capability opt-in for text.
+        await get_catalog().validate_selection(req.provider, req.model)
         thread_ctx = await thread_svc.prepare_thread(
             user_id=user["user_id"],
             provider=req.provider,

@@ -10,25 +10,21 @@ import hashlib
 import time
 import uuid
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
-from enum import Enum
+from decimal import ROUND_CEILING, Decimal
 from typing import Any, AsyncGenerator
 
 import httpx
 
 from openvegas.contracts.errors import APIErrorCode, ContractError
-from openvegas.gateway.catalog import ModelDisabled, ProviderCatalog
+from openvegas.gateway.catalog import ModelDisabled as ModelDisabled
+from openvegas.gateway.catalog import ProviderCatalog, validate_catalog_entry
+from openvegas.gateway.providers import Provider as Provider
+from openvegas.gateway.providers import get_model_review, get_provider, model_capabilities, resolve_provider_api_key
 from openvegas.wallet.ledger import InsufficientBalance, WalletService
 
 V_SCALE = Decimal("0.000001")
-
-
-class Provider(Enum):
-    OPENAI = "openai"
-    ANTHROPIC = "anthropic"
-    GEMINI = "gemini"
 
 
 @dataclass
@@ -41,6 +37,9 @@ class InferenceRequest:
     idempotency_key: str | None = None
     enable_tools: bool = False
     enable_web_search: bool = False
+    strict_continuity: bool = False
+    # Internal snapshot from server preflight, never accepted from HTTP/CLI input.
+    _managed_model_config: dict | None = field(default=None, init=False, repr=False)
 
 
 @dataclass
@@ -55,6 +54,7 @@ class InferenceResult:
     web_search_used: bool = False
     web_search_sources: list[str] | None = None
     web_search_retry_without_tool: bool = False
+    completion_status: str = "unknown"
 
 
 @dataclass
@@ -150,14 +150,61 @@ class AIGateway:
         req: InferenceRequest,
     ) -> tuple[_InferenceExecutionContext, InferenceResult | None]:
         model_config = await self.catalog.get_model(req.provider, req.model)
-        if not model_config or not model_config["enabled"]:
-            raise ModelDisabled(f"{req.model} is currently disabled")
+        validate_catalog_entry(req.provider, req.model, model_config)
+        if req.provider == "openrouter":
+            from openvegas.gateway.openrouter import build_payload
+
+            build_payload(req, model_config, model_capabilities(req.provider, req.model))
+            req._managed_model_config = dict(model_config)
+            req._managed_model_config["response_model_ids"] = get_model_review(
+                req.provider, req.model
+            ).get("response_model_ids", [])
+        if req.provider == "gemini":
+            from openvegas.gateway.gemini import build_payload
+
+            build_payload(req)
+            context_limit = model_capabilities(req.provider, req.model)["context_window_tokens"]
+            catalog_limit = model_config.get("max_tokens")
+            input_bound = sum(len(m["content"].encode("utf-8")) + 32 for m in req.messages)
+            if (type(catalog_limit) is not int or req.max_tokens > catalog_limit
+                    or (req.strict_continuity and type(context_limit) is not int)
+                    or (type(context_limit) is int
+                        and input_bound + req.max_tokens + 256 > context_limit)):
+                raise ContractError(
+                    APIErrorCode.INVALID_TRANSITION,
+                    "Gemini context/output budget is unreviewed or exceeded; start fresh explicitly.",
+                )
+        if req.provider == "mistral":
+            from openvegas.gateway.mistral import validate_text_request
+
+            validate_text_request(req)
+            context_limit = model_capabilities(req.provider, req.model)["context_window_tokens"]
+            catalog_limit = model_config.get("max_tokens")
+            # Conservative byte budget; never truncate history or invent a tokenizer count.
+            input_bound = sum(len(m["content"].encode("utf-8")) + 32 for m in req.messages)
+            if (type(context_limit) is not int or input_bound + req.max_tokens + 256 > context_limit
+                    or type(catalog_limit) is not int or req.max_tokens > catalog_limit):
+                raise ContractError(APIErrorCode.INVALID_TRANSITION,
+                                    "Mistral context/output budget exceeded; shorten context explicitly.")
 
         user_id = self._extract_user_id(req.account_id)
         payload_hash = self._payload_hash(req)
         provider_api_key = await self._resolve_provider_api_key(req.provider)
 
         max_v_cost = self._estimate_max_cost(model_config, req.max_tokens)
+        estimated_total_tokens = None
+        if req.strict_continuity or req.provider == "openrouter":
+            if req.provider == "openrouter":
+                from openvegas.gateway.openrouter import input_token_bound
+                input_bound = input_token_bound(req)
+            else:
+                input_bound = sum(len(m["content"].encode("utf-8")) + 32 for m in req.messages) + 256
+            estimated_total_tokens = input_bound + req.max_tokens
+            max_v_cost = (
+                (Decimal(input_bound) * Decimal(str(model_config["v_price_input_per_1m"]))
+                 + Decimal(req.max_tokens) * Decimal(str(model_config["v_price_output_per_1m"])))
+                / Decimal(1000000)
+            ).quantize(V_SCALE, rounding=ROUND_CEILING)
         reserve_v = max_v_cost
 
         if user_id:
@@ -167,6 +214,7 @@ class AIGateway:
                 model_id=req.model,
                 max_tokens=req.max_tokens,
                 max_v_cost=max_v_cost,
+                **({"estimated_total_tokens": estimated_total_tokens} if estimated_total_tokens is not None else {}),
             )
             reserve_v = max((max_v_cost - estimated_grant_v), Decimal("0")).quantize(V_SCALE)
 
@@ -254,6 +302,11 @@ class AIGateway:
         actual_usd = self._calculate_actual_usd(
             model_config, result.input_tokens, result.output_tokens
         )
+        if req.provider == "openrouter":
+            # OpenRouter reports actual billed USD, including cache discounts.
+            # Retail $V remains our catalog rate, not a client-supplied price.
+            # Keep response/replay and both NUMERIC(...,6) ledger records identical.
+            actual_usd = result.actual_cost_usd.quantize(V_SCALE)
 
         total_tokens = max(result.input_tokens + result.output_tokens, 0)
         usage_id = str(uuid.uuid4())
@@ -563,6 +616,7 @@ class AIGateway:
         model_id: str,
         max_tokens: int,
         max_v_cost: Decimal,
+        estimated_total_tokens: int | None = None,
     ) -> Decimal:
         row = await self.db.fetchrow(
             """
@@ -578,7 +632,7 @@ class AIGateway:
             model_id,
         )
         remaining = int(row["remaining"]) if row else 0
-        estimated_total = max_tokens * 3
+        estimated_total = max_tokens * 3 if estimated_total_tokens is None else estimated_total_tokens
         if estimated_total <= 0 or remaining <= 0:
             return Decimal("0")
 
@@ -770,30 +824,46 @@ class AIGateway:
 
     async def _route_to_provider(self, req: InferenceRequest, api_key: str) -> InferenceResult:
         """Route to the appropriate provider SDK."""
-        if req.enable_tools and req.provider != "openai":
+        descriptor = get_provider(req.provider)
+        if req.enable_tools and not descriptor.tools:
             raise ContractError(
                 APIErrorCode.INVALID_TRANSITION,
-                "Tool-calling mode is currently supported only for openai provider.",
+                "Tool-calling mode is unavailable in this provider adapter.",
             )
-        if req.provider == "anthropic":
-            return await self._call_anthropic(req, api_key)
-        if req.provider == "openai":
-            return await self._call_openai(req, api_key)
-        if req.provider == "gemini":
-            return await self._call_gemini(req, api_key)
-        raise ValueError(f"Unknown provider: {req.provider}")
+        return await getattr(self, descriptor.adapter_method)(req, api_key)
+
+    async def _call_mistral(self, req: InferenceRequest, api_key: str) -> InferenceResult:
+        from openvegas.gateway.mistral import complete
+
+        return InferenceResult(**await complete(req, api_key, self.http_client))
+
+    async def _call_openrouter(self, req: InferenceRequest, api_key: str) -> InferenceResult:
+        from openvegas.gateway.openrouter import complete
+
+        if req._managed_model_config is None:
+            raise ContractError(APIErrorCode.INVALID_TRANSITION, "OpenRouter requires server catalog preflight.")
+        return InferenceResult(**await complete(
+            req, api_key, model_config=req._managed_model_config,
+            capabilities=model_capabilities(req.provider, req.model),
+            parse_tool=self._parse_local_tool_call, client=self.http_client,
+        ))
 
     async def _call_anthropic(self, req: InferenceRequest, api_key: str) -> InferenceResult:
         import anthropic
 
-        client = anthropic.AsyncAnthropic(api_key=api_key)
+        options = {"max_retries": 0, "timeout": 60.0} if req.strict_continuity else {}
+        client = anthropic.AsyncAnthropic(api_key=api_key, **options)
         msg = await client.messages.create(
             model=req.model,
             max_tokens=req.max_tokens,
             messages=req.messages,
         )
         return InferenceResult(
-            text=msg.content[0].text,
+            text=("".join(getattr(block, "text", "") for block in msg.content)
+                  if req.strict_continuity else msg.content[0].text),
+            completion_status=("complete" if getattr(msg, "stop_reason", None) == "end_turn"
+                               and all(getattr(block, "type", None) == "text" for block in msg.content)
+                               else "incomplete"),
             input_tokens=msg.usage.input_tokens,
             output_tokens=msg.usage.output_tokens,
             provider_request_id=getattr(msg, "id", None),
@@ -801,6 +871,8 @@ class AIGateway:
 
     async def _call_openai(self, req: InferenceRequest, api_key: str) -> InferenceResult:
         client = self._build_openai_client(api_key)
+        if req.strict_continuity:
+            client = client.with_options(max_retries=0, timeout=60.0)
         if self._prefers_openai_responses_api(req.model) or self._messages_include_multimodal_content(req.messages):
             return await self._call_openai_responses(client=client, req=req)
         return await self._call_openai_chat_completions(client=client, req=req)
@@ -851,6 +923,8 @@ class AIGateway:
         try:
             resp = await client.chat.completions.create(**kwargs)
         except Exception as exc:
+            if req.strict_continuity:
+                self._raise_openai_request_error(exc)
             msg = str(exc)
             # Some models/sdks only accept max_tokens while others require max_completion_tokens.
             if "Unsupported parameter" in msg and "'max_completion_tokens'" in msg:
@@ -886,6 +960,8 @@ class AIGateway:
                     parsed_tool_calls.append(parsed)
         return InferenceResult(
             text=msg.content or "",
+            completion_status=("complete" if getattr(resp.choices[0], "finish_reason", None) == "stop"
+                               else "incomplete"),
             input_tokens=int(getattr(resp.usage, "prompt_tokens", 0) or 0),
             output_tokens=int(getattr(resp.usage, "completion_tokens", 0) or 0),
             provider_request_id=getattr(resp, "id", None),
@@ -899,7 +975,7 @@ class AIGateway:
         try:
             resp = await client.responses.create(**kwargs)
         except Exception as exc:
-            if req.enable_web_search and self._should_retry_without_web_tool(exc):
+            if not req.strict_continuity and req.enable_web_search and self._should_retry_without_web_tool(exc):
                 retry = dict(kwargs)
                 retry_tools = [
                     t for t in list(retry.get("tools", []))
@@ -1335,6 +1411,10 @@ class AIGateway:
         web_search_used = self._response_includes_web_search(resp) or bool(web_search_sources)
         return InferenceResult(
             text=self._extract_openai_responses_text(resp),
+            completion_status=("complete" if self._openai_field(resp, "status", None) == "completed"
+                               and not self._openai_field(resp, "incomplete_details", None)
+                               and not self._extract_openai_response_tool_calls(resp)
+                               and not web_search_used else "incomplete"),
             input_tokens=int(self._openai_field(usage, "input_tokens", 0) or 0),
             output_tokens=int(self._openai_field(usage, "output_tokens", 0) or 0),
             provider_request_id=self._openai_field(resp, "id", None),
@@ -1360,19 +1440,9 @@ class AIGateway:
         ) from exc
 
     async def _call_gemini(self, req: InferenceRequest, api_key: str) -> InferenceResult:
-        import google.generativeai as genai
+        from openvegas.gateway.gemini import complete
 
-        genai.configure(api_key=api_key)
-        prompt = "\n".join(m.get("content", "") for m in req.messages)
-        model = genai.GenerativeModel(req.model)
-        resp = await model.generate_content_async(prompt)
-        meta = resp.usage_metadata
-        return InferenceResult(
-            text=resp.text,
-            input_tokens=meta.prompt_token_count if meta else 0,
-            output_tokens=meta.candidates_token_count if meta else 0,
-            provider_request_id=getattr(resp, "response_id", None),
-        )
+        return InferenceResult(**await complete(req, api_key, self.http_client))
 
     async def generate_image(
         self,
@@ -1514,51 +1584,7 @@ class AIGateway:
         return body
 
     async def _resolve_provider_api_key(self, provider: str) -> str:
-        """Resolve provider credentials with registry-first precedence."""
-        runtime_env = os.getenv("OPENVEGAS_RUNTIME_ENV", os.getenv("ENV", "local")).strip() or "local"
-        row = None
-        try:
-            row = await self.db.fetchrow(
-                """
-                SELECT key_alias
-                FROM provider_credentials
-                WHERE provider = $1
-                  AND env = $2
-                  AND status = 'active'
-                ORDER BY created_at DESC
-                LIMIT 1
-                """,
-                provider,
-                runtime_env,
-            )
-        except Exception:
-            row = None
-
-        if row:
-            key_alias = str(row["key_alias"]).strip()
-            key = os.getenv(key_alias, "").strip()
-            if key:
-                return key
-            raise ContractError(
-                APIErrorCode.PROVIDER_UNAVAILABLE,
-                f"No active provider credentials configured for {provider}.",
-            )
-
-        allow_env_fallback = runtime_env.lower() in {"local", "dev", "development", "test"}
-        if allow_env_fallback:
-            env_name = {
-                "openai": "OPENAI_API_KEY",
-                "anthropic": "ANTHROPIC_API_KEY",
-                "gemini": "GEMINI_API_KEY",
-            }.get(provider, "")
-            key = os.getenv(env_name, "").strip()
-            if key:
-                return key
-
-        raise ContractError(
-            APIErrorCode.PROVIDER_UNAVAILABLE,
-            f"No active provider credentials configured for {provider}.",
-        )
+        return await resolve_provider_api_key(self.db, provider)
 
     @staticmethod
     def _wrapper_rewards_enabled() -> bool:
@@ -1581,6 +1607,7 @@ class AIGateway:
                 "max_tokens": req.max_tokens,
                 "enable_tools": bool(req.enable_tools),
                 "enable_web_search": bool(req.enable_web_search),
+                **({"strict_continuity": True} if req.strict_continuity else {}),
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -1592,6 +1619,7 @@ class AIGateway:
         return json.dumps(
             {
                 "text": result.text,
+                "completion_status": result.completion_status,
                 "input_tokens": result.input_tokens,
                 "output_tokens": result.output_tokens,
                 "v_cost": str(result.v_cost),
@@ -1618,6 +1646,7 @@ class AIGateway:
         payload = json.loads(str(raw))
         return InferenceResult(
             text=str(payload.get("text", "")),
+            completion_status=str(payload.get("completion_status", "unknown")),
             input_tokens=int(payload.get("input_tokens", 0)),
             output_tokens=int(payload.get("output_tokens", 0)),
             v_cost=Decimal(str(payload.get("v_cost", "0"))).quantize(V_SCALE),

@@ -1,0 +1,390 @@
+[
+  {
+    "file": "openvegas-companions-reel.mp4",
+    "probe": {
+      "streams": [
+        {
+          "index": 0,
+          "codec_name": "h264",
+          "codec_long_name": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+          "profile": "High",
+          "codec_type": "video",
+          "codec_tag_string": "avc1",
+          "codec_tag": "0x31637661",
+          "width": 1080,
+          "height": 1920,
+          "coded_width": 1080,
+          "coded_height": 1920,
+          "closed_captions": 0,
+          "film_grain": 0,
+          "has_b_frames": 2,
+          "pix_fmt": "yuv420p",
+          "level": 40,
+          "chroma_location": "left",
+          "field_order": "progressive",
+          "refs": 1,
+          "is_avc": "true",
+          "nal_length_size": "4",
+          "id": "0x1",
+          "r_frame_rate": "15/1",
+          "avg_frame_rate": "15/1",
+          "time_base": "1/15360",
+          "start_pts": 0,
+          "start_time": "0.000000",
+          "duration_ts": 276480,
+          "duration": "18.000000",
+          "bit_rate": "1610186",
+          "bits_per_raw_sample": "8",
+          "nb_frames": "270",
+          "extradata_size": 47,
+          "disposition": {
+            "default": 1,
+            "dub": 0,
+            "original": 0,
+            "comment": 0,
+            "lyrics": 0,
+            "karaoke": 0,
+            "forced": 0,
+            "hearing_impaired": 0,
+            "visual_impaired": 0,
+            "clean_effects": 0,
+            "attached_pic": 0,
+            "timed_thumbnails": 0,
+            "non_diegetic": 0,
+            "captions": 0,
+            "descriptions": 0,
+            "metadata": 0,
+            "dependent": 0,
+            "still_image": 0,
+            "multilayer": 0
+          },
+          "tags": {
+            "language": "und",
+            "handler_name": "VideoHandler",
+            "vendor_id": "[0][0][0][0]",
+            "encoder": "Lavc61.19.101 libx264"
+          }
+        }
+      ],
+      "format": {
+        "filename": "/private/tmp/ov-emotes-sports-revision/repo/creatives/emotes/marketing/exports/openvegas-companions-reel.mp4",
+        "nb_streams": 1,
+        "nb_programs": 0,
+        "nb_stream_groups": 0,
+        "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+        "format_long_name": "QuickTime / MOV",
+        "start_time": "0.000000",
+        "duration": "18.000000",
+        "size": "3627047",
+        "bit_rate": "1612020",
+        "probe_score": 100,
+        "tags": {
+          "major_brand": "isom",
+          "minor_version": "512",
+          "compatible_brands": "isomiso2avc1mp41",
+          "encoder": "Lavf61.7.100"
+        }
+      }
+    },
+    "keyframes": [
+      {
+        "timeSeconds": 9,
+        "file": "companions-video-keyframe-9.png"
+      }
+    ]
+  },
+  {
+    "file": "openvegas-sports-reel.mp4",
+    "probe": {
+      "streams": [
+        {
+          "index": 0,
+          "codec_name": "h264",
+          "codec_long_name": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+          "profile": "High",
+          "codec_type": "video",
+          "codec_tag_string": "avc1",
+          "codec_tag": "0x31637661",
+          "width": 1080,
+          "height": 1920,
+          "coded_width": 1080,
+          "coded_height": 1920,
+          "closed_captions": 0,
+          "film_grain": 0,
+          "has_b_frames": 2,
+          "pix_fmt": "yuv420p",
+          "level": 40,
+          "chroma_location": "left",
+          "field_order": "progressive",
+          "refs": 1,
+          "is_avc": "true",
+          "nal_length_size": "4",
+          "id": "0x1",
+          "r_frame_rate": "15/1",
+          "avg_frame_rate": "15/1",
+          "time_base": "1/15360",
+          "start_pts": 0,
+          "start_time": "0.000000",
+          "duration_ts": 276480,
+          "duration": "18.000000",
+          "bit_rate": "815728",
+          "bits_per_raw_sample": "8",
+          "nb_frames": "270",
+          "extradata_size": 47,
+          "disposition": {
+            "default": 1,
+            "dub": 0,
+            "original": 0,
+            "comment": 0,
+            "lyrics": 0,
+            "karaoke": 0,
+            "forced": 0,
+            "hearing_impaired": 0,
+            "visual_impaired": 0,
+            "clean_effects": 0,
+            "attached_pic": 0,
+            "timed_thumbnails": 0,
+            "non_diegetic": 0,
+            "captions": 0,
+            "descriptions": 0,
+            "metadata": 0,
+            "dependent": 0,
+            "still_image": 0,
+            "multilayer": 0
+          },
+          "tags": {
+            "language": "und",
+            "handler_name": "VideoHandler",
+            "vendor_id": "[0][0][0][0]",
+            "encoder": "Lavc61.19.101 libx264"
+          }
+        }
+      ],
+      "format": {
+        "filename": "/private/tmp/ov-emotes-sports-revision/repo/creatives/emotes/marketing/exports/openvegas-sports-reel.mp4",
+        "nb_streams": 1,
+        "nb_programs": 0,
+        "nb_stream_groups": 0,
+        "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+        "format_long_name": "QuickTime / MOV",
+        "start_time": "0.000000",
+        "duration": "18.000000",
+        "size": "1839497",
+        "bit_rate": "817554",
+        "probe_score": 100,
+        "tags": {
+          "major_brand": "isom",
+          "minor_version": "512",
+          "compatible_brands": "isomiso2avc1mp41",
+          "encoder": "Lavf61.7.100"
+        }
+      }
+    },
+    "keyframes": [
+      {
+        "timeSeconds": 2.2,
+        "file": "sports-video-keyframe-2_2.png"
+      },
+      {
+        "timeSeconds": 7.7,
+        "file": "sports-video-keyframe-7_7.png"
+      },
+      {
+        "timeSeconds": 14.2,
+        "file": "sports-video-keyframe-14_2.png"
+      },
+      {
+        "timeSeconds": 17.7,
+        "file": "sports-video-keyframe-17_7.png"
+      }
+    ]
+  },
+  {
+    "file": "openvegas-models-reel.mp4",
+    "probe": {
+      "streams": [
+        {
+          "index": 0,
+          "codec_name": "h264",
+          "codec_long_name": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+          "profile": "High",
+          "codec_type": "video",
+          "codec_tag_string": "avc1",
+          "codec_tag": "0x31637661",
+          "width": 1080,
+          "height": 1920,
+          "coded_width": 1080,
+          "coded_height": 1920,
+          "closed_captions": 0,
+          "film_grain": 0,
+          "has_b_frames": 2,
+          "pix_fmt": "yuv420p",
+          "level": 40,
+          "chroma_location": "left",
+          "field_order": "progressive",
+          "refs": 1,
+          "is_avc": "true",
+          "nal_length_size": "4",
+          "id": "0x1",
+          "r_frame_rate": "15/1",
+          "avg_frame_rate": "15/1",
+          "time_base": "1/15360",
+          "start_pts": 0,
+          "start_time": "0.000000",
+          "duration_ts": 276480,
+          "duration": "18.000000",
+          "bit_rate": "1155276",
+          "bits_per_raw_sample": "8",
+          "nb_frames": "270",
+          "extradata_size": 47,
+          "disposition": {
+            "default": 1,
+            "dub": 0,
+            "original": 0,
+            "comment": 0,
+            "lyrics": 0,
+            "karaoke": 0,
+            "forced": 0,
+            "hearing_impaired": 0,
+            "visual_impaired": 0,
+            "clean_effects": 0,
+            "attached_pic": 0,
+            "timed_thumbnails": 0,
+            "non_diegetic": 0,
+            "captions": 0,
+            "descriptions": 0,
+            "metadata": 0,
+            "dependent": 0,
+            "still_image": 0,
+            "multilayer": 0
+          },
+          "tags": {
+            "language": "und",
+            "handler_name": "VideoHandler",
+            "vendor_id": "[0][0][0][0]",
+            "encoder": "Lavc61.19.101 libx264"
+          }
+        }
+      ],
+      "format": {
+        "filename": "/private/tmp/ov-emotes-sports-revision/repo/creatives/emotes/marketing/exports/openvegas-models-reel.mp4",
+        "nb_streams": 1,
+        "nb_programs": 0,
+        "nb_stream_groups": 0,
+        "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+        "format_long_name": "QuickTime / MOV",
+        "start_time": "0.000000",
+        "duration": "18.000000",
+        "size": "2603494",
+        "bit_rate": "1157108",
+        "probe_score": 100,
+        "tags": {
+          "major_brand": "isom",
+          "minor_version": "512",
+          "compatible_brands": "isomiso2avc1mp41",
+          "encoder": "Lavf61.7.100"
+        }
+      }
+    },
+    "keyframes": [
+      {
+        "timeSeconds": 9,
+        "file": "models-video-keyframe-9.png"
+      }
+    ]
+  },
+  {
+    "file": "openvegas-arcade-reel.mp4",
+    "probe": {
+      "streams": [
+        {
+          "index": 0,
+          "codec_name": "h264",
+          "codec_long_name": "H.264 / AVC / MPEG-4 AVC / MPEG-4 part 10",
+          "profile": "High",
+          "codec_type": "video",
+          "codec_tag_string": "avc1",
+          "codec_tag": "0x31637661",
+          "width": 1080,
+          "height": 1920,
+          "coded_width": 1080,
+          "coded_height": 1920,
+          "closed_captions": 0,
+          "film_grain": 0,
+          "has_b_frames": 2,
+          "pix_fmt": "yuv420p",
+          "level": 40,
+          "chroma_location": "left",
+          "field_order": "progressive",
+          "refs": 1,
+          "is_avc": "true",
+          "nal_length_size": "4",
+          "id": "0x1",
+          "r_frame_rate": "15/1",
+          "avg_frame_rate": "15/1",
+          "time_base": "1/15360",
+          "start_pts": 0,
+          "start_time": "0.000000",
+          "duration_ts": 276480,
+          "duration": "18.000000",
+          "bit_rate": "1290342",
+          "bits_per_raw_sample": "8",
+          "nb_frames": "270",
+          "extradata_size": 47,
+          "disposition": {
+            "default": 1,
+            "dub": 0,
+            "original": 0,
+            "comment": 0,
+            "lyrics": 0,
+            "karaoke": 0,
+            "forced": 0,
+            "hearing_impaired": 0,
+            "visual_impaired": 0,
+            "clean_effects": 0,
+            "attached_pic": 0,
+            "timed_thumbnails": 0,
+            "non_diegetic": 0,
+            "captions": 0,
+            "descriptions": 0,
+            "metadata": 0,
+            "dependent": 0,
+            "still_image": 0,
+            "multilayer": 0
+          },
+          "tags": {
+            "language": "und",
+            "handler_name": "VideoHandler",
+            "vendor_id": "[0][0][0][0]",
+            "encoder": "Lavc61.19.101 libx264"
+          }
+        }
+      ],
+      "format": {
+        "filename": "/private/tmp/ov-emotes-sports-revision/repo/creatives/emotes/marketing/exports/openvegas-arcade-reel.mp4",
+        "nb_streams": 1,
+        "nb_programs": 0,
+        "nb_stream_groups": 0,
+        "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+        "format_long_name": "QuickTime / MOV",
+        "start_time": "0.000000",
+        "duration": "18.000000",
+        "size": "2907394",
+        "bit_rate": "1292175",
+        "probe_score": 100,
+        "tags": {
+          "major_brand": "isom",
+          "minor_version": "512",
+          "compatible_brands": "isomiso2avc1mp41",
+          "encoder": "Lavf61.7.100"
+        }
+      }
+    },
+    "keyframes": [
+      {
+        "timeSeconds": 9,
+        "file": "arcade-video-keyframe-9.png"
+      }
+    ]
+  }
+]

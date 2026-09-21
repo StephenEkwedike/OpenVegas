@@ -213,6 +213,7 @@ UI_NO_CACHE_HEADERS = {
 }
 
 UI_PAGES = {
+    "emotes": UI_DIR / "emotes.html",
     "login": UI_DIR / "login.html",
     "product": UI_DIR / "product.html",
     "how-it-works": UI_DIR / "how-it-works.html",

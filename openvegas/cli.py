@@ -2,6 +2,21 @@
 
 from __future__ import annotations
 
+import sys as _hook_sys
+
+# Packaged passive hooks must bypass auth, dotenv, network, and UI imports.
+if _hook_sys.argv[1:2] == ["--openvegas-emote-hook"]:
+    from openvegas.emotes.hook_dispatch import main as _hook_main
+
+    raise SystemExit(_hook_main(_hook_sys.argv[2:]))
+
+if _hook_sys.argv[1:3] == ["emote", "codex-transport"]:
+    from openvegas.emotes.codex_transport import main as _codex_transport_main
+
+    raise SystemExit(_codex_transport_main(_hook_sys.argv[3:]))
+
+del _hook_sys
+
 import asyncio
 import base64
 import difflib
@@ -19,6 +34,7 @@ import sys
 import time
 import uuid
 import webbrowser
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import Enum
@@ -5124,7 +5140,7 @@ def play(
 
 @cli.command()
 @click.argument("prompt")
-@click.option("--provider", default=None, help="Provider (openai/anthropic/gemini)")
+@click.option("--provider", default=None, help="Managed provider, including openrouter; see models.")
 @click.option("--model", default=None, help="Model ID")
 def ask(prompt: str, provider: str | None, model: str | None):
     """Use $V for AI inference."""
@@ -5136,6 +5152,11 @@ def ask(prompt: str, provider: str | None, model: str | None):
         provider = get_default_provider()
     if model is None:
         model = get_default_model(provider)
+    if not model:
+        raise click.ClickException(
+            f"Choose a model from `openvegas models --provider {provider}`, "
+            "then pass its exact ID with --model."
+        )
 
     async def _ask():
         from openvegas.client import OpenVegasClient, APIError
@@ -5194,12 +5215,12 @@ def _build_cli_sprite_renderer(*, dealer_sprite: bool, workspace_root: str):
 
 
 @cli.command()
-@click.option("--provider", default=None, help="Provider (openai/anthropic/gemini)")
+@click.option("--provider", default=None, help="Managed provider, including openrouter; see models.")
 @click.option("--model", default=None, help="Model ID")
 @click.option(
     "--dealer-sprite/--no-dealer-sprite",
     default=False,
-    help="Enable truecolor dealer sprite rendering (defaults to emoji/unicode style).",
+    help="Enable the same-window compositor; animations require equipped, verified emotes.",
 )
 def chat(provider: str | None, model: str | None, dealer_sprite: bool):
     """OpenVegas conversational shell with slash commands and /ui handoff."""
@@ -5210,11 +5231,33 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
 
     current_provider = provider or get_default_provider()
     current_model = model or get_default_model(current_provider)
+    if not current_model:
+        raise click.ClickException(
+            f"Choose a model from `openvegas models --provider {current_provider}`, "
+            "then pass its exact ID with --model."
+        )
     current_thread_id: str | None = None
     current_run_id: str | None = None
     current_run_version: int = 0
     current_signature: str = "sha256:"
     runtime_session_id: str = str(uuid.uuid4())
+    from openvegas.emotes.bridge import ChatEmoteBridge
+    from openvegas.emotes.compositor import TurnCancelled, create_owned_chat
+    from openvegas.tui.voice_refresh import voice_refresh_during_prompt
+    from openvegas.agent import local_tools as model_switch_local_tools
+    from openvegas.tui.model_picker import (
+        ModelSelectionError, format_options, model_options, plan_switch, validate_selection,
+    )
+
+    owned_compositor = None
+
+    def _publish_chat_emote(event):
+        if owned_compositor is not None:
+            return owned_compositor.publish(event)
+        from openvegas.emotes.spool import publish_event
+        return publish_event(event)
+
+    emote_bridge = ChatEmoteBridge(runtime_session_id, publish=_publish_chat_emote)
     workspace_root = str(Path.cwd().resolve())
     workspace_git_root = workspace_root
     workspace_fp = workspace_fingerprint(workspace_root, workspace_git_root)
@@ -5291,7 +5334,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
     show_web_diagnostics = show_user_diagnostics and _env_flag("OPENVEGAS_CHAT_SHOW_WEB_DIAGNOSTICS", "0")
     show_stream_status = show_user_diagnostics and _env_flag("OPENVEGAS_CHAT_SHOW_STREAM_STATUS", "0")
     show_user_echo = _env_flag("OPENVEGAS_CHAT_SHOW_USER_ECHO", "1")
-    allow_model_switch = _env_flag("OPENVEGAS_CHAT_ALLOW_MODEL_SWITCH", "0")
+    allow_model_switch = _env_flag("OPENVEGAS_CHAT_ALLOW_MODEL_SWITCH", "1")
     preferred_openai_models = [
         "gpt-5.4",
         "gpt-5.1",
@@ -5324,7 +5367,11 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
     _ = cfg.get("approval_ui", "menu")  # retained for backward compatibility only
     session_approval = SessionApprovalState()
     dealer_enabled = str(os.getenv("OPENVEGAS_CLI_DEALER_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"}
-    cli_sprite_renderer = _build_cli_sprite_renderer(dealer_sprite=bool(dealer_sprite), workspace_root=workspace_root)
+    # The old printer appended a complete sprite to scrollback on every status.
+    # Equipped emotes use the owned compositor, never a second scrollback writer.
+    cli_sprite_renderer = None
+    if dealer_sprite:
+        console.print("[dim]Use /emote for equipped same-window emotes.[/dim]")
     dealer_panel = DealerPanel(
         console=console,
         enabled=dealer_enabled,
@@ -5336,8 +5383,10 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
         console.print("Chat Commands:")
         console.print("/help - show commands")
         if allow_model_switch:
-            console.print("/provider <openai|anthropic|gemini> [model] - switch provider")
+            console.print("/models [search] - list available models")
+            console.print("/provider <provider> [model] - list provider models or switch")
             console.print("/model <model_id> - switch model")
+            console.print("/continuity <on|off> - opt-in complete text-only history; no tools/attachments")
         console.print("/plan [on|off] - toggle plan mode (read-only intent)")
         console.print("/approve <ask|allow|exclude> - mutating tool approval mode")
         console.print("/style - deprecated (minimal style is always on)")
@@ -5852,6 +5901,12 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
 
     def _insert_voice_transcript_text(transcript: str) -> tuple[str, int]:
         nonlocal pending_voice_prefill, pending_voice_meta, prompt_input_active
+        if owned_compositor is not None:
+            if owned_compositor.insert_voice(transcript):
+                chars = len(str(transcript).strip())
+                emit_metric("voice_capture_phase_total", {"phase": "transcript_inserted_live"})
+                return "live", chars
+            return "none", 0
         pending_voice_prefill, mode, chars = _insert_or_queue_voice_transcript(
             transcript=transcript,
             chat_prompt_session=chat_prompt_session,
@@ -6022,7 +6077,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             raise
 
     def _erase_prompt_line_if_possible() -> None:
-        if not use_prompt_toolkit_chat:
+        if not use_prompt_toolkit_chat or owned_compositor is not None:
             return
         try:
             if not bool(getattr(sys.stdout, "isatty", lambda: False)()):
@@ -6032,6 +6087,15 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             stream.flush()
         except Exception:
             return
+
+    async def _chat_modal(callback):
+        if owned_compositor is not None:
+            return await owned_compositor.run_external(callback)
+        return callback()
+
+    def _chat_drain_stdin() -> None:
+        if owned_compositor is None:
+            _drain_stdin_buffer(window_ms=0)
 
     def _render_usage_summary(payload: dict[str, Any]) -> None:
         if not show_token_usage:
@@ -6148,6 +6212,30 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
         nonlocal last_assistant_text_for_turn
 
         from openvegas.client import APIError
+        emote_turn = emote_bridge.current_turn
+
+        canonical_chat = getattr(client, "_canonical_chat", None)
+        if isinstance(canonical_chat, dict):
+            if pending_attachments:
+                raise APIError(400, "Attachment continuity is unsupported; use /continuity off to start fresh.")
+            if not canonical_chat.get("revision"):
+                raise APIError(409, "Continuity is blocked; start fresh with /continuity off.")
+            if _has_workspace_tooling_intent(user_message):
+                raise APIError(400, "Continuity mode is text-only; use /continuity off for local tools.")
+            result = await client._request("POST", "/models/conversations/ask", json={
+                "provider": current_provider, "model": current_model,
+                "thread_id": current_thread_id, "expected_revision": canonical_chat["revision"],
+                "prompt": user_message, "idempotency_key": str(uuid.uuid4()),
+            })
+            canonical_chat["revision"] = result.get("revision")
+            final_text = str(result.get("text") or "")
+            for warning in result.get("warnings", []):
+                console.print(warning, markup=False)
+            render_assistant(console, final_text)
+            last_assistant_text_for_turn = final_text
+            _render_usage_summary(result)
+            emote_bridge.finish(success=bool(final_text) and not result.get("continuity_blocked"), turn=emote_turn)
+            return bool(final_text)
 
         def _maybe_warn_context_disabled(result_payload: dict[str, Any]) -> None:
             nonlocal context_warning_emitted
@@ -6220,7 +6308,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
 
             seen_event_keys: set[tuple[str, str, str, int]] = set()
             chunks: list[str] = []
-            completed_payload: dict[str, Any] = {}
+            completed_payload: dict[str, Any] | None = None
             try:
                 async for raw_event in ask_stream_fn(
                     prompt,
@@ -6299,11 +6387,21 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         if delta:
                             chunks.append(delta)
                         continue
-                    if event_name in {"response.error", "error"}:
+                    if event_name in {"response.error", "error"} or (
+                        event_name in {"response.completed", "stream_end"}
+                        and payload_dict.get("status") == "error"
+                    ):
                         code = str(payload_dict.get("error") or "stream_error")
                         detail = str(payload_dict.get("detail") or code)
                         raise APIError(400, f"{code}: {detail}", data=payload_dict)
-                    if event_name in {"response.completed", "stream_end"}:
+                    # stream_end is only a marker; response.completed carries the final result.
+                    if event_name == "response.completed":
+                        if payload_dict.get("status") != "ok":
+                            raise APIError(
+                                502,
+                                "invalid_stream_completion: response.completed must have status 'ok'",
+                                data={"error": "invalid_stream_completion"},
+                            )
                         completed_payload = dict(payload_dict)
                         continue
             except APIError as e:
@@ -6322,6 +6420,13 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         attachments=attachments,
                     )
                 raise
+
+            if completed_payload is None:
+                raise APIError(
+                    502,
+                    "incomplete_stream: stream ended before response.completed; result is unconfirmed",
+                    data={"error": "incomplete_stream"},
+                )
 
             merged_text = "".join(chunks).strip()
             if not merged_text:
@@ -6384,6 +6489,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     workspace_root,
                 )
                 _render_usage_summary(final_res if isinstance(final_res, dict) else {})
+            emote_bridge.finish(success=bool(final_text) and reason in {"completed", "spurious_mutation_block_ignored", "duplicate_suppressed"}, turn=emote_turn)
             return LoopAction.FINALIZED
 
         async def _execute_with_heartbeat(
@@ -7007,6 +7113,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         workspace_root,
                     )
                     _render_usage_summary(one_shot if isinstance(one_shot, dict) else {})
+                    emote_bridge.finish(success=bool(final_text), turn=emote_turn)
                     return True
 
                 prompt = _tool_protocol_prompt(
@@ -7138,6 +7245,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     _tool_debug("fallback synthesized fs_apply_patch after model produced no tool request")
                 else:
                     if step == 0 and not completion_criteria.active and not edit_intent and not tool_observations:
+                        emote_bridge.finish(success=bool(last_assistant_text_for_turn), turn=emote_turn)
                         return True
                     if completion_criteria.requires_mutation:
                         synth_skip_reason = _diagnose_synth_write_skip_reason(
@@ -7351,8 +7459,9 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                             1.0,
                             float(os.getenv("OPENVEGAS_IDE_INTERACTIVE_DIFF_TIMEOUT_SEC", "12")),
                         )
+                        emote_bridge.pause(turn=emote_turn)
                         try:
-                            _maybe_prompt_vscode_extension_for_interactive_diff()
+                            await _chat_modal(_maybe_prompt_vscode_extension_for_interactive_diff)
                             envelope = await asyncio.wait_for(
                                 client.ide_message(
                                     request_id=f"show-diff-{uuid.uuid4()}",
@@ -7432,6 +7541,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                             ide_fallback_reason = "ide_bridge_unavailable"
                             if _ide_bridge_trace_enabled():
                                 _ide_bridge_debug(f"interactive diff bridge error={type(e).__name__}: {e}")
+                        finally:
+                            emote_bridge.resume(turn=emote_turn)
 
                     if raw_diff_result is None and patch_text.strip() and _terminal_diff_fallback_enabled():
                         parsed_original = parse_unified_patch_terminal(patch_text)
@@ -7470,14 +7581,18 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                             continue
 
                         emit_metric("tool_terminal_diff_invoked_total", {"tool": "write"})
-                        _drain_stdin_buffer(window_ms=0)
-                        raw_diff_result = review_patch_terminal(
-                            path=write_path,
-                            patch_text=patch_text,
-                            allow_partial_accept=True,
-                            console=console,
-                        )
-                        _drain_stdin_buffer(window_ms=0)
+                        _chat_drain_stdin()
+                        emote_bridge.pause(turn=emote_turn)
+                        try:
+                            raw_diff_result = await _chat_modal(lambda write_path=write_path, patch_text=patch_text: review_patch_terminal(
+                                path=write_path,
+                                patch_text=patch_text,
+                                allow_partial_accept=True,
+                                console=console,
+                            ))
+                        finally:
+                            emote_bridge.resume(turn=emote_turn)
+                        _chat_drain_stdin()
                         diff_surface = "terminal"
                     elif raw_diff_result is None and patch_text.strip():
                         emit_metric("tool_show_diff_skipped_total", {"reason": "terminal_fallback_disabled"})
@@ -7611,14 +7726,18 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     if not should_auto_allow(session_approval, action_scope):
                         dealer_panel.render(map_lifecycle_event_to_state("approval_wait"), "approval required")
                         action_label = describe_tool_action(tool_name, arguments)
-                        _drain_stdin_buffer(window_ms=0)
-                        decision = choose_approval(
-                            tool_name=tool_name,
-                            arguments=arguments if isinstance(arguments, dict) else {},
-                            action_label=action_label,
-                            console=console,
-                        )
-                        _drain_stdin_buffer(window_ms=0)
+                        _chat_drain_stdin()
+                        emote_bridge.pause(turn=emote_turn)
+                        try:
+                            decision = await _chat_modal(lambda tool_name=tool_name, arguments=arguments, action_label=action_label: choose_approval(
+                                tool_name=tool_name,
+                                arguments=arguments if isinstance(arguments, dict) else {},
+                                action_label=action_label,
+                                console=console,
+                            ))
+                        finally:
+                            emote_bridge.resume(turn=emote_turn)
+                        _chat_drain_stdin()
                         apply_approval_decision(session_approval, action_scope, decision)
                         if decision == ApprovalDecision.DENY_AND_REPLAN:
                             policy_denied = True
@@ -8307,6 +8426,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
 
         async def _read_chat_message() -> str:
             nonlocal prompt_toolkit_unavailable_warned, chat_prompt_session, chat_prompt_bindings, pending_voice_prefill, pending_voice_meta, prompt_input_active
+            nonlocal owned_compositor
             if use_prompt_toolkit_chat:
                 if PromptSession is None:
                     if not prompt_toolkit_unavailable_warned:
@@ -8326,12 +8446,15 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
 
                         @chat_prompt_bindings.add("escape", "v")
                         def _chat_toggle_voice(event) -> None:
-                            buf = event.current_buffer
+                            buf = chat_prompt_session.default_buffer if owned_compositor is not None else event.current_buffer
                             saved_text = str(buf.text or "")
                             saved_cursor = int(getattr(buf, "cursor_position", 0) or 0)
                             loop = asyncio.get_event_loop()
 
                             def _insert_from_voice(transcript: str) -> None:
+                                if owned_compositor is not None:
+                                    _insert_voice_transcript_text(transcript)
+                                    return
                                 token = str(transcript or "").strip()
                                 if not token:
                                     emit_metric("voice_capture_phase_total", {"phase": "transcript_empty"})
@@ -8381,15 +8504,24 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                                 if not was_listening and voice_button.is_recording:
                                     console.print("[dim]Listening... click Voice again to stop.[/dim]")
 
-                            loop.create_task(_do_toggle())
+                            if owned_compositor is not None:
+                                owned_compositor.app.create_background_task(_do_toggle())
+                            else:
+                                loop.create_task(_do_toggle())
 
                         @chat_prompt_bindings.add("escape", "m")
                         def _chat_mcp_list(event) -> None:
+                            if owned_compositor is not None:
+                                owned_compositor.request_command("/mcp list")
+                                return
                             event.current_buffer.text = "/mcp list"
                             event.current_buffer.validate_and_handle()
 
                         @chat_prompt_bindings.add("escape", "a")
                         def _chat_actions_help(event) -> None:
+                            if owned_compositor is not None:
+                                owned_compositor.request_command("/help")
+                                return
                             event.current_buffer.text = "/help"
                             event.current_buffer.validate_and_handle()
 
@@ -8418,6 +8550,13 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                                 state["editing"] = False
 
                         chat_prompt_session.default_buffer.on_text_changed += _on_text_changed
+                        owned_compositor = await create_owned_chat(
+                            chat_prompt_session, console, session_id=runtime_session_id,
+                            voice_active=lambda: voice_button.is_recording,
+                            mode=os.getenv("OPENVEGAS_CHAT_COMPOSITOR", "on" if dealer_sprite else "auto"),
+                        )
+                        if owned_compositor is not None:
+                            chat_prompt_session = owned_compositor
 
                     try:
                         composer_rprompt = lambda: str(
@@ -8462,8 +8601,14 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                                         buf.validate_and_handle()
                                     return
                                 if submit:
-                                    buf.text = command
-                                    buf.validate_and_handle()
+                                    if owned_compositor is not None:
+                                        if command == "/voice":
+                                            _chat_toggle_voice(None)
+                                        elif not owned_compositor.request_command(command):
+                                            console.print("[dim]Finish or cancel the current task before that action.[/dim]")
+                                    else:
+                                        buf.text = command
+                                        buf.validate_and_handle()
                                 else:
                                     if str(buf.text or "").strip():
                                         buf.insert_text(" ")
@@ -8516,18 +8661,22 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                             pending_voice_meta = None
                         prompt_input_active = True
                         try:
-                            raw = await chat_prompt_session.prompt_async(
-                                "chat: ",
-                                key_bindings=chat_prompt_bindings,
-                                multiline=False,
-                                wrap_lines=True,
-                                rprompt=composer_rprompt,
-                                mouse_support=mouse_actions_enabled,
-                                bottom_toolbar=toolbar_fn,
-                                style=prompt_style,
-                                refresh_interval=0.15,
-                                default=prefill_default,
+                            voice_refresh = nullcontext() if owned_compositor is not None else voice_refresh_during_prompt(
+                                chat_prompt_session.app, lambda: voice_button.is_recording,
                             )
+                            async with voice_refresh:
+                                raw = await chat_prompt_session.prompt_async(
+                                    "chat: ",
+                                    key_bindings=chat_prompt_bindings,
+                                    multiline=False,
+                                    wrap_lines=True,
+                                    rprompt=composer_rprompt,
+                                    mouse_support=mouse_actions_enabled,
+                                    bottom_toolbar=toolbar_fn,
+                                    style=prompt_style,
+                                    refresh_interval=None,
+                                    default=prefill_default,
+                                )
                         finally:
                             prompt_input_active = False
                     except EOFError:
@@ -8597,6 +8746,15 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     return "exit"
                 if cmd == "/help":
                     _show_help()
+                    console.print("[dim]/emote - same-window emote status and equipment instructions[/dim]")
+                    continue
+                if cmd == "/emote":
+                    if owned_compositor is not None:
+                        console.print("Same-window compositor active. History, input, voice and emotes share one terminal owner.")
+                    else:
+                        console.print("Same-window emotes activate automatically when an owned pack is equipped.")
+                    console.print("Choose equipment with `openvegas emote`, then reopen chat. Only server-verified equipped packs animate.")
+                    console.print("[dim]Optional empty compositor: OPENVEGAS_CHAT_COMPOSITOR=on openvegas chat. Use off for legacy input.[/dim]")
                     continue
                 if cmd == "/legend":
                     _show_legend()
@@ -8956,43 +9114,114 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     approval_mode = mode
                     console.print(f"[green]Approval mode set to {approval_mode}.[/green]")
                     continue
-                if cmd == "/provider":
-                    if not allow_model_switch:
-                        console.print("[yellow]Provider switching is disabled in this environment.[/yellow]")
+                if cmd == "/continuity":
+                    if parts not in [["/continuity", "on"], ["/continuity", "off"]]:
+                        console.print("Use /continuity on for text-only history, or off for a fresh coding conversation.")
                         continue
-                    if len(parts) < 2:
-                        console.print("[red]Usage: /provider <openai|anthropic|gemini> [model][/red]")
+                    if parts[1] == "on" and not allow_model_switch:
+                        console.print("Model switching is disabled in this environment.")
                         continue
-                    next_provider = parts[1].strip().lower()
-                    if next_provider not in {"openai", "anthropic", "gemini"}:
-                        console.print("[red]Provider must be openai, anthropic, or gemini.[/red]")
+                    if parts[1] == "on" and conversation_mode != "persistent":
+                        console.print("Canonical continuity requires explicit persistent conversation mode.")
                         continue
-                    next_model = parts[2].strip() if len(parts) >= 3 else get_default_model(next_provider)
-                    if next_provider != current_provider and current_thread_id:
-                        if not Confirm.ask(
-                            "Switching provider resets context thread. Continue?",
-                            default=False,
-                        ):
-                            continue
-                        current_thread_id = None
-                    current_provider = next_provider
-                    current_model = next_model
-                    web_search_requested = (
-                        current_provider == "openai"
-                        and str(os.getenv("OPENVEGAS_CHAT_WEB_SEARCH_DEFAULT", "1")).strip().lower()
-                        in {"1", "true", "yes", "on"}
-                    )
-                    console.print(f"[green]Provider/model set to {current_provider}/{current_model}.[/green]")
+                    if pending_attachments or any(job.process.returncode is None for job in model_switch_local_tools._BACKGROUND_JOBS.values()):
+                        console.print("Finish/cancel tools and remove pending attachments first.")
+                        continue
+                    if not await _chat_modal(lambda: Confirm.ask("Start a fresh conversation? Text-only mode disables tools, attachments and web search; existing context will not transfer.", default=False)):
+                        continue
+                    try:
+                        if startup_bootstrap_task is not None:
+                            await asyncio.shield(startup_bootstrap_task)
+                        created = None
+                        if parts[1] == "on":
+                            if conversation_mode != "persistent":
+                                raise ModelSelectionError("Persistent mode is no longer enabled; conversation unchanged.")
+                            created = await client._request("POST", "/models/conversations", json={
+                                "provider": current_provider, "model": current_model,
+                            })
+                            if not created.get("thread_id") or not created.get("revision"):
+                                raise ModelSelectionError("Backend did not create canonical context; model unchanged.")
+                        current_thread_id = created["thread_id"] if created else None
+                        client._canonical_chat = {"revision": created["revision"]} if created else None
+                        chat_transcript.clear()
+                        console.print("Fresh text-only continuity enabled." if created else "Fresh coding conversation selected.")
+                    except (APIError, ModelSelectionError) as exc:
+                        console.print(f"Conversation unchanged: {exc}", markup=False)
                     continue
-                if cmd == "/model":
+                if cmd in {"/models", "/provider", "/model"}:
                     if not allow_model_switch:
-                        console.print("[yellow]Model switching is disabled in this environment.[/yellow]")
+                        console.print("Model switching is disabled in this environment.")
                         continue
-                    if len(parts) < 2:
-                        console.print("[red]Usage: /model <model_id>[/red]")
-                        continue
-                    current_model = parts[1].strip()
-                    console.print(f"[green]Model set to {current_model}.[/green]")
+                    try:
+                        # Startup sync can otherwise overwrite the model during validation.
+                        if startup_bootstrap_task is not None:
+                            await asyncio.shield(startup_bootstrap_task)
+                        if cmd == "/models" or (cmd == "/provider" and len(parts) == 2):
+                            listed_provider = parts[1].lower() if cmd == "/provider" else None
+                            payload = await client.list_models(listed_provider)
+                            search = " ".join(parts[1:]) if cmd == "/models" else ""
+                            console.print(format_options(model_options(payload, search=search)), markup=False)
+                            continue
+                        if (cmd == "/provider" and len(parts) != 3) or (cmd == "/model" and len(parts) != 2):
+                            console.print("Use /provider <provider> <model_id> or /model <model_id>.")
+                            continue
+                        next_provider = parts[1].lower() if cmd == "/provider" else current_provider
+                        next_model = parts[2] if cmd == "/provider" else parts[1]
+                        target = await validate_selection(client, next_provider, next_model)
+                        plan_args = dict(
+                            current_provider=current_provider, current_model=current_model,
+                            thread_id=current_thread_id, pending_attachments=bool(pending_attachments),
+                            has_history=bool(chat_transcript),
+                            tools_pending=any(
+                                job.process.returncode is None
+                                for job in model_switch_local_tools._BACKGROUND_JOBS.values()
+                            ),
+                        )
+                        if isinstance(getattr(client, "_canonical_chat", None), dict):
+                            if plan_args["pending_attachments"] or plan_args["tools_pending"]:
+                                console.print("Finish/cancel tools and remove attachments before switching.")
+                                continue
+                            payload = {"provider": next_provider, "model": next_model, "thread_id": current_thread_id}
+                            proposal = await client._request("POST", "/models/switch", json=payload)
+                            if proposal.get("status") != "ready" or not proposal.get("revision"):
+                                raise ModelSelectionError("Backend did not validate canonical continuity.")
+                            if not await _chat_modal(lambda: Confirm.ask("Transfer complete canonical text? Tools and attachments are unsupported. No model call is made by switching.", default=False)):
+                                continue
+                            applied = await client._request("POST", "/models/switch", json={
+                                **payload, "commit": True, "expected_revision": proposal["revision"],
+                            })
+                            if (
+                                applied.get("context_transferred") is not True
+                                or not applied.get("thread_id")
+                                or applied.get("revision") != proposal["revision"]
+                            ):
+                                raise ModelSelectionError("Backend did not confirm the transfer; model unchanged.")
+                            current_provider, current_model, current_thread_id = next_provider, next_model, applied["thread_id"]
+                            client._canonical_chat = {"revision": applied["revision"]}
+                            web_search_requested = False
+                            console.print(f"Selected {current_provider}/{current_model}; full canonical text retained, no tool replay.", markup=False)
+                            continue
+                        switch = plan_switch(target, **plan_args)
+                        if switch.status == "confirm_fresh":
+                            if not await _chat_modal(lambda switch=switch: Confirm.ask(switch.message + " Continue?", default=False)):
+                                continue
+                            # Revalidate after a potentially long confirmation prompt.
+                            target = await validate_selection(client, next_provider, next_model)
+                            switch = plan_switch(target, **plan_args, confirm_fresh=True)
+                        if switch.status != "ready":
+                            console.print(switch.message, markup=False)
+                            continue
+                        # No await between the final decision and local state assignment.
+                        current_provider, current_model, current_thread_id = (
+                            switch.provider, switch.model, switch.thread_id,
+                        )
+                        web_search_requested = (
+                            current_provider == "openai"
+                            and _env_flag("OPENVEGAS_CHAT_WEB_SEARCH_DEFAULT", "1")
+                        )
+                        console.print(f"Selected {current_provider}/{current_model}. {switch.message}", markup=False)
+                    except (APIError, ModelSelectionError) as exc:
+                        console.print(f"Model unchanged: {exc}", markup=False)
                     continue
                 if cmd == "/ui":
                     if current_run_id:
@@ -9036,11 +9265,16 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 console.print("[red]Unknown slash command. Use /help.[/red]")
                 continue
 
+            if isinstance(getattr(client, "_canonical_chat", None), dict) and (
+                pending_attachments or _message_requests_attachment_analysis(message)
+            ):
+                console.print("Attachment continuity is unsupported; use /continuity off for a fresh coding conversation.")
+                continue
             turn_is_workspace_intent = _has_workspace_tooling_intent(message)
             auto_paths: list[str] = []
             unresolved_inline: list[str] = []
             auto_resolve_timed_out = False
-            if not turn_is_workspace_intent:
+            if not turn_is_workspace_intent and not isinstance(getattr(client, "_canonical_chat", None), dict):
                 if not pending_attachments:
                     if _extract_filename_like_tokens(message):
                         _render_capability_status("file_read", "parsing files...")
@@ -9276,8 +9510,17 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     )
                     render_status_bar(console, _status_actor(), "image input unavailable", workspace_root)
                     continue
+            active_emote_turn = None
             try:
-                rendered = await _run_tool_loop(client, message)
+                active_emote_turn = emote_bridge.begin()
+                async with emote_bridge.supervise(turn=active_emote_turn):
+                    if owned_compositor is not None:
+                        rendered = await owned_compositor.run_turn(
+                            _run_tool_loop(client, message),
+                            on_cancel=lambda turn=active_emote_turn: emote_bridge.cancel(turn=turn),
+                        )
+                    else:
+                        rendered = await _run_tool_loop(client, message)
                 if not rendered:
                     console.print("[dim](no final assistant response)[/dim]")
                 elif str(last_assistant_text_for_turn or "").strip():
@@ -9295,7 +9538,14 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 voice_transcript_context_for_turn = ""
                 attachment_file_ids_for_turn = []
 
+            except TurnCancelled:
+                attachment_markers_for_turn = []
+                attachment_context_for_turn = ""
+                voice_transcript_context_for_turn = ""
+                attachment_file_ids_for_turn = []
+                console.print("[dim]Task cancelled. Your draft is still in the input.[/dim]")
             except APIError as e:
+                emote_bridge.finish(success=False, turn=active_emote_turn)
                 attachment_markers_for_turn = []
                 attachment_context_for_turn = ""
                 voice_transcript_context_for_turn = ""
@@ -9314,7 +9564,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     except Exception:
                         enabled_models = []
                     suggestions = [s for s in enabled_models if s][:3]
-                    if not allow_model_switch and suggestions:
+                    if not allow_model_switch and suggestions and current_provider != "openrouter":
                         previous_model = current_model
                         current_model = _pick_preferred_model(enabled_models, current_model)
                         console.print(
@@ -9341,6 +9591,10 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                             console.print(f"[red]{e.detail}[/red]")
                     except Exception:
                         console.print(f"[red]{e.detail}[/red]")
+
+            finally:
+                if active_emote_turn is not None:
+                    emote_bridge.cancel(turn=active_emote_turn)
 
     use_fullscreen_chat = str(os.getenv("OPENVEGAS_CHAT_FULLSCREEN", "0")).strip().lower() in {
         "1",
@@ -9407,9 +9661,21 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 f" ({type(exc).__name__})[/yellow]"
             )
 
+    async def _run_chat_with_owner() -> str:
+        nonlocal owned_compositor, chat_prompt_session, chat_prompt_bindings
+        try:
+            return await _run_chat()
+        finally:
+            if owned_compositor is not None:
+                voice_button.stop_if_recording()
+                await owned_compositor.close()
+                owned_compositor = None
+                chat_prompt_session = None
+                chat_prompt_bindings = None
+
     try:
         while True:
-            outcome = run_async(_run_chat())
+            outcome = run_async(_run_chat_with_owner())
             if outcome == "ui":
                 from openvegas.tui.prompt_ui import run_prompt_ui
 
@@ -9417,6 +9683,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 continue
             break
     finally:
+        emote_bridge.close()
         aclose = getattr(client, "aclose", None)
         if callable(aclose):
             try:
@@ -9451,7 +9718,12 @@ def models(provider: str | None):
             table.add_column("Status")
 
             for m in models_list:
-                status = "[green]enabled[/green]" if m.get("enabled") else "[red]disabled[/red]"
+                if not m.get("enabled"):
+                    status = "[red]disabled[/red]"
+                elif m.get("available") is False:
+                    status = "[yellow]unavailable[/yellow]"
+                else:
+                    status = "[green]available[/green]"
                 table.add_row(
                     m.get("provider", ""),
                     m.get("model_id", ""),
@@ -9927,8 +10199,9 @@ def config_set(key: str, value: str):
     config = load_config()
 
     if key == "default_provider":
-        if value not in ("openai", "anthropic", "gemini"):
-            console.print("[red]Provider must be openai, anthropic, or gemini[/red]")
+        from openvegas.gateway.providers import PROVIDERS
+        if value not in PROVIDERS:
+            console.print("Provider must be one of: " + ", ".join(PROVIDERS), markup=False)
             return
         config["default_provider"] = value
     elif key.startswith("default_model_"):
@@ -9986,6 +10259,11 @@ def config_show():
             display["providers"][p]["api_key"] = key[:8] + "..." if key else ""
 
     console.print(json.dumps(display, indent=2))
+
+
+from openvegas.emotes.commands import emote
+
+cli.add_command(emote)
 
 
 if __name__ == "__main__":

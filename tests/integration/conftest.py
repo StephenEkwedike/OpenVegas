@@ -45,7 +45,7 @@ def integration_environment(monkeypatch):
     for name in tuple(os.environ):
         if name.startswith(("STRIPE_", "SUPABASE_", "OPENVEGAS_WIN_ALWAYS", "OPENVEGAS_DEMO_")):
             monkeypatch.delenv(name, raising=False)
-    for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
+    for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "MISTRAL_API_KEY", "OPENROUTER_API_KEY"):
         monkeypatch.delenv(name, raising=False)
     for name, value in {
         "DATABASE_URL": dsn,
@@ -77,7 +77,7 @@ def migration_runner(integration_environment):
     if not file.is_file():
         pytest.fail("Configured integration migration runner is not a file", pytrace=False)
 
-    async def apply(dsn, *, through=38):
+    async def apply(dsn, *, through=43):
         # Exercise the coordinator's actual CLI, guards, lock, and journal handling.
         env = dict(os.environ, DATABASE_URL=dsn, PYTHONDONTWRITEBYTECODE="1")
         proc = await asyncio.create_subprocess_exec(
@@ -105,7 +105,7 @@ class DatabaseSandbox:
         self._max_size = max_size
         self._runner = runner
 
-    async def migrate(self, *, through=38):
+    async def migrate(self, *, through=43):
         await self._runner(self._dsn, through=through)
 
     async def reconnect(self):
@@ -147,7 +147,7 @@ async def database_factory(integration_environment, migration_runner):
         raise
 
     @asynccontextmanager
-    async def create(*, through=38, max_size=20):
+    async def create(*, through=43, max_size=20):
         existing = await admin.fetchval("""
             SELECT EXISTS (
                 SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace

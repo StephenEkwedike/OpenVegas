@@ -1,0 +1,15 @@
+{
+  "source_sha256": "172daebf30ecb07831e74552fe6ffba6c3e1c7e9aaad754ff0b60ab8e120789b",
+  "generation": "built-in image_gen",
+  "prompt": "Final condensed authoring brief: Blue-and-amber human dunker versus a generic green-uniform human defender. Dribble, gather, leap, dunk, land and celebrate. Twelve original chronological pixel-art poses, 4x3 equal grid, stable side camera, no real athlete/team/brand marks. User correction: all opponents are generic HUMAN players; no robots. Full edit requests are recorded in task history.",
+  "approval": "original-sports-preview; native-animation-and-sale-review-pending",
+  "purchasable": false,
+  "authored_frames": 12,
+  "duration_seconds": 5.3999999999999995,
+  "normalization": "fixed 4x3 cell crop; one proportional scale; shared baseline; alpha threshold 160; retained RGB unchanged",
+  "connected_neutral_matte_cleanup": true,
+  "highlight_reference_sha256": "98b21bfb40778893d830b1b41f1d4be04623a8ec95f0011970543936faeb4e04",
+  "source_format": "editable raster PNG, not a layered Aseprite master",
+  "rights": "Original characters and kits. No athlete, team or league endorsement claimed.",
+  "highlight_reference": "Creative source detail-reference.png: transparent white highlights only; no opponent figures."
+}

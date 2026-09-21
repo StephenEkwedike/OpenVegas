@@ -1,0 +1,8 @@
+{
+  "checked_files": 457,
+  "checked_sources": 44,
+  "frames": 1956,
+  "notice": "Actual POSIX PTY renderer output. SIMULATED lifecycle and controller clock. Replay PNGs are deterministic ANSI-emulator renderings, NOT native-OS screenshots. No native desktop scroll/selection/voice certification, external host certification, user final art approval, ownership, or sale approval.",
+  "result": "PASS",
+  "sessions": 24
+}

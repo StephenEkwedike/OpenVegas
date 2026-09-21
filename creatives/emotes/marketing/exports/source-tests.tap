@@ -1,0 +1,136 @@
+TAP version 13
+# Subtest: Four coherent campaigns with exactly three unique layouts each
+ok 1 - Four coherent campaigns with exactly three unique layouts each
+  ---
+  duration_ms: 0.580875
+  type: 'test'
+  ...
+# Subtest: companions-01: semantic content, caption, alt text, and local assets
+ok 2 - companions-01: semantic content, caption, alt text, and local assets
+  ---
+  duration_ms: 4.311708
+  type: 'test'
+  ...
+# Subtest: companions-02: semantic content, caption, alt text, and local assets
+ok 3 - companions-02: semantic content, caption, alt text, and local assets
+  ---
+  duration_ms: 0.410833
+  type: 'test'
+  ...
+# Subtest: companions-03: semantic content, caption, alt text, and local assets
+ok 4 - companions-03: semantic content, caption, alt text, and local assets
+  ---
+  duration_ms: 0.255625
+  type: 'test'
+  ...
+# Subtest: sports-01: semantic content, caption, alt text, and local assets
+ok 5 - sports-01: semantic content, caption, alt text, and local assets
+  ---
+  duration_ms: 3.98925
+  type: 'test'
+  ...
+# Subtest: sports-02: semantic content, caption, alt text, and local assets
+ok 6 - sports-02: semantic content, caption, alt text, and local assets
+  ---
+  duration_ms: 0.336584
+  type: 'test'
+  ...
+# Subtest: sports-03: semantic content, caption, alt text, and local assets
+ok 7 - sports-03: semantic content, caption, alt text, and local assets
+  ---
+  duration_ms: 0.364458
+  type: 'test'
+  ...
+# Subtest: models-01: semantic content, caption, alt text, and local assets
+ok 8 - models-01: semantic content, caption, alt text, and local assets
+  ---
+  duration_ms: 0.304667
+  type: 'test'
+  ...
+# Subtest: models-02: semantic content, caption, alt text, and local assets
+ok 9 - models-02: semantic content, caption, alt text, and local assets
+  ---
+  duration_ms: 0.578042
+  type: 'test'
+  ...
+# Subtest: models-03: semantic content, caption, alt text, and local assets
+ok 10 - models-03: semantic content, caption, alt text, and local assets
+  ---
+  duration_ms: 1.540917
+  type: 'test'
+  ...
+# Subtest: arcade-01: semantic content, caption, alt text, and local assets
+ok 11 - arcade-01: semantic content, caption, alt text, and local assets
+  ---
+  duration_ms: 0.446958
+  type: 'test'
+  ...
+# Subtest: arcade-02: semantic content, caption, alt text, and local assets
+ok 12 - arcade-02: semantic content, caption, alt text, and local assets
+  ---
+  duration_ms: 0.277833
+  type: 'test'
+  ...
+# Subtest: arcade-03: semantic content, caption, alt text, and local assets
+ok 13 - arcade-03: semantic content, caption, alt text, and local assets
+  ---
+  duration_ms: 0.249208
+  type: 'test'
+  ...
+# Subtest: Authored original pack integrity: pixel-courier
+ok 14 - Authored original pack integrity: pixel-courier
+  ---
+  duration_ms: 1.434542
+  type: 'test'
+  ...
+# Subtest: Authored original pack integrity: beat-maker
+ok 15 - Authored original pack integrity: beat-maker
+  ---
+  duration_ms: 0.712875
+  type: 'test'
+  ...
+# Subtest: Authored original pack integrity: visor-explorer
+ok 16 - Authored original pack integrity: visor-explorer
+  ---
+  duration_ms: 0.739875
+  type: 'test'
+  ...
+# Subtest: Bundled brand fonts and original licenses
+ok 17 - Bundled brand fonts and original licenses
+  ---
+  duration_ms: 0.771625
+  type: 'test'
+  ...
+# Subtest: No remote runtime URL or procedural character synthesis
+ok 18 - No remote runtime URL or procedural character synthesis
+  ---
+  duration_ms: 4.334375
+  type: 'test'
+  ...
+# Subtest: Sports registry cannot silently alias missing finished art
+ok 19 - Sports registry cannot silently alias missing finished art
+  ---
+  duration_ms: 6.002458
+  type: 'test'
+  ...
+# Subtest: Source captions preserve product boundaries and pane requirement
+ok 20 - Source captions preserve product boundaries and pane requirement
+  ---
+  duration_ms: 0.562458
+  type: 'test'
+  ...
+# Subtest: Published captions enforce actual integration limits and current mask provenance
+ok 21 - Published captions enforce actual integration limits and current mask provenance
+  ---
+  duration_ms: 0.879625
+  type: 'test'
+  ...
+1..21
+# tests 21
+# suites 0
+# pass 21
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 100.5

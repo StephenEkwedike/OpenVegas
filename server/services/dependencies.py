@@ -327,8 +327,12 @@ async def assert_schema_compatible(db: Any, flags: FeatureFlags) -> None:
         )
 
     if flags.store_enabled:
-        await require_migration_min(db, "009_inference_grant_usages_and_preauth")
-        await require_tables(db, {"store_orders", "inference_token_grants", "inference_grant_usages"})
+        await require_migration_min(db, "039_cosmetic_entitlements")
+        await require_tables(db, {
+            "store_orders", "inference_token_grants", "inference_grant_usages",
+            "cosmetic_entitlements", "cosmetic_equipment", "store_purchase_requests",
+            "cosmetic_entitlement_events",
+        })
 
     if flags.inference_enabled:
         await require_tables(db, {"inference_preauthorizations", "inference_usage"})
