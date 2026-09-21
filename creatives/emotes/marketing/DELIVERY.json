@@ -102,7 +102,7 @@
     {
       "slug": "bicycle-finish",
       "sheet": "assets/sports/bicycle-finish/sheet.png",
-      "sha256": "c2e2ba1c5296478b00941d735838dee85ce1c5316bb908b7f771e19a24db015b",
+      "sha256": "cf8edb700da1a7abc9d316df0611dd6f1f56d4e78f3fb52aee28101de1bf5789",
       "frame": {
         "width": 160,
         "height": 120,
@@ -112,14 +112,14 @@
         ]
       },
       "completionMs": 5400,
-      "provenanceSha256": "9b619ff54351fd34490b7df07ed0436d2231f20de3c1245bcfd2ebdd2b349800",
+      "provenanceSha256": "f8281c6f19256f3c887068f5bc57e6fbddec364a06589003c6eabe6c6a9ad9dd",
       "highlightReferenceSha256": null,
-      "version": "0.1.1"
+      "version": "0.1.2"
     },
     {
       "slug": "three-point-glow",
       "sheet": "assets/sports/three-point-glow/sheet.png",
-      "sha256": "26dc179cf22a1ef44d7cb79afd26d20eb3a03ff4c4591c2de54e2d851f7421ce",
+      "sha256": "78818868e6f5a87dfe01831e2f636557a70616bf2ad1b83cfb76da3995d69487",
       "frame": {
         "width": 160,
         "height": 120,
@@ -129,9 +129,9 @@
         ]
       },
       "completionMs": 5400,
-      "provenanceSha256": "7ca33d849b11460ecdea7712b650441d26865a294a7d96544a9d1a50fcf1d45d",
+      "provenanceSha256": "10a92af305d132250ec1688bcd3b1c098e50b44f535214701a996260b9d9fa42",
       "highlightReferenceSha256": null,
-      "version": "0.1.1"
+      "version": "0.1.2"
     }
   ],
   "commands": [
@@ -288,5 +288,14 @@
     },
     "artRegenerated": false
   },
-  "sportsRevision": "0.1.1: corrected bicycle orientation; overhead male three-point sequence with wider spacing"
+  "sportsRevision": "0.1.2: deterministic PNG encoding; all approved RGBA pixels unchanged",
+  "encodingOnlyRevision": {
+    "artworkChanged": false,
+    "approvedContactSheetUnchanged": true,
+    "encoding": "rgba8-filter0-stored-deflate-v1",
+    "scope": [
+      "bicycle-finish",
+      "three-point-glow"
+    ]
+  }
 }

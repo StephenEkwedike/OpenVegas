@@ -68,7 +68,9 @@ test('Published captions enforce actual integration limits and current mask prov
   if(p.highlight_reference_sha256){
    assert(p.highlight_reference.includes('transparent white highlights only'));
   }else{
-   assert.equal(p.revision,'0.1.1');
+   assert.equal(p.revision,'0.1.2');
+   assert.equal(p.sheet_encoding,'rgba8-filter0-stored-deflate-v1');
+   assert.equal(p.prepared_source_encoding,'rgba8-filter0-stored-deflate-v1');
    assert.match(p.prepared_source_sha256,/^[a-f0-9]{64}$/);
    assert(p.highlight_reference.startsWith('Not used;'));
   }

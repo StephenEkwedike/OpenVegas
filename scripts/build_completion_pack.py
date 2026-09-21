@@ -12,8 +12,10 @@ from PIL import Image
 
 if __package__:
     from .build_emote_pack import remove_connected_matte
+    from .deterministic_png import ENCODING, write_rgba_png
 else:
     from build_emote_pack import remove_connected_matte
+    from deterministic_png import ENCODING, write_rgba_png
 
 
 TIMELINE = [
@@ -170,7 +172,7 @@ def build(
     sheet = Image.new("RGBA", (width * 12, height))
     for index, frame in enumerate(frames):
         sheet.alpha_composite(frame, (width * index, 0))
-    sheet.save(output / "sheet.png")
+    write_rgba_png(sheet, output / "sheet.png")
     manifest = {
         "schema_version": 1,
         "pack_id": pack_id,
@@ -189,6 +191,7 @@ def build(
         "tags": ["completion", "sports", "original"],
     }
     provenance = {
+        "sheet_encoding": ENCODING,
         "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
         "generation": "built-in image_gen",
         "prompt": prompt,

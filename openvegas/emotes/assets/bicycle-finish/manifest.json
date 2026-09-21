@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
   "pack_id": "openvegas.bicycle-finish",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "display_name": "Bicycle Finish",
   "license_id": "openvegas-original-sports-review",
   "sheet": "sheet.png",
-  "sha256": "c2e2ba1c5296478b00941d735838dee85ce1c5316bb908b7f771e19a24db015b",
+  "sha256": "cf8edb700da1a7abc9d316df0611dd6f1f56d4e78f3fb52aee28101de1bf5789",
   "frame": {
     "width": 160,
     "height": 120,

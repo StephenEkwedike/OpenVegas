@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
   "pack_id": "openvegas.three-point-glow",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "display_name": "Three Point Glow",
   "license_id": "openvegas-original-sports-review",
   "sheet": "sheet.png",
-  "sha256": "26dc179cf22a1ef44d7cb79afd26d20eb3a03ff4c4591c2de54e2d851f7421ce",
+  "sha256": "78818868e6f5a87dfe01831e2f636557a70616bf2ad1b83cfb76da3995d69487",
   "frame": {
     "width": 160,
     "height": 120,

@@ -19,9 +19,11 @@ from PIL import Image
 if __package__:
     from .build_completion_pack import build
     from .build_emote_pack import remove_connected_matte
+    from .deterministic_png import ENCODING, write_rgba_png
 else:
     from build_completion_pack import build
     from build_emote_pack import remove_connected_matte
+    from deterministic_png import ENCODING, write_rgba_png
 
 
 REVIEWED_HASHES = {
@@ -87,7 +89,7 @@ def rebuild(source_dir: Path, output: Path, slug: str) -> dict:
     prompts = json.loads((source_dir / "prompt-set.json").read_text())
     with tempfile.TemporaryDirectory(prefix="ov-sports-preparation-") as temp:
         prepared = Path(temp) / "prepared.png"
-        prepare(raw, slug).save(prepared)
+        write_rgba_png(prepare(raw, slug), prepared)
         provenance = build(
             prepared,
             output,
@@ -98,7 +100,8 @@ def rebuild(source_dir: Path, output: Path, slug: str) -> dict:
         provenance["prepared_source_sha256"] = provenance["source_sha256"]
         provenance["source_sha256"] = hashlib.sha256(raw.read_bytes()).hexdigest()
         provenance["prompt_set"] = prompts
-        provenance["revision"] = "0.1.1"
+        provenance["revision"] = "0.1.2"
+        provenance["prepared_source_encoding"] = ENCODING
         provenance["highlight_reference"] = (
             "Not used; this revision retains authored white details directly."
         )
@@ -127,7 +130,7 @@ def rebuild(source_dir: Path, output: Path, slug: str) -> dict:
         shutil.copyfile(raw, output / "source.png")
         shutil.copyfile(source_dir / "prompt-set.json", output / "prompt-set.json")
     manifest = json.loads((output / "manifest.json").read_text())
-    manifest["version"] = "0.1.1"
+    manifest["version"] = "0.1.2"
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     (output / "provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
     return provenance

@@ -33,7 +33,7 @@
   "completion_duration": 5.4,
   "completion_plays": 1,
   "display_name": "Skyline Dunk",
-  "duration": 6.576862,
+  "duration": 6.591575,
   "fixture_duration": 6.450000000000004,
   "frames": [
     {
@@ -50,7 +50,7 @@
       "ordinal": 0,
       "seconds": 0.35,
       "state": "idle",
-      "t": 0.174688
+      "t": 0.183879
     },
     {
       "actions": [
@@ -68,7 +68,7 @@
       "ordinal": 1,
       "seconds": 0.35,
       "state": "active",
-      "t": 0.535152
+      "t": 0.535369
     },
     {
       "actions": [
@@ -86,7 +86,7 @@
       "ordinal": 2,
       "seconds": 0.12,
       "state": "complete",
-      "t": 0.881391
+      "t": 0.881559
     },
     {
       "actions": [],
@@ -102,7 +102,7 @@
       "ordinal": 3,
       "seconds": 0.12,
       "state": "complete",
-      "t": 0.986579
+      "t": 1.004486
     },
     {
       "actions": [],
@@ -118,7 +118,7 @@
       "ordinal": 4,
       "seconds": 0.12,
       "state": "complete",
-      "t": 1.120711
+      "t": 1.128227
     },
     {
       "actions": [],
@@ -134,7 +134,7 @@
       "ordinal": 5,
       "seconds": 0.12,
       "state": "complete",
-      "t": 1.228181
+      "t": 1.240294
     },
     {
       "actions": [],
@@ -150,7 +150,7 @@
       "ordinal": 6,
       "seconds": 0.12,
       "state": "complete",
-      "t": 1.363267
+      "t": 1.369872
     },
     {
       "actions": [],
@@ -166,7 +166,7 @@
       "ordinal": 7,
       "seconds": 0.12,
       "state": "complete",
-      "t": 1.473841
+      "t": 1.481502
     },
     {
       "actions": [],
@@ -182,7 +182,7 @@
       "ordinal": 8,
       "seconds": 0.12,
       "state": "complete",
-      "t": 1.603222
+      "t": 1.608745
     },
     {
       "actions": [],
@@ -198,7 +198,7 @@
       "ordinal": 9,
       "seconds": 0.12,
       "state": "complete",
-      "t": 1.724346
+      "t": 1.731476
     },
     {
       "actions": [],
@@ -214,7 +214,7 @@
       "ordinal": 10,
       "seconds": 0.12,
       "state": "complete",
-      "t": 1.832215
+      "t": 1.841671
     },
     {
       "actions": [],
@@ -230,7 +230,7 @@
       "ordinal": 11,
       "seconds": 0.12,
       "state": "complete",
-      "t": 1.964442
+      "t": 1.971357
     },
     {
       "actions": [],
@@ -246,7 +246,7 @@
       "ordinal": 12,
       "seconds": 0.12,
       "state": "complete",
-      "t": 2.08076
+      "t": 2.087318
     },
     {
       "actions": [],
@@ -262,7 +262,7 @@
       "ordinal": 13,
       "seconds": 0.12,
       "state": "complete",
-      "t": 2.200741
+      "t": 2.210939
     },
     {
       "actions": [],
@@ -278,7 +278,7 @@
       "ordinal": 14,
       "seconds": 0.12,
       "state": "complete",
-      "t": 2.311629
+      "t": 2.3143
     },
     {
       "actions": [],
@@ -294,7 +294,7 @@
       "ordinal": 15,
       "seconds": 0.12,
       "state": "complete",
-      "t": 2.436235
+      "t": 2.439124
     },
     {
       "actions": [],
@@ -310,7 +310,7 @@
       "ordinal": 16,
       "seconds": 0.12,
       "state": "complete",
-      "t": 2.575932
+      "t": 2.583729
     },
     {
       "actions": [],
@@ -326,7 +326,7 @@
       "ordinal": 17,
       "seconds": 0.12,
       "state": "complete",
-      "t": 2.668581
+      "t": 2.682269
     },
     {
       "actions": [],
@@ -342,7 +342,7 @@
       "ordinal": 18,
       "seconds": 0.12,
       "state": "complete",
-      "t": 2.808582
+      "t": 2.81682
     },
     {
       "actions": [],
@@ -358,7 +358,7 @@
       "ordinal": 19,
       "seconds": 0.12,
       "state": "complete",
-      "t": 2.920621
+      "t": 2.932021
     },
     {
       "actions": [],
@@ -374,7 +374,7 @@
       "ordinal": 20,
       "seconds": 0.12,
       "state": "complete",
-      "t": 3.042462
+      "t": 3.05102
     },
     {
       "actions": [],
@@ -390,7 +390,7 @@
       "ordinal": 21,
       "seconds": 0.12,
       "state": "complete",
-      "t": 3.151177
+      "t": 3.161867
     },
     {
       "actions": [],
@@ -406,7 +406,7 @@
       "ordinal": 22,
       "seconds": 0.12,
       "state": "complete",
-      "t": 3.279657
+      "t": 3.29334
     },
     {
       "actions": [],
@@ -422,7 +422,7 @@
       "ordinal": 23,
       "seconds": 0.12,
       "state": "complete",
-      "t": 3.39472
+      "t": 3.401737
     },
     {
       "actions": [],
@@ -438,7 +438,7 @@
       "ordinal": 24,
       "seconds": 0.12,
       "state": "complete",
-      "t": 3.535267
+      "t": 3.539641
     },
     {
       "actions": [],
@@ -454,7 +454,7 @@
       "ordinal": 25,
       "seconds": 0.12,
       "state": "complete",
-      "t": 3.630959
+      "t": 3.639078
     },
     {
       "actions": [],
@@ -470,7 +470,7 @@
       "ordinal": 26,
       "seconds": 0.12,
       "state": "complete",
-      "t": 3.755541
+      "t": 3.75981
     },
     {
       "actions": [],
@@ -486,7 +486,7 @@
       "ordinal": 27,
       "seconds": 0.12,
       "state": "complete",
-      "t": 3.886366
+      "t": 3.903503
     },
     {
       "actions": [],
@@ -502,7 +502,7 @@
       "ordinal": 28,
       "seconds": 0.12,
       "state": "complete",
-      "t": 4.000162
+      "t": 4.012506
     },
     {
       "actions": [],
@@ -518,7 +518,7 @@
       "ordinal": 29,
       "seconds": 0.12,
       "state": "complete",
-      "t": 4.112018
+      "t": 4.121568
     },
     {
       "actions": [],
@@ -534,7 +534,7 @@
       "ordinal": 30,
       "seconds": 0.12,
       "state": "complete",
-      "t": 4.238918
+      "t": 4.241444
     },
     {
       "actions": [],
@@ -550,7 +550,7 @@
       "ordinal": 31,
       "seconds": 0.12,
       "state": "complete",
-      "t": 4.368295
+      "t": 4.37693
     },
     {
       "actions": [],
@@ -566,7 +566,7 @@
       "ordinal": 32,
       "seconds": 0.12,
       "state": "complete",
-      "t": 4.484017
+      "t": 4.489719
     },
     {
       "actions": [],
@@ -582,7 +582,7 @@
       "ordinal": 33,
       "seconds": 0.12,
       "state": "complete",
-      "t": 4.593022
+      "t": 4.603427
     },
     {
       "actions": [],
@@ -598,7 +598,7 @@
       "ordinal": 34,
       "seconds": 0.12,
       "state": "complete",
-      "t": 4.716965
+      "t": 4.722239
     },
     {
       "actions": [],
@@ -614,7 +614,7 @@
       "ordinal": 35,
       "seconds": 0.12,
       "state": "complete",
-      "t": 4.836618
+      "t": 4.848122
     },
     {
       "actions": [],
@@ -630,7 +630,7 @@
       "ordinal": 36,
       "seconds": 0.12,
       "state": "complete",
-      "t": 4.954708
+      "t": 4.964059
     },
     {
       "actions": [],
@@ -646,7 +646,7 @@
       "ordinal": 37,
       "seconds": 0.12,
       "state": "complete",
-      "t": 5.072509
+      "t": 5.086386
     },
     {
       "actions": [],
@@ -662,7 +662,7 @@
       "ordinal": 38,
       "seconds": 0.12,
       "state": "complete",
-      "t": 5.195946
+      "t": 5.204285
     },
     {
       "actions": [],
@@ -678,7 +678,7 @@
       "ordinal": 39,
       "seconds": 0.12,
       "state": "complete",
-      "t": 5.319712
+      "t": 5.328684
     },
     {
       "actions": [],
@@ -694,7 +694,7 @@
       "ordinal": 40,
       "seconds": 0.12,
       "state": "complete",
-      "t": 5.435346
+      "t": 5.440009
     },
     {
       "actions": [],
@@ -710,7 +710,7 @@
       "ordinal": 41,
       "seconds": 0.12,
       "state": "complete",
-      "t": 5.550115
+      "t": 5.562197
     },
     {
       "actions": [],
@@ -726,7 +726,7 @@
       "ordinal": 42,
       "seconds": 0.12,
       "state": "complete",
-      "t": 5.671227
+      "t": 5.683718
     },
     {
       "actions": [],
@@ -742,7 +742,7 @@
       "ordinal": 43,
       "seconds": 0.12,
       "state": "complete",
-      "t": 5.804083
+      "t": 5.811393
     },
     {
       "actions": [],
@@ -758,7 +758,7 @@
       "ordinal": 44,
       "seconds": 0.12,
       "state": "complete",
-      "t": 5.91349
+      "t": 5.92409
     },
     {
       "actions": [],
@@ -774,7 +774,7 @@
       "ordinal": 45,
       "seconds": 0.12,
       "state": "complete",
-      "t": 6.035059
+      "t": 6.046067
     },
     {
       "actions": [],
@@ -790,7 +790,7 @@
       "ordinal": 46,
       "seconds": 0.12,
       "state": "complete",
-      "t": 6.154764
+      "t": 6.163724
     },
     {
       "actions": [],
@@ -806,7 +806,7 @@
       "ordinal": 47,
       "seconds": 0.35,
       "state": "idle",
-      "t": 6.293197
+      "t": 6.299563
     }
   ],
   "geometry": "native",
