@@ -11,7 +11,7 @@ from openvegas.payments.service import BillingService, WebhookVerificationError
 from server.routes import payments
 from tests.integration.test_restoration_db import _signed
 
-FACT = Fact("dispute", "dp_test", "pi_test", "ch_test", 1000, "usd", "needs_response", 100, False)
+FACT = Fact("dispute", "du_test", "pi_test", "ch_test", 1000, "usd", "needs_response", 100, False)
 
 
 def row(fact=FACT, **changes):
@@ -74,18 +74,23 @@ def test_disputes_combine_without_summing_overlapping_losses():
 def event():
     return {
         "id": "evt_fixture",
+        "object": "event",
         "type": "charge.dispute.created",
         "created": 100,
         "livemode": False,
         "data": {
             "object": {
                 "object": "dispute",
-                "id": "dp_test",
+                "id": "du_test",
                 "payment_intent": "pi_test",
                 "charge": "ch_test",
                 "amount": 1000,
                 "currency": "usd",
                 "status": "needs_response",
+                "livemode": False,
+                "reason": "product_not_received",
+                "evidence": {},
+                "metadata": {},
             }
         },
     }
@@ -93,6 +98,39 @@ def event():
 
 def test_parse_exact_provider_facts():
     assert parse_event(event(), expected_livemode=False) == FACT
+
+
+@pytest.mark.parametrize(
+    "event_type,state",
+    [
+        ("charge.dispute.created", "needs_response"),
+        ("charge.dispute.updated", "under_review"),
+        ("charge.dispute.closed", "won"),
+        ("charge.dispute.closed", "lost"),
+    ],
+)
+def test_documented_du_dispute_shape_parses_all_lifecycle_events(event_type, state):
+    body = event()
+    body["type"] = event_type
+    body["data"]["object"].update(id="du_1MtJUT2eZvKYlo2CNaw2HvEv", status=state)
+    assert parse_event(body, expected_livemode=False) == replace(
+        FACT, object_id="du_1MtJUT2eZvKYlo2CNaw2HvEv", state=state
+    )
+
+
+@pytest.mark.parametrize(
+    "object_id",
+    [
+        "dp_test", "dp_1MtJUT2eZvKYlo2CNaw2HvEv", "re_test", "ch_test", "evt_test",
+        "DU_test", "du_", "du_bad\n", "du_bad/path", "du_" + "a" * 253,
+        "du_\u00e9", "", None, True,
+    ],
+)
+def test_dispute_rejects_bogus_prefix_and_malformed_id(object_id):
+    body = event()
+    body["data"]["object"]["id"] = object_id
+    with pytest.raises(AdjustmentError, match="^ADJUSTMENT_INVALID_REFERENCE$"):
+        parse_event(body, expected_livemode=False)
 
 
 @pytest.mark.parametrize(
@@ -107,7 +145,7 @@ def test_parse_exact_provider_facts():
         ("status", "unknown"),
         ("charge", None),
         ("payment_intent", {"id": "pi_test"}),
-        ("id", "dp_bad\n"),
+        ("id", "du_bad\n"),
         ("livemode", 0),
         ("object", "refund"),
     ],

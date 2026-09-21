@@ -337,6 +337,7 @@ async def test_transport_failure_or_cancellation_makes_one_attempt(kind):
         b"\xff",
         b"x" * (openrouter.MAX_RESPONSE_BYTES + 1),
     ],
+    ids=["invalid-json", "array", "null", "empty-object", "string", "invalid-utf8", "oversized"],
 )
 async def test_malformed_or_oversized_response_is_sanitized(raw):
     async with httpx.AsyncClient(

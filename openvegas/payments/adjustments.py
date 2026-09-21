@@ -87,7 +87,7 @@ def parse_event(event: dict, *, expected_livemode: bool) -> Fact:
     if obj.get("object") != expected_object:
         raise AdjustmentError("ADJUSTMENT_INVALID_OBJECT")
     object_id = _id(
-        obj.get("id"), {"refund": "re_", "dispute": "dp_", "charge_refund": "ch_"}[kind]
+        obj.get("id"), {"refund": "re_", "dispute": "du_", "charge_refund": "ch_"}[kind]
     )
     charge = object_id if kind == "charge_refund" else _id(obj.get("charge"), "ch_")
     amount = obj.get("amount_refunded" if kind == "charge_refund" else "amount")

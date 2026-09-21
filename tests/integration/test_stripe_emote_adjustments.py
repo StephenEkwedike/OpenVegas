@@ -24,7 +24,7 @@ def cash_event(
 ):
     pi = "pi_local_" + str(topup[1])
     charge = "ch_local_" + str(topup[1])
-    prefix = {"refund": "re_", "dispute": "dp_", "charge_refund": "ch_"}[kind]
+    prefix = {"refund": "re_", "dispute": "du_", "charge_refund": "ch_"}[kind]
     obj = {
         "object": "charge" if kind == "charge_refund" else kind,
         "id": charge if kind == "charge_refund" else object_id or prefix + uuid4().hex,
@@ -35,6 +35,19 @@ def cash_event(
         "status": state,
         "livemode": False,
     }
+    if kind == "dispute":
+        obj.update(
+            created=created,
+            reason="product_not_received",
+            evidence={},
+            evidence_details={
+                "due_by": 2000000000, "has_evidence": False,
+                "past_due": False, "submission_count": 0,
+            },
+            balance_transactions=[],
+            is_charge_refundable=False,
+            metadata={},
+        )
     event_type = "refund.updated" if kind == "refund" else "charge.dispute.updated"
     if kind == "charge_refund":
         obj.update(amount=1000, amount_refunded=amount, paid=True, customer=topup[3])
@@ -133,31 +146,137 @@ async def test_signed_full_refund_revokes_once_without_cash_or_v_refund(
         )
 
 
+@pytest.mark.parametrize("terminal", ["won", "lost"])
+async def test_signed_du_dispute_two_purchase_lifecycle_preserves_money(
+    database_factory, monkeypatch, terminal
+):
+    async with database_factory(through=43) as sandbox:
+        db = sandbox.db
+        topup, user, service, wallet, first = await purchase(db, monkeypatch, amount=500)
+        second = await buy(db, monkeypatch, service, user, 500)
+        orders = (first, second)
+        ledger = await db.fetch("SELECT * FROM ledger_entries ORDER BY id")
+        assert len(ledger) == 3
+        assert await db.fetchval("SELECT count(*) FROM stripe_emote_funding") == 2
+        assert await wallet.get_balance(f"user:{user}") == 0
+
+        opened = cash_event(topup, object_id="du_1MtJUT2eZvKYlo2CNaw2HvEv")
+        opened["type"] = "charge.dispute.created"
+        response = await post(db, monkeypatch, opened)
+        assert response.status_code == 200, response.text
+        assert response.json()["attributed_orders"] == 2
+        assert await db.fetchval(
+            "SELECT count(*) FROM cosmetic_entitlements WHERE status='suspended'"
+        ) == 2
+        assert await db.fetchval("SELECT count(*) FROM cosmetic_equipment") == 0
+        for order in orders:
+            with pytest.raises(EntitlementDenied):
+                await service.equip(user, "theme", order.item_id)
+            with pytest.raises(EntitlementDenied):
+                async with service.delivery_asset(user, order.item_id):
+                    pytest.fail("Suspended asset delivered")
+
+        closed = cash_event(
+            topup, object_id=opened["data"]["object"]["id"], state=terminal, created=101
+        )
+        closed["type"] = "charge.dispute.closed"
+        response = await post(db, monkeypatch, closed)
+        assert response.status_code == 200, response.text
+        target = "active" if terminal == "won" else "revoked"
+        assert await db.fetchval(
+            "SELECT count(*) FROM cosmetic_entitlements WHERE status=$1", target
+        ) == 2
+        assert await db.fetchval("SELECT count(*) FROM cosmetic_equipment") == 0
+        assert await db.fetchval("SELECT state FROM stripe_emote_adjustments") == terminal
+        assert await db.fetchval("SELECT count(*) FROM store_orders WHERE status='fulfilled'") == 2
+        assert await db.fetchval(
+            "SELECT count(*) FROM stripe_emote_adjustment_audit WHERE outcome='manual_review'"
+        ) == 0
+
+        audit_count = await db.fetchval("SELECT count(*) FROM stripe_emote_adjustment_audit")
+        assert (await post(db, monkeypatch, closed)).json()["status"] == "duplicate"
+        assert await db.fetchval("SELECT count(*) FROM stripe_emote_adjustment_audit") == audit_count
+        late = cash_event(topup, object_id=opened["data"]["object"]["id"], created=999)
+        assert (await post(db, monkeypatch, late)).json()["outcome"] == "stale"
+        assert await db.fetchval(
+            "SELECT count(*) FROM cosmetic_entitlements WHERE status=$1", target
+        ) == 2
+        for order in orders:
+            if terminal == "won":
+                await service.equip(user, "theme", order.item_id)
+                async with service.delivery_asset(user, order.item_id) as asset:
+                    assert asset["pack_id"] == order.item_id
+            else:
+                with pytest.raises(EntitlementDenied):
+                    await service.equip(user, "theme", order.item_id)
+                with pytest.raises(EntitlementDenied):
+                    async with service.delivery_asset(user, order.item_id):
+                        pytest.fail("Revoked asset delivered")
+        assert await db.fetch("SELECT * FROM ledger_entries ORDER BY id") == ledger
+        assert await wallet.get_balance(f"user:{user}") == 0
+        await assert_no_money_movement(db, user, len(ledger))
+
+
+@pytest.mark.parametrize(
+    "event_type,state",
+    [
+        ("charge.dispute.created", "needs_response"),
+        ("charge.dispute.updated", "under_review"),
+        ("charge.dispute.closed", "won"),
+        ("charge.dispute.closed", "lost"),
+    ],
+)
+async def test_signed_dp_dispute_rejected_without_committing_changes(
+    database_factory, monkeypatch, event_type, state
+):
+    async with database_factory(through=43) as sandbox:
+        db = sandbox.db
+        topup, user, _, _, _ = await purchase(db, monkeypatch)
+        tables = (
+            "stripe_webhook_events", "stripe_emote_adjustments", "stripe_emote_funding",
+            "stripe_emote_adjustment_audit", "stripe_emote_suspensions", "ledger_entries",
+            "cosmetic_entitlements", "cosmetic_equipment", "store_orders", "wallet_accounts",
+        )
+        before = {table: await db.fetch(f"SELECT * FROM {table}") for table in tables}
+        event = cash_event(topup, object_id="dp_1MtJUT2eZvKYlo2CNaw2HvEv", state=state)
+        event["type"] = event_type
+        for _ in range(2):
+            response = await post(db, monkeypatch, event)
+            assert response.status_code == 503
+            assert response.json() == {
+                "detail": "Unable to process Stripe webhook; retry later"
+            }
+        for table in tables:
+            assert await db.fetch(f"SELECT * FROM {table}") == before[table], table
+        assert await db.fetchval("SELECT status FROM cosmetic_entitlements") == "active"
+        await assert_no_money_movement(db, user, len(before["ledger_entries"]))
+
+
 async def test_multiple_disputes_won_restore_only_after_all_close_and_not_equipment(
     database_factory, monkeypatch
 ):
     async with database_factory(through=43) as sandbox:
         db = sandbox.db
         topup, _user_id, _, _, _ = await purchase(db, monkeypatch)
-        first = cash_event(topup, object_id="dp_first")
-        second = cash_event(topup, object_id="dp_second")
+        first = cash_event(topup, object_id="du_first")
+        second = cash_event(topup, object_id="du_second")
         for event in (first, second):
             assert (await post(db, monkeypatch, event)).status_code == 200
         assert await db.fetchval("SELECT status FROM cosmetic_entitlements") == "suspended"
         assert (
             await post(
-                db, monkeypatch, cash_event(topup, object_id="dp_first", state="won", created=102)
+                db, monkeypatch, cash_event(topup, object_id="du_first", state="won", created=102)
             )
         ).status_code == 200
         assert await db.fetchval("SELECT status FROM cosmetic_entitlements") == "suspended"
         assert (
             await post(
-                db, monkeypatch, cash_event(topup, object_id="dp_second", state="won", created=103)
+                db, monkeypatch, cash_event(topup, object_id="du_second", state="won", created=103)
             )
         ).status_code == 200
         assert await db.fetchval("SELECT status FROM cosmetic_entitlements") == "active"
         assert await db.fetchval("SELECT count(*) FROM cosmetic_equipment") == 0
-        late = cash_event(topup, object_id="dp_first", created=999)
+        late = cash_event(topup, object_id="du_first", created=999)
         assert (await post(db, monkeypatch, late)).json()["outcome"] == "stale"
         assert await db.fetchval("SELECT status FROM cosmetic_entitlements") == "active"
         assert await db.fetchval("SELECT count(*) FROM stripe_emote_suspensions") == 0
@@ -168,8 +287,8 @@ async def test_lost_and_won_disputes_race_never_restore_lost_funding(database_fa
         db = sandbox.db
         topup, _, _, _, _ = await purchase(db, monkeypatch)
         events = [
-            cash_event(topup, object_id="dp_lost", state="lost"),
-            cash_event(topup, object_id="dp_won", state="won"),
+            cash_event(topup, object_id="du_lost", state="lost"),
+            cash_event(topup, object_id="du_won", state="won"),
         ]
         replies = await asyncio.wait_for(
             asyncio.gather(*(post(db, monkeypatch, e) for e in events)), 15
@@ -521,10 +640,10 @@ async def test_changed_ledger_evidence_fails_closed_without_clearing_hold(
         db = sandbox.db
         topup, _, _, _, _ = await purchase(db, monkeypatch)
         assert (
-            await post(db, monkeypatch, cash_event(topup, object_id="dp_evidence"))
+            await post(db, monkeypatch, cash_event(topup, object_id="du_evidence"))
         ).status_code == 200
         await db.execute("UPDATE ledger_entries SET amount=1 WHERE entry_type='redeem'")
-        event = cash_event(topup, state="won", object_id="dp_evidence")
+        event = cash_event(topup, state="won", object_id="du_evidence")
         assert (await post(db, monkeypatch, event)).status_code == 503
         assert await db.fetchval("SELECT status FROM cosmetic_entitlements") == "suspended"
         assert await db.fetchval("SELECT state FROM stripe_emote_adjustments") == "needs_response"
@@ -537,7 +656,7 @@ async def test_store_suspension_denies_access_and_won_dispute_restores_it(
         db = sandbox.db
         topup, user, service, wallet, order = await purchase(db, monkeypatch)
         assert (
-            await post(db, monkeypatch, cash_event(topup, object_id="dp_access"))
+            await post(db, monkeypatch, cash_event(topup, object_id="du_access"))
         ).status_code == 200
         owned = await service.list_owned(user)
         assert owned["equipped"] == {}
@@ -559,7 +678,7 @@ async def test_store_suspension_denies_access_and_won_dispute_restores_it(
         assert await wallet.get_balance(f"user:{user}") == 0
         assert (
             await post(
-                db, monkeypatch, cash_event(topup, object_id="dp_access", state="won", created=101)
+                db, monkeypatch, cash_event(topup, object_id="du_access", state="won", created=101)
             )
         ).status_code == 200
         await service.equip(user, "theme", order.item_id)
