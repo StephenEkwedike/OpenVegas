@@ -244,3 +244,19 @@ def test_offline_guard_allows_local_hostname_query(tmp_path):
                             env=verifier.clean_environment(tmp_path), capture_output=True,
                             text=True, timeout=10, check=False)
     assert result.returncode == 0, result.stderr
+
+
+def test_installed_cli_loads_without_optional_curses(installed):
+    python, _, root = installed
+    code = (
+        "import sys, runpy, json; sys.modules['curses'] = None; "
+        "m = runpy.run_path(" + repr(str(SCRIPT)) + "); "
+        "print(json.dumps(m['probe']()))"
+    )
+    result = subprocess.run([str(python), "-I", "-B", "-c", code], cwd=root,
+                            env=verifier.clean_environment(root), capture_output=True,
+                            text=True, timeout=30, check=False)
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report['status'] == 'pass', report
+    assert report['guard_violations'] == []

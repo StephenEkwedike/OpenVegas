@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import pytest
 from rich.console import Console
 
-import openvegas.tui.approval_menu as approval_menu
+from openvegas.tui import approval_menu
 from openvegas.tui.approval_menu import (
     ApprovalDecision,
     SessionApprovalState,
@@ -55,3 +56,34 @@ def test_choose_approval_non_tty_fallback(monkeypatch):
         console=console,
     )
     assert decision == ApprovalDecision.DENY_AND_REPLAN
+
+
+@pytest.mark.parametrize("answer", [True, False])
+def test_tty_without_curses_requires_explicit_one_time_confirmation(monkeypatch, answer):
+    monkeypatch.setattr(approval_menu, "curses", None)
+    monkeypatch.setattr(approval_menu, "_is_tty", lambda: True)
+    monkeypatch.setattr(approval_menu, "_choose_with_curses", lambda _: pytest.fail("no backend"))
+    defaults = []
+
+    def confirm(*args, **kwargs):
+        defaults.append(kwargs['default'])
+        return answer
+
+    monkeypatch.setattr(approval_menu.Confirm, "ask", confirm)
+    decision = choose_approval(tool_name="fs_apply_patch", arguments={}, action_label="edit",
+                               console=Console(record=True))
+    assert defaults == [False]
+    expected = ApprovalDecision.ALLOW_ONCE if answer else ApprovalDecision.DENY_AND_REPLAN
+    assert decision == expected
+
+
+@pytest.mark.parametrize("error", [EOFError, KeyboardInterrupt, RuntimeError])
+def test_missing_curses_failed_confirmation_is_deny(monkeypatch, error):
+    monkeypatch.setattr(approval_menu, "curses", None)
+
+    def fail(*args, **kwargs):
+        raise error()
+
+    monkeypatch.setattr(approval_menu.Confirm, "ask", fail)
+    assert choose_approval(tool_name="fs_apply_patch", arguments={}, action_label="edit",
+                           console=Console(record=True)) == ApprovalDecision.DENY_AND_REPLAN

@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
-import curses
 import re
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable
 
 from rich.console import Console
 from rich.prompt import Confirm
+
+try:
+    import curses
+except ImportError:  # Standard Windows Python has no curses backend.
+    curses = None
 
 
 class ApprovalDecision(str, Enum):
@@ -130,7 +134,7 @@ def _choose_with_curses(action_label: str) -> ApprovalDecision:
 def _is_tty() -> bool:
     try:
         return bool(sys.stdin.isatty() and sys.stdout.isatty())
-    except Exception:
+    except Exception:  # noqa: BLE001 - unknown terminal wrappers must fail closed
         return False
 
 
@@ -145,14 +149,14 @@ def choose_approval(
     _render_inline_menu(console, action_label)
     if selector_fn is not None:
         return selector_fn(action_label)
-    if not _is_tty():
-        allowed = Confirm.ask(f"Allow to {action_label}?", default=False)
-        return ApprovalDecision.ALLOW_ONCE if allowed else ApprovalDecision.DENY_AND_REPLAN
     try:
+        if curses is None or not _is_tty():
+            allowed = Confirm.ask(f"Allow to {action_label}?", default=False)
+            return ApprovalDecision.ALLOW_ONCE if allowed else ApprovalDecision.DENY_AND_REPLAN
         return _choose_with_curses(action_label)
     except KeyboardInterrupt:
         return ApprovalDecision.DENY_AND_REPLAN
-    except Exception:
+    except Exception:  # noqa: BLE001 - every failed approval UI must deny mutation
         # Fail closed to avoid accidental mutation if selector cannot run.
         return ApprovalDecision.DENY_AND_REPLAN
 

@@ -56,3 +56,4 @@ dialog::backdrop { background:rgba(0,0,0,.65); }.dialog-close { float:right; }di
 
 .sprite-stage canvas.completion-preview { width:min(100%,320px); height:auto; }
 .preview-stage canvas.completion-preview { width:min(100%,480px); height:auto; }
+.emote-page [hidden], #emote-dialog [hidden] { display:none; }
