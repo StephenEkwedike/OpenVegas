@@ -500,6 +500,8 @@ async def test_tampered_claim_cannot_complete(setup, changes):
         "x" * (MAX_ENVELOPE_BYTES + 1),
         '{"text":"legacy gateway response"}',
     ],
+    # Do not print the multi-megabyte payload as a verbose CI test identifier.
+    ids=["none", "empty-object", "array", "null", "invalid-json", "oversized", "legacy"],
 )
 @pytest.mark.asyncio
 async def test_legacy_and_malformed_stored_rows_never_reopened(setup, body):
