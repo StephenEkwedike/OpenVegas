@@ -27,6 +27,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 from uuid import UUID
 
+from openvegas.capabilities import REASONING_EFFORTS
 from openvegas.gateway.conversation import (
     CanonicalConversation,
     validate_text,
@@ -101,7 +102,10 @@ def _digest(value: Any) -> str:
 
 
 def request_payload_hash(
-    history: CanonicalConversation, *, provider: str, model: str, prompt: str, max_tokens: int
+    history: CanonicalConversation, *, provider: str, model: str, prompt: str, max_tokens: int,
+    reasoning_effort: str | None = None,
+    enable_web_search: bool = False,
+    enable_tools: bool = False,
 ) -> str:
     """Match AIGateway._payload_hash for the exact strict text-only request.
 
@@ -110,17 +114,24 @@ def request_payload_hash(
     A contract test compares this with the gateway to detect future schema drift.
     """
     validate_text(prompt)
+    if type(enable_web_search) is not bool or type(enable_tools) is not bool:
+        raise ReconciliationError("INVALID_WEB_SEARCH_FLAG")
     if type(max_tokens) is not int or not 1 <= max_tokens <= 2_147_483_647:
         raise ReconciliationError("INVALID_OUTPUT_BUDGET")
+    if reasoning_effort is not None and (
+        not isinstance(reasoning_effort, str) or reasoning_effort not in REASONING_EFFORTS
+    ):
+        raise ReconciliationError("INVALID_REASONING_EFFORT")
     return _digest(
         {
             "provider": provider,
             "model": model,
             "messages": history.messages() + [{"role": "user", "content": prompt}],
             "max_tokens": max_tokens,
-            "enable_tools": False,
-            "enable_web_search": False,
+            "enable_tools": enable_tools,
+            "enable_web_search": enable_web_search,
             "strict_continuity": True,
+            **({"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {}),
         }
     )
 
@@ -186,7 +197,8 @@ async def _read(tx, user: str, thread: str, request: str, *, lock: bool) -> _Evi
     )
     usage = await tx.fetch(
         "SELECT id, request_id, user_id, account_id, provider, model_id, input_tokens, "
-        "output_tokens, v_cost, actual_cost_usd, inference_source FROM inference_usage "
+        "output_tokens, v_cost, actual_cost_usd, inference_source, billed_v_input_per_1m, "
+        "billed_v_output_per_1m, billed_cost_input_per_1m, billed_cost_output_per_1m FROM inference_usage "
         "WHERE request_id=$1::uuid LIMIT 2",
         request,
     )
@@ -299,6 +311,30 @@ def _verify_settlement(e: _Evidence, user: str, request: str) -> dict:
         value = body.get(field)
         if type(value) is not int or value < 0 or value != usage[field]:
             raise ReconciliationError("RESPONSE_USAGE_MISMATCH")
+    if "managed_web_accounting" in body:
+        from openvegas.gateway.openrouter_web import WebValidationError, validate_stored_web_result
+
+        try:
+            validate_stored_web_result(
+                body, request_hash=e.request["payload_hash"],
+                model=e.thread["model_id"], reserved_v=reserved,
+            )
+            if (e.thread["provider"] != "openrouter"
+                    or metadata.get("managed_web_accounting") != body["managed_web_accounting"]
+                    or metadata.get("web_search_requests") != body["web_search_requests"]
+                    or metadata.get("web_search_cost_v") != body["web_search_cost_v"]):
+                raise WebValidationError("stored_web_projection_mismatch")
+            prices = body["managed_web_accounting"]["snapshot"]["prices"]
+            for key, price_key in (
+                ("billed_v_input_per_1m", "retail_input_v_per_million"),
+                ("billed_v_output_per_1m", "retail_output_v_per_million"),
+                ("billed_cost_input_per_1m", "supplier_input_usd_per_million"),
+                ("billed_cost_output_per_1m", "supplier_output_usd_per_million"),
+            ):
+                if _money(usage[key]) != Decimal(prices[price_key]).quantize(Decimal("0.000001")):
+                    raise WebValidationError("stored_web_rates_mismatch")
+        except (WebValidationError, KeyError, ValueError):
+            raise ReconciliationError("WEB_SETTLEMENT_MISMATCH") from None
     return body
 
 
@@ -330,7 +366,8 @@ def _receipt(e: _Evidence, user: str, thread: str, request: str) -> dict | None:
 
 
 def _evaluate(
-    e: _Evidence, user: str, thread: str, request: str, *, prompt: str | None, max_tokens: int
+    e: _Evidence, user: str, thread: str, request: str, *, prompt: str | None, max_tokens: int,
+    reasoning_effort: str | None = None,
 ) -> tuple[dict, CanonicalConversation | None]:
     report = {
         "user_id": user,
@@ -381,8 +418,9 @@ def _evaluate(
     if (
         body.get("completion_status") != "complete"
         or body.get("tool_calls") != []
-        or body.get("web_search_used") is not False
-        or body.get("web_search_sources") != []
+        or ("managed_web_accounting" not in body and (
+            body.get("web_search_used") is not False or body.get("web_search_sources") != []
+        ))
         or body.get("web_search_retry_without_tool") is not False
     ):
         return {**report, "reason": "RESPONSE_NOT_COMPLETE_PLAIN_TEXT"}, None
@@ -395,6 +433,9 @@ def _evaluate(
         model=e.thread["model_id"],
         prompt=prompt,
         max_tokens=max_tokens,
+        reasoning_effort=reasoning_effort,
+        enable_web_search="managed_web_accounting" in body,
+        enable_tools=body.get("managed_web_accounting", {}).get("enable_tools", False),
     )
     if expected != e.request["payload_hash"]:
         raise ReconciliationError("ORIGINAL_REQUEST_HASH_MISMATCH")
@@ -420,11 +461,15 @@ async def inspect_turn(
     request_id: str,
     prompt: str | None = None,
     max_tokens: int = 1024,
+    reasoning_effort: str | None = None,
 ) -> dict:
     """No writes/locks; caller must supply a consistent read-only DB transaction."""
     user, thread, request = map(canonical_uuid, (user_id, thread_id, request_id))
     evidence = await _read(tx, user, thread, request, lock=False)
-    report, _ = _evaluate(evidence, user, thread, request, prompt=prompt, max_tokens=max_tokens)
+    report, _ = _evaluate(
+        evidence, user, thread, request, prompt=prompt, max_tokens=max_tokens,
+        reasoning_effort=reasoning_effort,
+    )
     return report
 
 
@@ -438,6 +483,7 @@ async def restore_turn(
     expected_plan: str,
     prompt: str,
     max_tokens: int,
+    reasoning_effort: str | None = None,
 ) -> dict:
     """Restore one verified completed exchange and append a private audit receipt.
 
@@ -453,7 +499,8 @@ async def restore_turn(
     async with db.transaction() as tx:
         evidence = await _read(tx, user, thread, request, lock=True)
         report, restored = _evaluate(
-            evidence, user, thread, request, prompt=prompt, max_tokens=max_tokens
+            evidence, user, thread, request, prompt=prompt, max_tokens=max_tokens,
+            reasoning_effort=reasoning_effort,
         )
         if report.get("plan_token") != expected_plan:
             raise ReconciliationError("REVIEWED_PLAN_CHANGED")

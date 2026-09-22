@@ -429,7 +429,7 @@ def test_parse_mcp_call_command_rejects_invalid_shape():
     assert "usage:" in str(err)
 
 
-def test_preflight_drops_images_when_vision_unsupported(monkeypatch):
+def test_preflight_preserves_and_blocks_images_when_vision_unsupported(monkeypatch):
     monkeypatch.setenv("OPENVEGAS_ENABLE_VISION", "0")
     pending = [
         PendingAttachment(
@@ -457,9 +457,9 @@ def test_preflight_drops_images_when_vision_unsupported(monkeypatch):
         model="gpt-5",
     )
     assert dropped == 1
-    assert blocked is False
-    assert len(kept) == 1
-    assert kept[0].name == "report.pdf"
+    assert blocked is True
+    assert kept == pending
+    assert len(kept) == 2
 
 
 def test_preflight_blocks_when_all_attachments_are_images(monkeypatch):
@@ -491,7 +491,7 @@ def test_preflight_blocks_when_all_attachments_are_images(monkeypatch):
     )
     assert dropped == 2
     assert blocked is True
-    assert kept == []
+    assert kept == pending
 
 
 def test_preflight_passes_all_when_vision_supported(monkeypatch):

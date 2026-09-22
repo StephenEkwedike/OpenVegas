@@ -35,8 +35,13 @@ async def test_cli_canonical_switch_commits_only_after_confirmation(scenario):
     allow_model_switch, startup_bootstrap_task = True, None
     pending_attachments, chat_transcript = [], [{'role': 'user'}]
     model_switch_local_tools = SimpleNamespace(_BACKGROUND_JOBS=jobs)
-    for cmd, parts in [('/provider', ['/provider', 'mistral', 'reviewed-test'])]:
 """
+    tree = ast.parse((Path(__file__).parents[2] / "openvegas/cli.py").read_text())
+    helpers = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
+               and node.name in {"_reasoning_status", "_reasoning_for_model", "_use_model_capabilities", "_chat_capability"}]
+    source += "    current_reasoning_effort, current_reasoning_efforts, current_model_capabilities = None, (), None\n"
+    source += "\n".join("    " + line for helper in helpers for line in ast.unparse(helper).splitlines())
+    source += "\n    for cmd, parts in [('/provider', ['/provider', 'mistral', 'reviewed-test'])]:\n"
     source += "\n".join("        " + line for line in block.splitlines())
     source += "\n    return current_provider, current_model, current_thread_id\n"
     client = SimpleNamespace(_canonical_chat={"revision": "before"}, _request=AsyncMock())
@@ -87,11 +92,14 @@ async def test_cli_canonical_turn_bypasses_tool_loop_and_has_no_paid_fallback(sc
     finish = []
     namespace = {
         'APIError': RuntimeError, 'current_provider': 'openai', 'current_model': 'reviewed-test',
+        'current_reasoning_effort': None,
         'current_thread_id': 'source', '_has_workspace_tooling_intent': lambda _: scenario == 'tool',
         'uuid': __import__('uuid'), 'console': SimpleNamespace(print=lambda *a, **k: None),
         'render_assistant': lambda *a: None, '_render_usage_summary': lambda *_: None,
         'emote_turn': 'logical-turn', 'emote_bridge': SimpleNamespace(finish=lambda **k: finish.append(k)),
     }
+    validator = next(node for node in ast.walk(tree) if isinstance(node, ast.AsyncFunctionDef) and node.name == '_validate_openrouter_request')
+    exec(compile(ast.Module(body=[validator], type_ignores=[]), 'trusted_cli_validator', 'exec'), namespace)  # noqa: S102 - Actual CLI validator.
     exec(compile(source, 'trusted_cli_canonical_turn', 'exec'), namespace)  # noqa: S102 - Exact trusted repository AST, not caller-supplied code.
     if scenario == 'text':
         assert await namespace['run'](client, [], 'plain question')

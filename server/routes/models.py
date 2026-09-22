@@ -9,12 +9,36 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field
 
+from openvegas.capabilities import ReasoningEffort, resolve_capability
 from openvegas.contracts.errors import APIErrorCode, ContractError
-from openvegas.gateway.providers import model_switch_enabled, provider_descriptors
+from openvegas.flags import features
+from openvegas.gateway.providers import (
+    model_switch_enabled,
+    provider_descriptors,
+    validate_reasoning_effort,
+)
 from server.middleware.auth import get_current_user
-from server.services.dependencies import get_catalog
+from server.services.dependencies import current_flags, get_catalog
 
 router = APIRouter()
+
+
+def _effective_descriptor(model: dict, user_id: str) -> dict:
+    if model.get("provider") != "openrouter":
+        return model
+    caps = dict(model.get("capabilities") or {})
+    for feature in ("file_upload", "image_input", "web_search", "stream_events", "reasoning_controls"):
+        caps[feature] = caps.get(feature) is True and resolve_capability(
+            "openrouter", model["model_id"], feature, user_id=user_id,
+        )
+    caps["tools"] = caps.get("tools") is True and features().get("global_enabled", False)
+    # Managed media is delivered through our owned-upload API, whose runtime
+    # gate defaults off independently of per-model capability overrides.
+    if not current_flags().files_enabled:
+        caps["file_upload"] = caps["image_input"] = False
+    if not caps["reasoning_controls"]:
+        caps["reasoning_efforts"] = []
+    return {**model, "capabilities": caps}
 
 
 @router.get("/models")
@@ -24,7 +48,8 @@ async def list_models(
 ):
     catalog = get_catalog()
     try:
-        models = await catalog.list_descriptors(provider=provider)
+        models = [_effective_descriptor(model, str(user["user_id"]))
+                  for model in await catalog.list_descriptors(provider=provider)]
     except ContractError as exc:
         raise HTTPException(422, detail={"error": exc.code.value, "message": exc.detail}) from None
     return {
@@ -40,6 +65,7 @@ class ModelSelectionRequest(BaseModel):
     model: str = Field(min_length=1, max_length=200)
     required_capabilities: list[str] = Field(default_factory=list, max_length=16)
     max_tokens: int | None = Field(default=None, ge=1, le=10_000_000)
+    reasoning_effort: ReasoningEffort | None = None
 
 
 @router.post("/models/validate")
@@ -57,12 +83,18 @@ async def validate_model_selection(
             },
         )
     try:
+        validate_reasoning_effort(request.provider, request.model, request.reasoning_effort)
         model = await get_catalog().validate_selection(
             request.provider,
             request.model,
             required_capabilities=request.required_capabilities,
             max_tokens=request.max_tokens,
         )
+        model = _effective_descriptor(model, str(user["user_id"]))
+        if any(model["capabilities"].get(feature) is not True for feature in request.required_capabilities):
+            raise ContractError(APIErrorCode.INVALID_TRANSITION, "Requested feature is not enabled for this account.")
+        if request.reasoning_effort is not None and request.reasoning_effort not in model["capabilities"].get("reasoning_efforts", []):
+            raise ContractError(APIErrorCode.INVALID_TRANSITION, "Requested reasoning effort is not enabled for this account.")
     except ContractError as exc:
         status = 409 if exc.code == APIErrorCode.PROVIDER_UNAVAILABLE else 422
         raise HTTPException(
@@ -103,6 +135,8 @@ router.route_class = _CanonicalRoute
 # Canonical continuity is deliberately opt-in and text-only. These endpoints never
 # accept caller-owned history, provider credentials or a caller-selected user ID.
 class CanonicalCreateRequest(ModelSelectionRequest):
+    # Effort is a per-inference setting, not stored conversation or switch state.
+    reasoning_effort: None = None
     max_tokens: int = Field(default=1024, ge=1, le=1024, strict=True)
 
 
@@ -113,6 +147,7 @@ class CanonicalSwitchRequest(CanonicalCreateRequest):
 
 
 class CanonicalAskRequest(CanonicalCreateRequest):
+    reasoning_effort: ReasoningEffort | None = None
     thread_id: str = Field(pattern=r"^[0-9a-fA-F-]{36}$")
     expected_revision: str = Field(pattern=r"^[0-9a-f]{64}$")
     prompt: str = Field(min_length=1, max_length=64000)
@@ -241,6 +276,7 @@ async def ask_canonical_conversation(
         raise HTTPException(400, "Inference policy blocked this request.")
     try:
         # Check requested capabilities even though this endpoint never enables tools.
+        validate_reasoning_effort(request.provider, request.model, request.reasoning_effort)
         await get_catalog().validate_selection(
             request.provider,
             request.model,
@@ -258,6 +294,7 @@ async def ask_canonical_conversation(
             prompt=request.prompt,
             idempotency_key=request.idempotency_key,
             max_output_tokens=request.max_tokens,
+            reasoning_effort=request.reasoning_effort,
         )
     except (ContinuityError, ContractError, ModelDisabled, InsufficientBalance) as exc:
         raise _continuity_failure(exc) from None

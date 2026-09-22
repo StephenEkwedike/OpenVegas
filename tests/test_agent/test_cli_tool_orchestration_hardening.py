@@ -283,8 +283,10 @@ def test_chat_legend_command_present():
 def test_pre_dispatch_image_input_capability_block_present():
     src = Path("openvegas/cli.py").read_text(encoding="utf-8")
     assert "has_image_attachment = any(" in src
-    assert "resolve_capability(current_provider, current_model, \"image_input\")" in src
-    assert "image input unavailable" in src
+    assert '_chat_capability("image_input")' in src
+    assert "current_model_capabilities" in src
+    assert "await _validate_openrouter_request(" in src
+    assert "Image input is unavailable. Request not sent; all attachments retained." in src
 
 
 def test_context_disabled_warning_is_one_time_and_explicit():
@@ -297,7 +299,7 @@ def test_context_disabled_warning_is_one_time_and_explicit():
 
 def test_chat_web_command_and_status_diagnostics_present():
     src = Path("openvegas/cli.py").read_text(encoding="utf-8")
-    assert "/web - show effective web search status (always on)" in src
+    assert "/web - show requested and reviewed web search status" in src
     assert "if cmd == \"/web\":" in src
     assert "Web Search Requested" in src
     assert "Web Search Effective" in src
@@ -305,8 +307,8 @@ def test_chat_web_command_and_status_diagnostics_present():
 
 def test_chat_web_capability_unavailable_pre_dispatch_message_present():
     src = Path("openvegas/cli.py").read_text(encoding="utf-8")
-    assert "Web search is always on in chat." in src
-    assert "resolve_capability(" in src
+    assert "Web search uses the current model's supported capabilities." in src
+    assert '_chat_capability("web_search")' in src
     assert "enable_web_search=web_search_effective_turn" in src
 
 

@@ -150,11 +150,21 @@ async def test_actual_cli_switch_branch(scenario):
         and {value.value for value in node.test.comparators[0].elts} == {"/models", "/provider", "/model"}
     )
     block = ast.unparse(branch)
+    reasoning_helpers = [
+        node for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.FunctionDef)
+        and node.name in {"_reasoning_status", "_reasoning_for_model", "_use_model_capabilities", "_chat_capability"}
+    ]
     wrapper = "async def run(client, Confirm, jobs):\n"
     wrapper += (
         "    current_provider, current_model, current_thread_id = 'openai', 'old', 'thread'\n"
     )
     wrapper += "    allow_model_switch, startup_bootstrap_task = True, None\n"
+    wrapper += "    current_reasoning_effort, current_reasoning_efforts = None, ()\n"
+    wrapper += "    current_model_capabilities = None\n"
+    wrapper += "\n".join(
+        "    " + line for helper in reasoning_helpers for line in ast.unparse(helper).splitlines()
+    ) + "\n"
     wrapper += "    pending_attachments, chat_transcript = [], [{'role': 'user'}]\n"
     wrapper += "    model_switch_local_tools = SimpleNamespace(_BACKGROUND_JOBS=jobs)\n"
     wrapper += "    for cmd, parts in commands:\n"
@@ -187,6 +197,9 @@ async def test_actual_cli_switch_branch(scenario):
         "validate_selection": validate_selection,
         "_env_flag": lambda name, default: default == "1",
         "_chat_modal": AsyncMock(side_effect=lambda callback: callback()),
+        "reviewed_capabilities": __import__(
+            "openvegas.tui.model_picker", fromlist=["reviewed_capabilities"]
+        ).reviewed_capabilities,
     }
     exec(compile(wrapper, "documented_cli_branch", "exec"), namespace)  # noqa: S102 - Trusted repository AST only; exercises the actual CLI branch.
     confirm = SimpleNamespace(ask=lambda *a, **k: scenario != "cancel")

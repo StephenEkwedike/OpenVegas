@@ -6,6 +6,7 @@ import asyncio
 from decimal import Decimal
 import json
 import time
+import uuid
 from typing import Any, AsyncGenerator
 
 import httpx
@@ -367,10 +368,13 @@ class OpenVegasClient:
         enable_tools: bool | None = None,
         enable_web_search: bool | None = None,
         attachments: list[str] | None = None,
+        reasoning_effort: str | None = None,
     ) -> dict:
         payload = {"prompt": prompt, "provider": provider, "model": model}
-        if idempotency_key:
-            payload["idempotency_key"] = idempotency_key
+        if reasoning_effort is not None:
+            payload["reasoning_effort"] = reasoning_effort
+        if idempotency_key or provider == "openrouter":
+            payload["idempotency_key"] = idempotency_key or str(uuid.uuid4())
         if thread_id:
             payload["thread_id"] = thread_id
         if conversation_mode:
@@ -385,6 +389,20 @@ class OpenVegasClient:
             payload["attachments"] = [str(a or "").strip() for a in attachments if str(a or "").strip()]
         return await self._request("POST", "/inference/ask", json=payload)
 
+    async def conversation_ask(
+        self, prompt: str, provider: str, model: str, *, thread_id: str,
+        expected_revision: str, idempotency_key: str, max_tokens: int = 1024,
+        reasoning_effort: str | None = None,
+    ) -> dict:
+        payload = {
+            "prompt": prompt, "provider": provider, "model": model,
+            "thread_id": thread_id, "expected_revision": expected_revision,
+            "idempotency_key": idempotency_key, "max_tokens": max_tokens,
+        }
+        if reasoning_effort is not None:
+            payload["reasoning_effort"] = reasoning_effort
+        return await self._request("POST", "/models/conversations/ask", json=payload)
+
     async def ask_stream(
         self,
         prompt: str,
@@ -398,10 +416,13 @@ class OpenVegasClient:
         enable_tools: bool | None = None,
         enable_web_search: bool | None = None,
         attachments: list[str] | None = None,
+        reasoning_effort: str | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         payload = {"prompt": prompt, "provider": provider, "model": model}
-        if idempotency_key:
-            payload["idempotency_key"] = idempotency_key
+        if reasoning_effort is not None:
+            payload["reasoning_effort"] = reasoning_effort
+        if idempotency_key or provider == "openrouter":
+            payload["idempotency_key"] = idempotency_key or str(uuid.uuid4())
         if thread_id:
             payload["thread_id"] = thread_id
         if conversation_mode:

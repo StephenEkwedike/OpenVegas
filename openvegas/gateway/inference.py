@@ -22,6 +22,7 @@ from openvegas.gateway.catalog import ModelDisabled as ModelDisabled
 from openvegas.gateway.catalog import ProviderCatalog, validate_catalog_entry
 from openvegas.gateway.providers import Provider as Provider
 from openvegas.gateway.providers import get_model_review, get_provider, model_capabilities, resolve_provider_api_key
+from openvegas.gateway.providers import validate_reasoning_effort
 from openvegas.wallet.ledger import InsufficientBalance, WalletService
 
 V_SCALE = Decimal("0.000001")
@@ -38,8 +39,12 @@ class InferenceRequest:
     enable_tools: bool = False
     enable_web_search: bool = False
     strict_continuity: bool = False
+    reasoning_effort: str | None = None
     # Internal snapshot from server preflight, never accepted from HTTP/CLI input.
     _managed_model_config: dict | None = field(default=None, init=False, repr=False)
+    _managed_attachment_context: Any = field(default=None, init=False, repr=False)
+    _managed_web_context: Any = field(default=None, init=False, repr=False)
+    _managed_openrouter_dispatch: Any = field(default=None, init=False, repr=False)
 
 
 @dataclass
@@ -52,11 +57,15 @@ class InferenceResult:
     provider_request_id: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
     web_search_used: bool = False
+    web_search_requests: int = 0
+    web_search_cost_v: Decimal = Decimal("0")
     web_search_sources: list[str] | None = None
     web_search_retry_without_tool: bool = False
     completion_status: str = "unknown"
     # Set only by settlement/replay, never by a provider response or HTTP caller.
     inference_request_id: str | None = field(default=None, init=False)
+    _managed_web_receipt: Any = field(default=None, init=False, repr=False)
+    _managed_web_accounting: dict | None = field(default=None, init=False, repr=False)
 
 
 @dataclass
@@ -69,6 +78,10 @@ class _InferenceExecutionContext:
     request_id: str
     preauth_id: str
     reservation_ref: str
+    web_context: Any = None
+    payload_hash: str = ""
+    provider_request_id: str | None = None
+    web_enable_tools: bool = False
 
 
 class AIGateway:
@@ -101,8 +114,10 @@ class AIGateway:
 
         try:
             result = await self._route_to_provider(req, ctx.provider_api_key)
+            ctx.provider_request_id = result.provider_request_id
             return await self._finalize_inference_execution(ctx, req, result)
-        except (Exception, asyncio.CancelledError):
+        except (Exception, asyncio.CancelledError) as error:
+            ctx.provider_request_id = getattr(error, "provider_request_id", None) or getattr(ctx, "provider_request_id", None)
             await self._cleanup_inference_after_failure(ctx)
             raise
 
@@ -115,6 +130,7 @@ class AIGateway:
             return
 
         result: InferenceResult | None = None
+        buffered = False
         try:
             if (
                 req.provider == "openai"
@@ -136,26 +152,41 @@ class AIGateway:
                         "OpenAI streaming completed without a final response payload.",
                     )
             else:
+                buffered = True
                 result = await self._route_to_provider(req, ctx.provider_api_key)
-                if str(result.text or "").strip():
-                    yield {"type": "text_delta", "text": str(result.text)}
+                ctx.provider_request_id = result.provider_request_id
+            ctx.provider_request_id = result.provider_request_id
             finalized = await self._finalize_inference_execution(ctx, req, result)
-        except (Exception, asyncio.CancelledError, GeneratorExit):
+        except (Exception, asyncio.CancelledError, GeneratorExit) as error:
+            ctx.provider_request_id = getattr(error, "provider_request_id", None) or getattr(ctx, "provider_request_id", None)
             # Closing a stream is not an Exception; release its durable wallet hold too.
             await self._cleanup_inference_after_failure(ctx)
             raise
 
+        # Buffered providers already finished upstream. Persist settlement before
+        # exposing their answer; closing the consumer is then a delivery event,
+        # not a failed inference that releases a successfully consumed hold.
+        if buffered and str(finalized.text or "").strip():
+            yield {"type": "text_delta", "text": str(finalized.text)}
         yield {"type": "completed", "result": finalized}
 
     async def _prepare_inference_execution(
         self,
         req: InferenceRequest,
-    ) -> tuple[_InferenceExecutionContext, InferenceResult | None]:
-        model_config = await self.catalog.get_model(req.provider, req.model)
+    ) -> tuple[_InferenceExecutionContext | None, InferenceResult | None]:
+        managed_web = req.provider == "openrouter" and req.enable_web_search
+        if managed_web:
+            replay = await self._replay_web_request(req)
+            if replay is not None:
+                return None, replay
+        validate_reasoning_effort(req.provider, req.model, req.reasoning_effort)
+        model_config = dict(await self.catalog.get_model(req.provider, req.model))
         validate_catalog_entry(req.provider, req.model, model_config)
         if req.provider == "openrouter":
             from openvegas.gateway.openrouter import build_payload
 
+            # Always replace any earlier route snapshot using a fresh server review.
+            req._managed_web_context = None
             build_payload(req, model_config, model_capabilities(req.provider, req.model))
             req._managed_model_config = dict(model_config)
             req._managed_model_config["response_model_ids"] = get_model_review(
@@ -209,7 +240,12 @@ class AIGateway:
             ).quantize(V_SCALE, rounding=ROUND_CEILING)
         reserve_v = max_v_cost
 
-        if user_id:
+        if managed_web:
+            budget = req._managed_web_context.prepared.budget
+            max_v_cost = budget.retail_reservation_v
+            reserve_v = max_v_cost
+
+        if user_id and not managed_web:
             estimated_grant_v = await self._estimate_grant_cover_v(
                 user_id=user_id,
                 provider=req.provider,
@@ -226,11 +262,15 @@ class AIGateway:
                 request_id, replay = await self._begin_inference_request(
                     user_id=user_id, idempotency_key=req.idempotency_key,
                     payload_hash=payload_hash, tx=tx,
+                    **({"allow_retry": False} if managed_web else {}),
                 )
                 ctx = _InferenceExecutionContext(
                     account_id=req.account_id, model_config=model_config, user_id=user_id,
                     provider_api_key=provider_api_key, reserve_v=reserve_v, request_id=request_id,
                     preauth_id=str(uuid.uuid4()), reservation_ref="",
+                    web_context=req._managed_web_context if managed_web else None,
+                    payload_hash=payload_hash,
+                    web_enable_tools=bool(req.enable_tools) if managed_web else False,
                 )
                 ctx.reservation_ref = f"infer-preauth:{ctx.preauth_id}"
                 if replay is not None:
@@ -281,6 +321,16 @@ class AIGateway:
                         account_id=req.account_id, amount=reserve_v,
                         reference_id=ctx.reservation_ref, tx=tx,
                     )
+                if managed_web:
+                    from openvegas.gateway.openrouter_web import request_evidence
+
+                    await tx.execute(
+                        "UPDATE inference_requests SET response_body_text=$2 WHERE id=$1 AND status='processing'",
+                        request_id, json.dumps({"managed_web_request": request_evidence(
+                            ctx.web_context.prepared, request_hash=payload_hash,
+                            enable_tools=ctx.web_enable_tools,
+                        )}, separators=(",", ":")),
+                    )
         except (Exception, asyncio.CancelledError):
             if ctx is not None:
                 await self._cleanup_inference_after_failure(ctx)
@@ -301,6 +351,27 @@ class AIGateway:
         reserve_v = ctx.reserve_v
 
         actual_v = self._calculate_v_cost(model_config, result.input_tokens, result.output_tokens)
+        web_context = getattr(ctx, "web_context", None)
+        web_fee = Decimal("0")
+        if req.provider == "openrouter" and req.enable_web_search:
+            from openvegas.gateway.openrouter_web import ObservedReceipt
+
+            receipt = result._managed_web_receipt
+            if (web_context is None or req._managed_web_context is not web_context
+                    or self._payload_hash(req) != ctx.payload_hash
+                    or not isinstance(receipt, ObservedReceipt) or not receipt.settlement_authorized
+                    or result.actual_cost_usd not in {receipt.actual_cost_usd, receipt.actual_cost_usd.quantize(V_SCALE)}
+                    or (result.input_tokens, result.output_tokens,
+                        result.web_search_requests, result.web_search_cost_v) != (
+                        receipt.input_tokens, receipt.output_tokens,
+                        receipt.web_search_requests, receipt.web_search_cost_v)):
+                raise ContractError(APIErrorCode.HOLD_CONFLICT, "Web settlement snapshot mismatch.")
+            web_context.payload(req, model_config, dispatch=False)
+            web_fee = receipt.web_search_cost_v
+            actual_v = receipt.retail_charge_candidate_v
+        elif result.web_search_cost_v != 0 or web_context is not None:
+            raise ContractError(APIErrorCode.HOLD_CONFLICT, "Unprepared web surcharge.")
+        token_v = actual_v - web_fee
         actual_usd = self._calculate_actual_usd(
             model_config, result.input_tokens, result.output_tokens
         )
@@ -338,8 +409,27 @@ class AIGateway:
                     inference_usage_id=usage_id,
                     request_id=request_id,
                 )
-                grant_used_v = self._grant_coverage_v(actual_v, total_tokens, grant_used_tokens)
+                grant_used_v = self._grant_coverage_v(token_v, total_tokens, grant_used_tokens)
                 charge_v = max((actual_v - grant_used_v), Decimal("0")).quantize(V_SCALE)
+
+            if web_context is not None:
+                from openvegas.gateway.openrouter_web import settlement_evidence, validate_stored_web_result
+
+                if charge_v > reserve_v or charge_v < web_fee:
+                    raise ContractError(APIErrorCode.HOLD_CONFLICT, "Web charge exceeds its reservation.")
+                result.v_cost = charge_v
+                result.actual_cost_usd = actual_usd
+                result._managed_web_accounting = settlement_evidence(
+                    web_context.prepared, result._managed_web_receipt,
+                    request_hash=ctx.payload_hash, provider_request_id=result.provider_request_id,
+                    completion_status=result.completion_status, grant_v=grant_used_v,
+                    tool_calls=result.tool_calls,
+                    enable_tools=ctx.web_enable_tools,
+                )
+                validate_stored_web_result(
+                    json.loads(self._serialize_success_body(result)), request_hash=ctx.payload_hash,
+                    model=req.model, reserved_v=reserve_v,
+                )
 
             await self._settle_preauth(
                 tx=tx,
@@ -396,6 +486,10 @@ class AIGateway:
                             "model_id": req.model,
                             "input_tokens": result.input_tokens,
                             "output_tokens": result.output_tokens,
+                            **({"managed_web_accounting": result._managed_web_accounting,
+                                "web_search_requests": result.web_search_requests,
+                                "web_search_cost_v": str(result.web_search_cost_v)}
+                               if web_context is not None else {}),
                         },
                         separators=(",", ":"),
                     ),
@@ -501,7 +595,45 @@ class AIGateway:
                 reserved_v=ctx.reserve_v,
                 tx=tx,
             )
-            await self._mark_request_failed(request_id=ctx.request_id, tx=tx)
+            web_context = getattr(ctx, "web_context", None)
+            failure_fields = {}
+            if web_context is not None:
+                from openvegas.gateway.openrouter_web import request_evidence
+
+                failure_fields = {
+                    "managed_web_request": request_evidence(
+                        web_context.prepared, request_hash=ctx.payload_hash, enable_tools=ctx.web_enable_tools,
+                    ),
+                    "provider_request_id": getattr(ctx, "provider_request_id", None),
+                }
+            await self._mark_request_failed(
+                request_id=ctx.request_id, tx=tx,
+                **({"web_failure": failure_fields} if failure_fields else {}),
+            )
+
+    async def _replay_web_request(self, req: InferenceRequest) -> InferenceResult | None:
+        """Read completed web work before fresh review/credentials; never redispatch uncertainty."""
+        user_id = self._extract_user_id(req.account_id)
+        if not user_id or not isinstance(req.idempotency_key, str) or not 1 <= len(req.idempotency_key) <= 200:
+            raise ContractError(APIErrorCode.INVALID_TRANSITION, "Web requires a user idempotency key.")
+        async with self.db.transaction() as tx:
+            row = await tx.fetchrow(
+                "SELECT * FROM inference_requests WHERE user_id = $1 AND idempotency_key = $2 FOR UPDATE",
+                user_id, req.idempotency_key,
+            )
+            if row is None:
+                return None
+            if row["payload_hash"] != self._payload_hash(req):
+                raise ContractError(APIErrorCode.IDEMPOTENCY_CONFLICT, "Idempotency key conflict: payload mismatch.")
+            if row["status"] == "succeeded" and row["response_status"] == 200:
+                result = self._deserialize_result(row)
+                if result._managed_web_accounting is None:
+                    raise ContractError(APIErrorCode.HOLD_CONFLICT, "Web replay lacks accounting evidence.")
+                return result
+            raise ContractError(
+                APIErrorCode.HOLD_CONFLICT,
+                "Prior web attempt requires reconciliation; no automatic retry was made.",
+            )
 
     async def _begin_inference_request(
         self,
@@ -510,6 +642,7 @@ class AIGateway:
         idempotency_key: str | None,
         payload_hash: str,
         tx=None,
+        allow_retry: bool = True,
     ) -> tuple[str, InferenceResult | None]:
         request_id = str(uuid.uuid4())
         idem_key = idempotency_key or request_id
@@ -571,6 +704,8 @@ class AIGateway:
                 status = str(row["status"])
                 if status == "succeeded" and row["response_status"] == 200 and row["response_body_text"]:
                     return rid, self._deserialize_result(row)
+                if not allow_retry:
+                    raise ContractError(APIErrorCode.HOLD_CONFLICT, "Prior web attempt requires reconciliation.")
                 if status == "processing" and not self._is_stale(row.get("updated_at")):
                     raise ContractError(
                         APIErrorCode.HOLD_CONFLICT,
@@ -593,7 +728,7 @@ class AIGateway:
                 return rid, None
             return request_id, None
 
-    async def _mark_request_failed(self, request_id: str, *, tx=None) -> None:
+    async def _mark_request_failed(self, request_id: str, *, tx=None, web_failure: dict | None = None) -> None:
         async with self._transaction(tx) as tx:
             await tx.execute(
                 """
@@ -607,10 +742,16 @@ class AIGateway:
                 """,
                 request_id,
                 json.dumps(
-                    {"error": APIErrorCode.PROVIDER_UNAVAILABLE.value, "detail": "Inference provider call failed"},
+                    {"error": APIErrorCode.PROVIDER_UNAVAILABLE.value, "detail": "Inference provider call failed",
+                     **(web_failure or {})},
                     separators=(",", ":"),
                 ),
             )
+            if web_failure and web_failure.get("provider_request_id"):
+                await tx.execute(
+                    "UPDATE inference_requests SET provider_request_id=$2 WHERE id=$1 AND status='failed'",
+                    request_id, web_failure["provider_request_id"],
+                )
 
     async def _estimate_grant_cover_v(
         self,
@@ -827,6 +968,7 @@ class AIGateway:
 
     async def _route_to_provider(self, req: InferenceRequest, api_key: str) -> InferenceResult:
         """Route to the appropriate provider SDK."""
+        validate_reasoning_effort(req.provider, req.model, req.reasoning_effort)
         descriptor = get_provider(req.provider)
         if req.enable_tools and not descriptor.tools:
             raise ContractError(
@@ -845,11 +987,15 @@ class AIGateway:
 
         if req._managed_model_config is None:
             raise ContractError(APIErrorCode.INVALID_TRANSITION, "OpenRouter requires server catalog preflight.")
-        return InferenceResult(**await complete(
+        values = await complete(
             req, api_key, model_config=req._managed_model_config,
             capabilities=model_capabilities(req.provider, req.model),
             parse_tool=self._parse_local_tool_call, client=self.http_client,
-        ))
+        )
+        receipt = values.pop("_managed_web_receipt", None)
+        result = InferenceResult(**values)
+        result._managed_web_receipt = receipt
+        return result
 
     async def _call_anthropic(self, req: InferenceRequest, api_key: str) -> InferenceResult:
         import anthropic
@@ -1611,6 +1757,7 @@ class AIGateway:
                 "enable_tools": bool(req.enable_tools),
                 "enable_web_search": bool(req.enable_web_search),
                 **({"strict_continuity": True} if req.strict_continuity else {}),
+                **({"reasoning_effort": req.reasoning_effort} if req.reasoning_effort is not None else {}),
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -1633,6 +1780,10 @@ class AIGateway:
                 "web_search_used": bool(result.web_search_used),
                 "web_search_sources": list(result.web_search_sources or []),
                 "web_search_retry_without_tool": bool(result.web_search_retry_without_tool),
+                **({"web_search_requests": result.web_search_requests,
+                    "web_search_cost_v": str(result.web_search_cost_v),
+                    "managed_web_accounting": result._managed_web_accounting}
+                   if result._managed_web_accounting is not None else {}),
             },
             separators=(",", ":"),
             ensure_ascii=False,
@@ -1647,6 +1798,17 @@ class AIGateway:
                 "Idempotent replay body missing for succeeded request.",
             )
         payload = json.loads(str(raw))
+        if "managed_web_accounting" in payload:
+            from openvegas.gateway.openrouter_web import WebValidationError, validate_stored_web_result
+
+            try:
+                validate_stored_web_result(payload, request_hash=row.get("payload_hash"))
+                if (Decimal(payload["v_cost"]) != Decimal(str(row["final_charge_v"]))
+                        or Decimal(payload["actual_cost_usd"]) != Decimal(str(row["final_provider_cost_usd"]))
+                        or payload["provider_request_id"] != row["provider_request_id"]):
+                    raise WebValidationError("stored_web_row_mismatch")
+            except (WebValidationError, KeyError, ValueError):
+                raise ContractError(APIErrorCode.HOLD_CONFLICT, "Stored web settlement requires reconciliation.") from None
         result = InferenceResult(
             text=str(payload.get("text", "")),
             completion_status=str(payload.get("completion_status", "unknown")),
@@ -1659,7 +1821,10 @@ class AIGateway:
             web_search_used=bool(payload.get("web_search_used", False)),
             web_search_sources=payload.get("web_search_sources") if isinstance(payload.get("web_search_sources"), list) else None,
             web_search_retry_without_tool=bool(payload.get("web_search_retry_without_tool", False)),
+            web_search_requests=payload.get("web_search_requests", 0),
+            web_search_cost_v=Decimal(str(payload.get("web_search_cost_v", "0"))),
         )
+        result._managed_web_accounting = payload.get("managed_web_accounting")
         result.inference_request_id = str(row["id"]) if row.get("id") is not None else None
         return result
 

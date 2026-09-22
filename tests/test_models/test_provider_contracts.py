@@ -234,19 +234,19 @@ async def test_mistral_stream_close_and_idempotent_replay_do_not_double_settle()
     result = InferenceResult("answer", 11, 7, v_cost=Decimal("0.1"))
     gateway._prepare_inference_execution = AsyncMock(return_value=(ctx, None))
     gateway._route_to_provider = AsyncMock(return_value=result)
-    gateway._finalize_inference_execution = AsyncMock()
+    gateway._finalize_inference_execution = AsyncMock(return_value=result)
     gateway._cleanup_inference_after_failure = AsyncMock()
     stream = gateway.stream_infer(request())
-    assert (await anext(stream))["type"] == "text_delta"
+    assert await anext(stream) == {"type": "text_delta", "text": "answer"}
     await stream.aclose()
-    gateway._cleanup_inference_after_failure.assert_awaited_once_with(ctx)
-    gateway._finalize_inference_execution.assert_not_awaited()
+    gateway._cleanup_inference_after_failure.assert_not_awaited()
+    gateway._finalize_inference_execution.assert_awaited_once()
     gateway._route_to_provider.reset_mock()
     gateway._prepare_inference_execution = AsyncMock(return_value=(ctx, result))
     events = [event async for event in gateway.stream_infer(request())]
     assert events[-1]["result"].v_cost == Decimal("0.1")
     gateway._route_to_provider.assert_not_awaited()
-    gateway._finalize_inference_execution.assert_not_awaited()
+    gateway._finalize_inference_execution.assert_awaited_once()
 
 
 def test_discovery_does_not_enable_future_models_or_fabricate_prices():

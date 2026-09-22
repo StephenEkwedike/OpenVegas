@@ -121,7 +121,7 @@ def test_cli_skips_model_request_when_attachment_upload_fails(monkeypatch, tmp_p
     runner = CliRunner()
     result = runner.invoke(cli, ["chat"])
     assert result.exit_code == 0, result.output
-    assert "Skipped model request for this turn to avoid extra cost" in result.output
+    assert "Request not sent: some attachments failed to upload." in result.output
     inst = _FakeAttachmentClient.instances[-1]
     assert getattr(inst, "ask_calls", 0) == 0
 

@@ -6,6 +6,7 @@ import json
 import os
 import uuid
 from dataclasses import dataclass, replace
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 
@@ -95,6 +96,14 @@ def _extract_text_content(raw: Any) -> str:
 class ProviderThreadService:
     def __init__(self, db: Any):
         self.db = db
+
+    @asynccontextmanager
+    async def _exchange_transaction(self, transaction=None):
+        if transaction is not None:
+            yield transaction
+        else:
+            async with self.db.transaction() as tx:
+                yield tx
 
     @staticmethod
     def _continuity_scope(user_id: str, thread_id: str | None = None) -> None:
@@ -316,6 +325,7 @@ class ProviderThreadService:
         self, *, user_id: str, thread_id: str, provider: str, model_id: str,
         expected_revision: str, prompt: str, idempotency_key: str,
         catalog: ProviderCatalog, gateway: Any, max_output_tokens: int = 1024,
+        reasoning_effort: str | None = None,
     ) -> dict:
         """Exactly one gateway call with full roles; no retries, tools or summaries.
 
@@ -324,9 +334,11 @@ class ProviderThreadService:
         """
         from openvegas.gateway.catalog import ModelDisabled
         from openvegas.gateway.inference import InferenceRequest
+        from openvegas.gateway.providers import validate_reasoning_effort
         from openvegas.wallet.ledger import InsufficientBalance
 
         self._continuity_scope(user_id, idempotency_key)
+        validate_reasoning_effort(provider, model_id, reasoning_effort)
 
         if "strict_continuity" not in InferenceRequest.__dataclass_fields__:
             raise ContinuityError("Canonical inference requires the reviewed gateway continuity patch.")
@@ -359,6 +371,7 @@ class ProviderThreadService:
                 max_tokens=max_output_tokens, idempotency_key=idempotency_key,
                 enable_tools=False, enable_web_search=False,
                 strict_continuity=True,
+                reasoning_effort=reasoning_effort,
             ))
         except (ModelDisabled, InsufficientBalance):
             # These pre-provider failures cannot have settled a paid result.
@@ -650,6 +663,9 @@ class ProviderThreadService:
         input_tokens: int,
         output_tokens: int,
         persist_context: bool,
+        attachment_refs: list[dict[str, str]] | None = None,
+        assistant_kind: str | None = None,
+        tx: Any | None = None,
     ) -> None:
         import json
 
@@ -662,17 +678,39 @@ class ProviderThreadService:
         if not thread_ctx.thread_id:
             return
 
-        async with self.db.transaction() as tx:
+        prompt_payload = {"text": prompt}
+        answer_payload = {"text": response_text}
+        if assistant_kind is not None:
+            if assistant_kind not in {"visible_text", "native_tool_request"}:
+                raise ContractError(APIErrorCode.INVALID_TRANSITION, "Invalid assistant history kind.")
+            answer_payload["assistant_kind"] = assistant_kind
+        if attachment_refs is not None:
+            from server.services.attachment_history import validate_refs
+            prompt_payload["attachment_refs"] = validate_refs(attachment_refs)
+        async with self._exchange_transaction(tx) as tx:
+            # now() is constant for a transaction and UUIDs are random. Serialize
+            # appends per thread and assign ordered timestamps explicitly so an
+            # assistant never sorts before its prompt, even after a clock jump.
+            await tx.execute(
+                "SELECT id FROM provider_threads WHERE id=$1::uuid FOR UPDATE",
+                thread_ctx.thread_id,
+            )
             await tx.execute(
                 """
-                INSERT INTO provider_thread_messages (thread_id, role, content, token_count)
-                VALUES
-                  ($1::uuid, 'user', $2::jsonb, NULL),
-                  ($1::uuid, 'assistant', $3::jsonb, $4)
+                WITH ordered AS (
+                    SELECT GREATEST(clock_timestamp(), MAX(created_at) + interval '1 microsecond') AS started
+                    FROM provider_thread_messages WHERE thread_id=$1::uuid
+                )
+                INSERT INTO provider_thread_messages (thread_id, role, content, token_count, created_at)
+                SELECT $1::uuid, item.role, item.content, item.tokens, ordered.started + item.delta
+                FROM ordered CROSS JOIN (VALUES
+                  ('user', $2::jsonb, NULL::int, interval '0 microseconds'),
+                  ('assistant', $3::jsonb, $4::int, interval '1 microsecond')
+                ) AS item(role, content, tokens, delta)
                 """,
                 thread_ctx.thread_id,
-                json.dumps({"text": prompt}, ensure_ascii=False, separators=(",", ":")),
-                json.dumps({"text": response_text}, ensure_ascii=False, separators=(",", ":")),
+                json.dumps(prompt_payload, ensure_ascii=False, separators=(",", ":")),
+                json.dumps(answer_payload, ensure_ascii=False, separators=(",", ":")),
                 max(input_tokens + output_tokens, 0),
             )
             await tx.execute(
@@ -683,8 +721,16 @@ class ProviderThreadService:
                 """,
                 thread_ctx.thread_id,
             )
-            await self._maybe_compact_thread(tx, thread_ctx.thread_id)
-            await self._truncate_messages(tx, thread_ctx.thread_id)
+            has_files = attachment_refs is not None or await tx.fetchval(
+                "SELECT EXISTS(SELECT 1 FROM provider_thread_messages "
+                "WHERE thread_id=$1::uuid AND content ? 'attachment_refs')",
+                thread_ctx.thread_id,
+            )
+            # File-bearing history must never be compacted into a text summary.
+            # Its next request enforces the hard count/context bound instead.
+            if not has_files:
+                await self._maybe_compact_thread(tx, thread_ctx.thread_id)
+                await self._truncate_messages(tx, thread_ctx.thread_id)
 
     async def _truncate_messages(self, tx: Any, thread_id: str) -> None:
         max_messages = self._max_context_messages()
@@ -828,21 +874,58 @@ class ProviderThreadService:
             LIMIT $2
             """,
             thread_id,
-            cap,
+            cap + 1,
         )
+        def content_object(raw):
+            if isinstance(raw, str):
+                try:
+                    decoded = json.loads(raw)
+                    return decoded if isinstance(decoded, dict) else {}
+                except ValueError:
+                    return {}
+            return raw if isinstance(raw, dict) else {}
+
+        has_files = any("attachment_refs" in content_object(row.get("content")) for row in rows)
+        if len(rows) > cap:
+            # Check outside the retained window too, so older files cannot vanish.
+            has_files = has_files or bool(await self.db.fetchval(
+                "SELECT EXISTS(SELECT 1 FROM provider_thread_messages "
+                "WHERE thread_id=$1::uuid AND content ? 'attachment_refs')", thread_id,
+            ))
+            if has_files:
+                raise ContractError(APIErrorCode.INVALID_TRANSITION,
+                                    "Attachment history exceeds the limit; start a fresh conversation. No files were dropped.")
+            rows = rows[:cap]
         loaded = len(rows)
         out: list[dict[str, str]] = []
 
         for row in reversed(rows):
             role = str(row.get("role") or "").strip().lower()
+            raw = content_object(row.get("content"))
+            refs = None
+            if "attachment_refs" in raw:
+                from server.services.attachment_history import validate_refs
+                if role != "user":
+                    raise ContractError(APIErrorCode.INVALID_TRANSITION, "Invalid attachment history role.")
+                refs = validate_refs(raw["attachment_refs"])
             if role not in {"user", "assistant"}:
                 continue
+            if has_files and role == "assistant" and raw.get("assistant_kind") == "native_tool_request":
+                raise ContractError(APIErrorCode.INVALID_TRANSITION,
+                    "This file conversation requires native tool continuation; its tool calls cannot be omitted or replayed as prose.")
             text = _extract_text_content(row.get("content"))
-            if not text.strip():
+            if not text.strip() and refs is None:
                 continue
-            if role == "assistant" and not _is_plain_assistant_content(text):
+            visible_file_answer = has_files and raw.get("assistant_kind") == "visible_text"
+            if role == "assistant" and not visible_file_answer and not _is_plain_assistant_content(text):
+                if has_files:
+                    raise ContractError(APIErrorCode.INVALID_TRANSITION,
+                        "Attachment history contains unsupported tool or structured state; start fresh explicitly. Nothing was silently omitted.")
                 continue
-            out.append({"role": role, "content": text})
+            message = {"role": role, "content": text}
+            if refs is not None:
+                message["attachment_refs"] = refs
+            out.append(message)
 
         skipped = max(0, loaded - len(out))
         return out, loaded, skipped

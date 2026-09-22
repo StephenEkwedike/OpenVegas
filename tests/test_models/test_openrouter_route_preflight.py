@@ -1,21 +1,25 @@
 """ASGI-only route preflight; no upload, provider, database or real auth traffic."""
 
+import copy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+import test_inference_replay as replay_fixtures
 import test_openrouter as fixtures
 from fastapi import FastAPI
 
 from openvegas.gateway.catalog import ProviderCatalog
-from openvegas.gateway.inference import InferenceResult
+from openvegas.gateway.inference import AIGateway, InferenceResult
 from server.routes import inference as routes
+from server.services.inference_replay import GATEWAY_KEY_PREFIX, InferenceReplayService
 
 
 @pytest.fixture
 def setup_route(monkeypatch):
     events = []
+    db = replay_fixtures.MemoryDB()
     state = {"row": fixtures.catalog_row(), "credential": {"key_alias": "OPENROUTER_ROUTE_FIXTURE"}}
 
     async def fetchrow(query, *args):
@@ -33,14 +37,51 @@ def setup_route(monkeypatch):
         events.append("thread")
         return SimpleNamespace(thread_id=None, thread_status="disabled")
 
+    async def history(**kwargs):
+        return copy.deepcopy(db.history), len(db.history), 0
+
+    async def append_exchange(**kwargs):
+        tx = kwargs.get("tx")
+        if tx is None:
+            return  # Keyless fixture cases retain their legacy no-op persistence.
+        assert isinstance(tx, replay_fixtures.MemoryTx) and tx.db is db
+        if kwargs["thread_ctx"].thread_id is None or not kwargs["persist_context"]:
+            return
+        user = {"role": "user", "content": kwargs["prompt"]}
+        if "attachment_refs" in kwargs:
+            user["attachment_refs"] = kwargs["attachment_refs"]
+        assistant = {"role": "assistant", "content": kwargs["response_text"]}
+        await tx.execute("INSERT TEST ROUTE HISTORY", user, assistant)
+
     thread = SimpleNamespace(
         context_enabled=lambda: True,
         prepare_thread=AsyncMock(side_effect=prepare_thread),
-        append_exchange=AsyncMock(),
+        append_exchange=AsyncMock(side_effect=append_exchange),
+        get_recent_messages_with_stats=AsyncMock(side_effect=history),
+        db=db,
     )
     gateway = SimpleNamespace(
-        infer=AsyncMock(return_value=InferenceResult("Fixture answer", 11, 7))
+        infer=AsyncMock(return_value=InferenceResult("Fixture answer", 11, 7)),
+        db=db,
     )
+
+    async def infer(req):
+        result = copy.deepcopy(gateway.infer.return_value)
+        if isinstance(req.idempotency_key, str) and req.idempotency_key.startswith(
+            GATEWAY_KEY_PREFIX
+        ):
+            scope = SimpleNamespace(
+                user_id=req.account_id.removeprefix("user:"),
+                gateway_idempotency_key=req.idempotency_key,
+            )
+            result.inference_request_id = replay_fixtures.settled_gateway(db, scope)
+            db.gateway_rows[(scope.user_id, req.idempotency_key)].update(
+                payload_hash=AIGateway._payload_hash(req),
+                response_body_text=AIGateway._serialize_success_body(result),
+            )
+        return result
+
+    gateway.infer.side_effect = infer
     fraud = SimpleNamespace(check_inference=AsyncMock())
     mode = SimpleNamespace(
         resolve_for_user=AsyncMock(
@@ -57,6 +98,7 @@ def setup_route(monkeypatch):
     monkeypatch.setattr(routes, "get_gateway", lambda: gateway)
     monkeypatch.setattr(routes, "get_fraud_engine", lambda: fraud)
     monkeypatch.setattr(routes, "get_llm_mode_service", lambda: mode)
+    monkeypatch.setattr(routes, "get_inference_replay_service", lambda: InferenceReplayService(db))
     monkeypatch.setattr(routes, "emit_metric", lambda *a, **k: None)
     monkeypatch.setattr(routes, "emit_run_metrics", lambda *a, **k: None)
     monkeypatch.setenv("OPENVEGAS_RUNTIME_ENV", "production")
@@ -69,7 +111,14 @@ def setup_route(monkeypatch):
         "user_id": "11111111-1111-4111-8111-111111111111",
     }
     return SimpleNamespace(
-        app=app, state=state, events=events, thread=thread, gateway=gateway, fraud=fraud, mode=mode
+        app=app,
+        state=state,
+        events=events,
+        thread=thread,
+        gateway=gateway,
+        fraud=fraud,
+        mode=mode,
+        db=db,
     )
 
 

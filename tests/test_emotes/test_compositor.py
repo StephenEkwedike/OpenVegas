@@ -39,7 +39,9 @@ async def running(pack, clock, **kwargs):
         output_text, console_text = io.StringIO(), io.StringIO()
         size = [Size(rows=30, columns=90)]
         output = Vt100_Output(output_text, get_size=lambda: size[0], enable_cpr=False)
-        console = Console(file=console_text, force_terminal=True, color_system="truecolor", width=80)
+        # This fixture exercises ANSI color retention, independently of the
+        # calling shell's NO_COLOR preference.
+        console = Console(file=console_text, force_terminal=True, color_system="truecolor", no_color=False, width=80)
         session = PromptSession(input=pipe, output=output)
         owner = OwnedChatCompositor(
             session, console, session_id="local-test", pack=pack,

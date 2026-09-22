@@ -42,10 +42,15 @@ def consumer():
         if isinstance(node, ast.AsyncFunctionDef) and node.name == "_ask_with_optional_stream"
     ]
     assert len(functions) == 1
+    functions.extend(node for node in ast.walk(ast.parse(source.read_text()))
+                     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                     and node.name in {"_model_capability", "_chat_capability", "_validate_openrouter_request"})
     requests = []
     client = SimpleNamespace(ask=AsyncMock(return_value={"text": "non-stream"}))
     namespace = {
         "Any": Any,
+        "ReviewedModelCapabilities": __import__("openvegas.tui.model_picker", fromlist=["ReviewedModelCapabilities"]).ReviewedModelCapabilities,
+        "current_model_capabilities": None,
         "APIError": APIError,
         "client": client,
         "_env_flag": lambda *_: True,

@@ -113,7 +113,7 @@ async def _credit_count(db, topup_id):
 async def test_fresh_all_migrations_satisfy_runtime_schema(database_factory):
     from server.services.dependencies import FeatureFlags, assert_schema_compatible
 
-    async with database_factory() as sandbox:
+    async with database_factory(through=44) as sandbox:
         flags = FeatureFlags(
             store_enabled=True, inference_enabled=True, agent_runtime_enabled=True,
             human_casino_enabled=True, mint_audit_enabled=True, context_enabled=True,
@@ -124,7 +124,7 @@ async def test_fresh_all_migrations_satisfy_runtime_schema(database_factory):
 
 
 async def test_every_migration_is_present_in_application_journal(database_factory):
-    async with database_factory() as sandbox:
+    async with database_factory(through=44) as sandbox:
         actual = {row["version"] for row in await sandbox.db.fetch("SELECT version FROM schema_migrations")}
         expected = {path.stem for path in MIGRATIONS.glob("[0-9]*.sql")}
         assert expected, "Migration source directory must not be empty"

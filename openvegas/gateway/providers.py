@@ -14,6 +14,7 @@ from enum import Enum
 from types import MappingProxyType
 from typing import Any
 
+from openvegas.capabilities import REASONING_EFFORTS, reviewed_reasoning_efforts
 from openvegas.contracts.errors import APIErrorCode, ContractError
 
 
@@ -98,25 +99,73 @@ def model_capabilities(provider: str, model_id: str) -> dict[str, Any]:
     reviewed_caps = review.get("capabilities", {})
     if not isinstance(reviewed_caps, dict):
         reviewed_caps = {}
+    parameters = review.get("supported_parameters")
+    efforts = (
+        reviewed_reasoning_efforts(reviewed_caps.get("reasoning_efforts"))
+        if provider == "openrouter" and isinstance(parameters, list) and "reasoning" in parameters
+        else ()
+    )
     context = review.get("context_window_tokens")
     if type(context) is not int or not 1 <= context <= 10_000_000:
         context = None
     responses = provider == "openai" and (
         model_id.lower().startswith("gpt-5") or "codex" in model_id.lower()
     )
+    attachments = review.get("attachments", {})
+    if not isinstance(attachments, dict):
+        attachments = {}
+    modalities = attachments.get("input_modalities")
+    # Discovery exposes only explicit review claims. Dispatch additionally checks
+    # the complete review against the current catalog, bytes and authenticated owner.
+    reviewed_files = bool(
+        provider == "openrouter"
+        and review.get("account_access") is True
+        and review.get("completion_chat") is True
+        and attachments.get("schema_version") == 1
+        and attachments.get("model_id") == model_id
+        and attachments.get("no_additional_fees") is True
+        and isinstance(modalities, list)
+        and all(isinstance(value, str) and value in {"text", "image", "file"} for value in modalities)
+        and "text" in modalities
+    )
+    reviewed_web = False
+    if provider == "openrouter" and reviewed_caps.get("web_search") is True:
+        from openvegas.gateway.openrouter_web import reviewed_web_capability
+
+        reviewed_web = reviewed_web_capability(model_id, review)
     return {
         "text": True,
         "tools": adapter.tools and reviewed_caps.get("tools") is True,
-        "image_input": adapter.image_input and reviewed_caps.get("image_input") is True,
-        "web_search": adapter.web_search and responses and reviewed_caps.get("web_search") is True,
+        "image_input": ((adapter.image_input and reviewed_caps.get("image_input") is True)
+                        or (reviewed_files and "image" in modalities)),
+        "file_upload": reviewed_files,
+        "web_search": reviewed_web or (
+            adapter.web_search and responses and reviewed_caps.get("web_search") is True
+        ),
         "json_schema": False,
-        "reasoning_controls": False,
+        "reasoning_controls": bool(efforts),
+        "reasoning_efforts": list(efforts),
         "stream_events": True,
         "streaming_mode": "native_or_buffered" if provider == "openai" else "buffered",
         "role_preserving_history": adapter.role_preserving_history,
         "context_window_tokens": context,
         "reviewed": bool(review),
     }
+
+
+def validate_reasoning_effort(provider: str, model_id: str, effort: object) -> None:
+    """Explicit selections must be honored, never silently ignored by an adapter."""
+    if effort is None:
+        return
+    if not isinstance(effort, str) or effort not in REASONING_EFFORTS:
+        raise ContractError(APIErrorCode.INVALID_TRANSITION, "Invalid reasoning effort.")
+    supported = model_capabilities(provider, model_id)["reasoning_efforts"]
+    if effort not in supported:
+        raise ContractError(
+            APIErrorCode.INVALID_TRANSITION,
+            "Reasoning effort is not reviewed for this exact provider/model. "
+            "Use a listed effort or omit reasoning_effort for the provider default.",
+        )
 
 
 def provider_descriptors() -> list[dict[str, Any]]:

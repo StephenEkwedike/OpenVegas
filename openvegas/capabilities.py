@@ -11,8 +11,24 @@ from pathlib import Path
 from urllib.parse import urlparse
 from urllib.request import urlopen
 from dataclasses import dataclass, replace
+from typing import Literal, get_args
 
 from openvegas.flags import features
+
+ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+REASONING_EFFORTS = get_args(ReasoningEffort)
+
+
+def reviewed_reasoning_efforts(value: object) -> tuple[str, ...]:
+    """Fail closed on malformed operator/server lists; never infer from model names."""
+    if (
+        not isinstance(value, list)
+        or len(value) > len(REASONING_EFFORTS)
+        or any(not isinstance(item, str) or item not in REASONING_EFFORTS for item in value)
+        or len(set(value)) != len(value)
+    ):
+        return ()
+    return tuple(effort for effort in REASONING_EFFORTS if effort in value)
 
 
 @dataclass(frozen=True)
@@ -26,6 +42,8 @@ class ModelCapabilities:
     image_gen: bool
     realtime_voice: bool
     speech_to_text: bool
+    reasoning_controls: bool = False
+    reasoning_efforts: tuple[str, ...] = ()
 
 
 DEFAULT_CAPS = ModelCapabilities(
@@ -106,6 +124,8 @@ def _normalize_override_payload(payload: object) -> dict[tuple[str, str], dict[s
             continue
         normalized: dict[str, bool] = {}
         for cap_name in ModelCapabilities.__dataclass_fields__.keys():
+            if cap_name in {"reasoning_controls", "reasoning_efforts"}:
+                continue
             if cap_name in value:
                 normalized[cap_name] = _as_bool(value.get(cap_name), default=False)
         if normalized:
@@ -185,6 +205,18 @@ def get_caps(provider: str, model: str) -> ModelCapabilities:
         if provider_key == p and fnmatch.fnmatch(model_key, pattern):
             caps = replace(caps, **overrides)
 
+    if provider_key == "openrouter":
+        from openvegas.gateway.providers import model_capabilities
+
+        reviewed = model_capabilities(provider_key, str(model or "").strip())
+        caps = replace(
+            caps,
+            file_upload=reviewed["file_upload"],
+            image_input=reviewed["image_input"],
+            web_search=reviewed["web_search"],
+            reasoning_controls=reviewed["reasoning_controls"],
+            reasoning_efforts=tuple(reviewed["reasoning_efforts"]),
+        )
     return caps
 
 
@@ -218,6 +250,10 @@ def resolve_capability(
         return False
 
     enabled = bool(getattr(caps, feature))
+    if provider == "openrouter" and feature in {"file_upload", "image_input", "web_search"} and not enabled:
+        return False
+    if feature in {"reasoning_controls", "reasoning_efforts"} and not enabled:
+        return False
 
     # Explicit env override wins (first direct capability key, then mapped feature flag key).
     cap_env_name = f"OPENVEGAS_ENABLE_{feature.upper()}"

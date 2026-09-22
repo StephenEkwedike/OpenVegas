@@ -322,7 +322,7 @@ async def test_model_routes_require_auth_reject_byok_and_validate(configured, mo
         transport=httpx.ASGITransport(app=app), base_url="http://test"
     ) as client:
         assert (await client.get("/models")).status_code in {401, 403, 422}
-        app.dependency_overrides[models.get_current_user] = lambda: {"id": USER}
+        app.dependency_overrides[models.get_current_user] = lambda: {"user_id": USER}
         data = (await client.get("/models")).json()
         assert [p["id"] for p in data["providers"]] == list(PROVIDERS)
         payload = {"provider": "mistral", "model": "reviewed-test-model"}

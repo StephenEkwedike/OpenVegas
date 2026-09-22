@@ -34,6 +34,7 @@ server = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
     "asyncpg>=0.29",
+    "pypdf>=6.19,<7",
 ]
 audio = [
     "numpy>=1.26",

@@ -34,6 +34,7 @@ from openvegas.gateway.reconciliation import (
     request_payload_hash,
     restore_turn,
 )
+from openvegas.capabilities import REASONING_EFFORTS
 
 DB_ENV = "OPENVEGAS_RECONCILIATION_DATABASE_URL"
 _MAX_INPUT = 400_000
@@ -124,6 +125,11 @@ class _LocalDB:
 async def run(args) -> dict:
     url = validate_target(args, os.environ.get(DB_ENV, ""))
     prompt = read_prompt_file(args.prompt_file)
+    effort = getattr(args, "reasoning_effort", None)
+    if effort is not None:
+        if not isinstance(effort, str) or effort not in REASONING_EFFORTS:
+            raise ReconciliationError("INVALID_REASONING_EFFORT")
+        prompt["reasoning_effort"] = effort
     import asyncpg
 
     connection = None
@@ -176,6 +182,10 @@ def main(argv: list[str] | None = None) -> int:
         "--prompt-file", help="Private JSON file with original prompt and max_tokens"
     )
     parser.add_argument("--apply", action="store_true")
+    parser.add_argument(
+        "--reasoning-effort", choices=REASONING_EFFORTS,
+        help="Original request effort; omit only when the original request used provider default",
+    )
     parser.add_argument(
         "--operator", help="Operator UUID for audit, not an authorization credential"
     )

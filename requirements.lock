@@ -1,6 +1,7 @@
 # Tested Python 3.11 runtime + dev constraints, generated 2026-09-11.
 # Install with: pip install -c requirements.lock -e ".[server,dev]"
 # Optional audio extras and OS/build tooling are not locked by this file.
+pypdf==6.19.0
 amqp==5.3.1
 annotated-doc==0.0.5
 annotated-types==0.8.0

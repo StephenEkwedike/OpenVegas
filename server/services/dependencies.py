@@ -281,6 +281,7 @@ async def assert_schema_compatible(db: Any, flags: FeatureFlags) -> None:
     await require_migration_min(db, "036_profile_theme_preferences")
     await require_migration_min(db, "037_chat_file_uploads")
     await require_migration_min(db, "038_private_runtime_rls")
+    await require_migration_min(db, "044_inference_route_commands")
 
     await require_tables(
         db,
@@ -291,6 +292,7 @@ async def assert_schema_compatible(db: Any, flags: FeatureFlags) -> None:
             "horse_quote_idempotency",
             "provider_credentials",
             "inference_requests",
+            "inference_route_commands",
             "wallet_history_projection",
             "wrapper_reward_events",
             "org_runtime_policies",
@@ -540,6 +542,12 @@ def get_llm_mode_service() -> LLMModeService:
 
 def get_provider_thread_service() -> ProviderThreadService:
     return ProviderThreadService(get_db())
+
+
+def get_inference_replay_service():
+    from server.services.inference_replay import InferenceReplayService
+
+    return InferenceReplayService(get_db())
 
 
 def get_file_upload_service() -> FileUploadService:

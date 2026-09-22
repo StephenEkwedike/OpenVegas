@@ -23,6 +23,7 @@ from decimal import Decimal, InvalidOperation, localcontext
 
 import httpx
 
+from openvegas.capabilities import reviewed_reasoning_efforts
 MODELS_URL = "https://openrouter.ai/api/v1/models"
 MAX_BYTES = 8 * 1024 * 1024
 MAX_MODELS = 4096
@@ -207,6 +208,16 @@ def _candidate(model: dict, *, now: datetime) -> dict:
         },
     }
     reasons = candidate["rejection_reasons"]
+    reasoning = model.get("reasoning")
+    if isinstance(reasoning, dict) and "supported_efforts" in reasoning:
+        advertised = reasoning["supported_efforts"]
+        candidate["reasoning"] = {
+            "supported_efforts": (
+                list(reviewed_reasoning_efforts(advertised))
+                if advertised is not None else None
+            ),
+            "mandatory": reasoning.get("mandatory") is True,
+        }
     canonical = model.get("canonical_slug")
     try:
         candidate["canonical_slug"] = exact_model_id(canonical)
@@ -466,7 +477,7 @@ def reviewed_bundle(
         "pricing_scope_acknowledged",
     }
     for entry in entries:
-        if not isinstance(entry, dict) or set(entry) - {"response_model_ids"} != fields:
+        if not isinstance(entry, dict) or set(entry) - {"response_model_ids", "attachments", "web_search"} != fields:
             raise ReviewError(
                 "Review must explicitly state access, chat, bounds, capabilities, dates and all four prices"
             )
@@ -499,14 +510,31 @@ def reviewed_bundle(
         caps = entry["capabilities"]
         if (
             not isinstance(caps, dict)
-            or set(caps) != {"tools", "image_input", "web_search"}
-            or any(type(flag) is not bool for flag in caps.values())
+            or set(caps) - {"reasoning_efforts"} != {"tools", "image_input", "web_search"}
+            or any(type(caps[key]) is not bool for key in ("tools", "image_input", "web_search"))
         ):
             raise ReviewError("Explicit boolean tools/image_input/web_search review is required")
-        if caps["image_input"] or caps["web_search"]:
-            raise ReviewError("Current OpenRouter adapter is text/local-tools only")
+        if caps["web_search"] and not entry.get("web_search"):
+            raise ReviewError("Web search requires its separate bounded execution and price review")
+        if "web_search" in entry and not caps["web_search"]:
+            raise ReviewError("Web execution review requires an explicit web capability")
+        if caps["image_input"] and not entry.get("attachments"):
+            raise ReviewError("Image input requires an owned-attachment endpoint review")
         if caps["tools"] and not candidate["advertised_capabilities"]["tools"]:
             raise ReviewError("Tools/tool_choice support is not advertised for this exact model")
+        if "reasoning_efforts" in caps:
+            efforts = reviewed_reasoning_efforts(caps["reasoning_efforts"])
+            if caps["reasoning_efforts"] != [] and not efforts:
+                raise ReviewError("Reasoning efforts must be a bounded unique list of supported values")
+            if efforts and "reasoning" not in candidate["supported_parameters"]:
+                raise ReviewError("Reasoning parameter support is not advertised for this exact model")
+            advertised_reasoning = candidate.get("reasoning", {})
+            advertised_efforts = advertised_reasoning.get("supported_efforts", [])
+            if (advertised_efforts is not None and not set(efforts) <= set(advertised_efforts)) or (
+                advertised_reasoning.get("mandatory") and "none" in efforts
+            ):
+                raise ReviewError("Reviewed reasoning efforts exceed this model's advertised support")
+            caps = {**caps, "reasoning_efforts": list(efforts)}
         prices = {}
         for key in (
             "cost_input_per_1m",
@@ -551,6 +579,7 @@ def reviewed_bundle(
             "context_window_tokens": context_limit,
             "max_tokens": output_limit,
             "capabilities": dict(caps),
+            "supported_parameters": list(candidate["supported_parameters"]),
             "reviewed_at": reviewed.isoformat(),
             "expires_at": expires.isoformat(),
             **prices,
@@ -567,6 +596,44 @@ def reviewed_bundle(
             "source_sha256": report["source_sha256"],
             "observed_at": observed.isoformat(),
         }
+        if "attachments" in entry:
+            from server.services.openrouter_attachments import (
+                AttachmentError, validate_attachment_review,
+            )
+
+            installed_review = reviews[f"openrouter:{model_id}"]
+            installed_review["attachments"] = entry["attachments"]
+            try:
+                attachment_review = validate_attachment_review(
+                    model_id=model_id, model_config={**rows[-1], "enabled": True},
+                    model_review=installed_review, now=current,
+                )
+            except AttachmentError:
+                raise ReviewError("Invalid owned-attachment price, limit or endpoint review") from None
+            if (not attachment_review.modalities <= set(candidate["input_modalities"])
+                    or caps["image_input"] != ("image" in attachment_review.modalities)):
+                raise ReviewError("Attachment modalities do not match this model's explicit review and listing")
+            installed_review["pricing_policy"] = "owned_native_media_tokens_zero_request_fee"
+            installed_review["pricing_scope"] = {
+                **candidate["pricing_scope"], "input": "owned_reviewed_attachments",
+                "plugins": "native_pdf_only" if "file" in attachment_review.modalities else False,
+            }
+        if "web_search" in entry:
+            from openvegas.gateway.openrouter_web import WebValidationError, prepare_server_review
+
+            installed_review = reviews[f"openrouter:{model_id}"]
+            installed_review["web_search"] = entry["web_search"]
+            try:
+                prepare_server_review(
+                    model_id, output_limit, installed_review,
+                    {**rows[-1], "enabled": True}, now=current,
+                )
+            except (WebValidationError, ValueError, TypeError):
+                raise ReviewError("Invalid bounded web execution, price or endpoint review") from None
+            installed_review["pricing_policy"] = "reviewed_tokens_and_bounded_server_search"
+            installed_review["pricing_scope"] = {
+                **installed_review["pricing_scope"], "server_tools": "bounded_exa_search",
+            }
     return {
         "schema_version": 1,
         "kind": "openrouter_reviewed_bundle",
@@ -612,7 +679,10 @@ def review_template(report: dict, model_ids: list[str]) -> dict:
                 "cost_output_per_1m": row["cost_output_per_1m"],
                 "v_price_input_per_1m": None,
                 "v_price_output_per_1m": None,
-                "capabilities": {"tools": False, "image_input": False, "web_search": False},
+                "capabilities": {
+                    "tools": False, "image_input": False, "web_search": False,
+                    "reasoning_efforts": [],
+                },
                 "reviewed_at": None,
                 "expires_at": None,
                 "response_model_ids": [model_id],

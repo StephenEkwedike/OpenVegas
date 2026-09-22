@@ -10,9 +10,57 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from openvegas.capabilities import reviewed_reasoning_efforts
+
 
 class ModelSelectionError(ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class ReviewedModelCapabilities:
+    """An exact-model snapshot, created only from an authenticated validation reply."""
+
+    provider: str
+    model_id: str
+    enabled: frozenset[str]
+    reasoning_efforts: tuple[str, ...]
+    streaming_mode: str
+
+    def supports(self, provider: str, model_id: str, feature: str) -> bool:
+        return (provider, model_id) == (self.provider, self.model_id) and feature in self.enabled
+
+
+def reviewed_capabilities(model: dict, provider: str, model_id: str) -> ReviewedModelCapabilities:
+    """Reject malformed/unreviewed descriptors; never infer support from a model family."""
+    if (
+        not isinstance(model, dict)
+        or model.get("provider") != provider
+        or model.get("model_id") != model_id
+        or not selectable(model)
+    ):
+        raise ModelSelectionError("Capability descriptor does not match the selected model.")
+    caps = model.get("capabilities")
+    if not isinstance(caps, dict) or caps.get("reviewed") is not True:
+        raise ModelSelectionError("Model has no current reviewed capability descriptor.")
+    boolean_fields = (
+        "text", "tools", "image_input", "file_upload", "web_search", "stream_events",
+        "reasoning_controls",
+    )
+    if any(type(caps.get(key, False)) is not bool for key in boolean_fields):
+        raise ModelSelectionError("Invalid capability flags in model descriptor.")
+    raw_efforts = caps.get("reasoning_efforts", [])
+    efforts = reviewed_reasoning_efforts(raw_efforts)
+    if (not isinstance(raw_efforts, list) or len(efforts) != len(raw_efforts)
+            or caps.get("reasoning_controls", False) != bool(efforts)):
+        raise ModelSelectionError("Invalid reviewed reasoning efforts in model descriptor.")
+    streaming_mode = caps.get("streaming_mode", "buffered")
+    if not isinstance(streaming_mode, str) or streaming_mode not in {"buffered", "native", "native_or_buffered"}:
+        raise ModelSelectionError("Invalid streaming mode in model descriptor.")
+    return ReviewedModelCapabilities(
+        provider, model_id, frozenset(key for key in boolean_fields if caps.get(key) is True),
+        efforts, streaming_mode,
+    )
 
 
 def selectable(model: dict) -> bool:
@@ -22,7 +70,7 @@ def selectable(model: dict) -> bool:
 
 
 def model_options(payload: dict, *, provider: str | None = None, search: str = "") -> list[dict]:
-    rows = payload.get("models")
+    rows = payload.get("models") if isinstance(payload, dict) else None
     if not isinstance(rows, list) or len(rows) > 2000:
         raise ModelSelectionError("Invalid or oversized model catalog response.")
     options = []
@@ -46,6 +94,21 @@ def format_options(options: list[dict]) -> str:
     def safe(value: Any) -> str:
         return "".join(c if c.isprintable() else "?" for c in str(value))[:300]
 
+    def features(row: dict) -> str:
+        caps = row.get("capabilities")
+        if not isinstance(caps, dict) or caps.get("reviewed") is not True:
+            return ""
+        labels = [label for key, label in (
+            ("tools", "tools"), ("image_input", "images"),
+            ("file_upload", "files"), ("web_search", "web"),
+        ) if caps.get(key) is True]
+        efforts = reviewed_reasoning_efforts(caps.get("reasoning_efforts"))
+        if efforts:
+            labels.append("reasoning: " + "/".join(efforts))
+        if caps.get("streaming_mode") == "buffered":
+            labels.append("buffered replies")
+        return "  [" + "; ".join(labels or ["text"]) + "]"
+
     return (
         "\n".join(
             f"{safe(row['provider'])}/{safe(row['model_id'])}  "
@@ -55,6 +118,7 @@ def format_options(options: list[dict]) -> str:
                 else "unavailable: "
                 + safe(row.get("unavailable_reason") or "backend validation required")
             )
+            + features(row)
             for row in options
         )
         or "No matching catalog models."
@@ -62,7 +126,7 @@ def format_options(options: list[dict]) -> str:
 
 
 def select_model(payload: dict, provider: str, model_id: str) -> dict:
-    if payload.get("switching_enabled") is False:
+    if isinstance(payload, dict) and payload.get("switching_enabled") is False:
         raise ModelSelectionError("Model switching is disabled by the server operator.")
     matches = [
         row for row in model_options(payload, provider=provider) if row["model_id"] == model_id
@@ -93,10 +157,14 @@ async def validate_selection(client: Any, provider: str, model_id: str) -> dict:
             "model": model_id,
         },
     )
-    if response.get("selection_valid") is not True or response.get("state_changed") is not False:
+    if (not isinstance(response, dict) or response.get("selection_valid") is not True
+            or response.get("state_changed") is not False):
         raise ModelSelectionError("Backend did not validate the selection; model unchanged.")
     model = response.get("model")
-    return select_model({"models": [model]}, provider, model_id)
+    selected = select_model({"models": [model]}, provider, model_id)
+    if provider == "openrouter":
+        reviewed_capabilities(selected, provider, model_id)
+    return selected
 
 
 @dataclass(frozen=True)

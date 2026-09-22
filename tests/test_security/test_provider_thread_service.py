@@ -133,6 +133,12 @@ class _FakeDB:
     async def transaction(self):
         yield _FakeTx(self)
 
+    async def fetchval(self, query: str, *args):
+        assert "content ? 'attachment_refs'" in query
+        return any(str(row.get('thread_id')) == str(args[0])
+                   and 'attachment_refs' in json_load(row.get('content'))
+                   for row in self.messages if isinstance(json_load(row.get('content')), dict))
+
     async def fetch(self, query: str, *args):
         if "FROM provider_thread_messages" not in query:
             return []

@@ -72,7 +72,8 @@ from openvegas.agent.local_tools import (
 from openvegas.agent.runtime_contracts import ToolPolicyDecision, evaluate_tool_policy
 from openvegas.agent.runtime_contracts import result_submission_hash as compute_result_submission_hash
 from openvegas.agent.tool_cas import redact_hash_truncate
-from openvegas.capabilities import resolve_capability
+from openvegas.capabilities import REASONING_EFFORTS, resolve_capability
+from openvegas.tui.model_picker import ReviewedModelCapabilities, reviewed_capabilities  # noqa: E402 - Passive hook dispatch must run first.
 from openvegas.config import load_config, save_config
 from openvegas.events import mk_event
 from openvegas.ide.show_diff import (
@@ -2108,11 +2109,25 @@ def _attachment_marker(name: str) -> str:
     return f"{{{str(name or '').strip()}}}"
 
 
+def _model_capability(
+    provider: str, model: str, feature: str,
+    remote_capabilities: ReviewedModelCapabilities | None = None,
+) -> bool:
+    if feature == "speech_to_text":
+        # Dictation is a separate managed service, not a property of the chat model.
+        speech_model = os.getenv("OPENVEGAS_CHAT_SPEECH_MODEL", "gpt-4o-mini-transcribe").strip()
+        return resolve_capability("openai", speech_model or "gpt-4o-mini-transcribe", feature)
+    if provider == "openrouter":
+        return bool(remote_capabilities and remote_capabilities.supports(provider, model, feature))
+    return resolve_capability(provider, model, feature)
+
+
 def _format_composer_attachment_status_row(
     attachments: list[PendingAttachment],
     *,
     provider: str | None = None,
     model: str | None = None,
+    remote_capabilities: ReviewedModelCapabilities | None = None,
     max_markers: int = 4,
 ) -> str | None:
     if not attachments:
@@ -2124,7 +2139,7 @@ def _format_composer_attachment_status_row(
     if image_count > 0:
         image_supported = True
         if provider and model:
-            image_supported = resolve_capability(provider, model, "image_input")
+            image_supported = _model_capability(provider, model, "image_input", remote_capabilities)
         if image_supported:
             parts.append(f"🖼 {image_count} image(s)")
         else:
@@ -2132,7 +2147,7 @@ def _format_composer_attachment_status_row(
     if audio_count > 0:
         stt_supported = True
         if provider and model:
-            stt_supported = resolve_capability(provider, model, "speech_to_text")
+            stt_supported = _model_capability(provider, model, "speech_to_text", remote_capabilities)
         if stt_supported:
             parts.append(f"◉ {audio_count} audio file(s)")
         else:
@@ -2153,11 +2168,13 @@ def _format_live_composer_status_row(
     attachments: list[PendingAttachment],
     provider: str | None,
     model: str | None,
+    remote_capabilities: ReviewedModelCapabilities | None = None,
 ) -> str | None:
     base = _format_composer_attachment_status_row(
         attachments,
         provider=provider,
         model=model,
+        remote_capabilities=remote_capabilities,
     )
     message = str(draft_text or "")
     if message.lstrip().startswith("/"):
@@ -2186,17 +2203,19 @@ def _preflight_filter_attachments_for_capabilities(
     *,
     provider: str,
     model: str,
+    remote_capabilities: ReviewedModelCapabilities | None = None,
 ) -> tuple[list[PendingAttachment], int, bool]:
+    """Return the entire queue and a blocking count, never a text-only subset."""
     if not pending_attachments:
         return list(pending_attachments), 0, False
-    image_supported = resolve_capability(provider, model, "image_input")
+    if provider == "openrouter" and not _model_capability(provider, model, "file_upload", remote_capabilities):
+        return list(pending_attachments), len(pending_attachments), True
+    image_supported = _model_capability(provider, model, "image_input", remote_capabilities)
     if image_supported:
         return list(pending_attachments), 0, False
 
-    kept = [att for att in pending_attachments if not _attachment_is_image(att)]
-    dropped = len(pending_attachments) - len(kept)
-    blocked = dropped > 0 and not kept
-    return kept, max(0, dropped), blocked
+    unsupported = sum(_attachment_is_image(att) for att in pending_attachments)
+    return list(pending_attachments), unsupported, unsupported > 0
 
 
 def _inject_attachment_markers_into_message(message: str, attachments: list[PendingAttachment]) -> str:
@@ -5194,7 +5213,9 @@ def play(
 @click.argument("prompt")
 @click.option("--provider", default=None, help="Managed provider, including openrouter; see models.")
 @click.option("--model", default=None, help="Model ID")
-def ask(prompt: str, provider: str | None, model: str | None):
+@click.option("--reasoning-effort", type=click.Choice(REASONING_EFFORTS), default=None,
+              help="Reviewed OpenRouter effort only; omitted uses the provider default.")
+def ask(prompt: str, provider: str | None, model: str | None, reasoning_effort: str | None = None):
     """Use $V for AI inference."""
     from openvegas.config import get_default_provider, get_default_model
 
@@ -5214,7 +5235,10 @@ def ask(prompt: str, provider: str | None, model: str | None):
         from openvegas.client import OpenVegasClient, APIError
         try:
             client = OpenVegasClient()
-            result = await client.ask(prompt, provider, model)
+            result = await client.ask(
+                prompt, provider, model,
+                **({"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {}),
+            )
             console.print(result.get("text", ""))
             console.print(
                 f"\n[dim]Cost: {result.get('v_cost', '?')} $V | "
@@ -5289,6 +5313,9 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             "then pass its exact ID with --model."
         )
     current_thread_id: str | None = None
+    current_reasoning_effort: str | None = None
+    current_reasoning_efforts: tuple[str, ...] = ()
+    current_model_capabilities: ReviewedModelCapabilities | None = None
     current_run_id: str | None = None
     current_run_version: int = 0
     current_signature: str = "sha256:"
@@ -5317,7 +5344,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
     approval_mode = "ask"
     conversation_mode = "persistent"
     context_warning_emitted = False
-    web_search_requested = True
+    web_search_requested = str(os.getenv("OPENVEGAS_CHAT_WEB_SEARCH_DEFAULT", "1")).lower() in {"1", "true", "yes", "on"}
     last_web_search_effective = False
     last_web_search_used = False
     last_web_search_retry_without_tool = False
@@ -5431,9 +5458,67 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
         sprite_renderer=cli_sprite_renderer,
     )
 
+    def _reasoning_status() -> str:
+        options = ", ".join(current_reasoning_efforts) or "none loaded; /reasoning refreshes"
+        return (
+            f"Reasoning effort: {current_reasoning_effort or 'default (provider-controlled)'}. "
+            f"Reviewed options: {options}. Hidden reasoning is never displayed."
+        )
+
+    def _chat_capability(feature: str) -> bool:
+        return _model_capability(current_provider, current_model, feature, current_model_capabilities)
+
+    def _use_model_capabilities(target: dict) -> None:
+        nonlocal current_model_capabilities, current_reasoning_efforts
+        current_model_capabilities = (
+            reviewed_capabilities(target, current_provider, current_model)
+            if current_provider == "openrouter" else None
+        )
+        current_reasoning_efforts = (
+            current_model_capabilities.reasoning_efforts if current_model_capabilities else ()
+        )
+
+    async def _refresh_model_capabilities() -> None:
+        nonlocal current_model_capabilities, current_reasoning_efforts
+        if current_provider != "openrouter":
+            return
+        # A failed refresh must not leave an older review authorizing a send.
+        current_model_capabilities, current_reasoning_efforts = None, ()
+        target = await validate_selection(client, current_provider, current_model)
+        _use_model_capabilities(target)
+
+    async def _validate_openrouter_request(
+        *, enable_tools: bool = False, enable_web_search: bool = False,
+        attachments: list[str] | None = None, reasoning_effort: str | None = None,
+    ) -> None:
+        if current_provider != "openrouter":
+            return
+        try:
+            await _refresh_model_capabilities()
+            if reasoning_effort is not None and reasoning_effort not in current_reasoning_efforts:
+                raise ModelSelectionError("Selected reasoning effort is no longer reviewed; use /reasoning to choose again.")
+            for feature, requested in (
+                ("tools", enable_tools), ("web_search", enable_web_search), ("file_upload", bool(attachments)),
+                ("image_input", bool(attachments) and any(_attachment_is_image(att) for att in pending_attachments)),
+            ):
+                if requested and not _chat_capability(feature):
+                    raise ModelSelectionError(f"Selected model does not currently support {feature}; request not sent.")
+        except ModelSelectionError as exc:
+            raise APIError(400, str(exc)) from exc
+
+    def _reasoning_for_model(target: dict) -> None:
+        nonlocal current_reasoning_effort
+        _use_model_capabilities(target)
+        if current_reasoning_effort is not None and current_reasoning_effort not in current_reasoning_efforts:
+            console.print("Previous reasoning effort is unavailable on this model; reset to provider default.")
+            current_reasoning_effort = None
+        console.print(_reasoning_status(), markup=False)
+
     def _show_help() -> None:
         console.print("Chat Commands:")
         console.print("/help - show commands")
+        console.print("/reasoning [effort|default] - show/select reviewed OpenRouter effort; default omits it")
+        console.print(_reasoning_status(), markup=False)
         if allow_model_switch:
             console.print("/models [search] - list available models")
             console.print("/provider <provider> [model] - list provider models or switch")
@@ -5445,7 +5530,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
         console.print("/verbose-tools <on|off> - detailed tool event output")
         console.print("/approvals - show session approval overrides")
         console.print("/status - show current chat context")
-        console.print("/web - show effective web search status (always on)")
+        console.print("/web - show requested and reviewed web search status")
         console.print("/voice - start/stop voice capture mode")
         console.print("/mcp <list|health|call> - MCP server list/health/tool call")
         console.print("/attach <path> - attach a file for the next turn")
@@ -5880,7 +5965,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
 
         stt_effective = bool(
             voice_transcribe_requested
-            and resolve_capability(current_provider, current_model, "speech_to_text")
+            and _chat_capability("speech_to_text")
         )
         if not stt_effective:
             _render_capability_status("speech_to_text", "audio attached but speech-to-text unavailable")
@@ -5896,7 +5981,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 payload = await asyncio.wait_for(
                     client.speech_transcribe(
                         file_id=str(att.remote_file_id or ""),
-                        provider=current_provider,
+                        provider="openai",
                         model=voice_transcribe_model,
                         language=voice_transcribe_language,
                     ),
@@ -6063,7 +6148,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 stt = await asyncio.wait_for(
                     client.speech_transcribe(
                         file_id=remote_file_id,
-                        provider=current_provider,
+                        provider="openai",
                         model=voice_transcribe_model,
                         language=voice_transcribe_language,
                         prompt="Transcribe exactly; keep punctuation concise.",
@@ -6101,7 +6186,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     content_base64=base64.b64encode(file_bytes).decode("ascii"),
                     filename=file_path.name,
                     mime_type=mime_type,
-                    provider=current_provider,
+                    provider="openai",
                     model=voice_transcribe_model,
                     language=voice_transcribe_language,
                     prompt="Transcribe exactly; keep punctuation concise.",
@@ -6268,6 +6353,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
 
         canonical_chat = getattr(client, "_canonical_chat", None)
         if isinstance(canonical_chat, dict):
+            await _validate_openrouter_request(reasoning_effort=current_reasoning_effort)
             if pending_attachments:
                 raise APIError(400, "Attachment continuity is unsupported; use /continuity off to start fresh.")
             if not canonical_chat.get("revision"):
@@ -6278,6 +6364,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 "provider": current_provider, "model": current_model,
                 "thread_id": current_thread_id, "expected_revision": canonical_chat["revision"],
                 "prompt": user_message, "idempotency_key": str(uuid.uuid4()),
+                **({"reasoning_effort": current_reasoning_effort} if current_provider == "openrouter" and current_reasoning_effort is not None else {}),
             })
             canonical_chat["revision"] = result.get("revision")
             final_text = str(result.get("text") or "")
@@ -6320,6 +6407,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             )
             final_res = await _ask_with_optional_stream(
                 final_prompt,
+                reasoning_effort=current_reasoning_effort,
                 idempotency_key=f"chat-finalize-{uuid.uuid4()}",
                 enable_tools=False,
                 enable_web_search=False,
@@ -6338,10 +6426,15 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             enable_tools: bool,
             enable_web_search: bool,
             attachments: list[str],
+            reasoning_effort: str | None = None,
         ) -> dict[str, Any]:
+            await _validate_openrouter_request(
+                enable_tools=enable_tools, enable_web_search=enable_web_search,
+                attachments=attachments, reasoning_effort=reasoning_effort,
+            )
             stream_enabled = bool(
                 _env_flag("OPENVEGAS_CHAT_STREAM_EVENTS", "1")
-                and resolve_capability(current_provider, current_model, "stream_events")
+                and _chat_capability("stream_events")
             )
             ask_stream_fn = getattr(client, "ask_stream", None)
             if not stream_enabled or not callable(ask_stream_fn):
@@ -6356,6 +6449,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     enable_tools=enable_tools,
                     enable_web_search=enable_web_search,
                     attachments=attachments,
+                    **({"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {}),
                 )
 
             seen_event_keys: set[tuple[str, str, str, int]] = set()
@@ -6373,6 +6467,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     enable_tools=enable_tools,
                     enable_web_search=enable_web_search,
                     attachments=attachments,
+                    **({"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {}),
                 ):
                     if not isinstance(raw_event, dict):
                         continue
@@ -6470,6 +6565,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         enable_tools=enable_tools,
                         enable_web_search=enable_web_search,
                         attachments=attachments,
+                        **({"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {}),
                     )
                 raise
 
@@ -6520,6 +6616,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
         ) -> dict[str, Any]:
             return await _ask_with_optional_stream(
                 prompt,
+                reasoning_effort=current_reasoning_effort,
                 idempotency_key=idempotency_key,
                 enable_tools=False,
                 enable_web_search=enable_web_search,
@@ -7061,20 +7158,12 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 )
                 web_search_effective_turn = bool(
                     web_search_requested_turn
-                    and resolve_capability(
-                        current_provider,
-                        current_model,
-                        "web_search",
-                    )
+                    and _chat_capability("web_search")
                 )
                 web_search_activity_turn = bool(web_search_effective_turn)
                 attachments_effective_turn = bool(
                     attachment_file_ids_for_turn
-                    and resolve_capability(
-                        current_provider,
-                        current_model,
-                        "file_upload",
-                    )
+                    and _chat_capability("file_upload")
                 )
                 if web_search_requested and not web_search_effective_turn:
                     last_web_search_effective = False
@@ -7090,7 +7179,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 )
                 prompt_attachment_context = (
                     ""
-                    if attachments_effective_turn and current_provider == "openai" and not voice_transcript_context_for_turn
+                    if attachments_effective_turn and current_provider in {"openai", "openrouter"} and not voice_transcript_context_for_turn
                     else combined_attachment_context
                 )
 
@@ -7180,6 +7269,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 ask_idem = f"chat-ask-{uuid.uuid4()}"
                 result = await _ask_with_optional_stream(
                     prompt,
+                    reasoning_effort=current_reasoning_effort,
                     idempotency_key=ask_idem,
                     enable_tools=enable_local_tools_turn,
                     enable_web_search=web_search_effective_turn,
@@ -7210,6 +7300,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     )
                     retry_result = await _ask_with_optional_stream(
                         retry_prompt,
+                        reasoning_effort=current_reasoning_effort,
                         idempotency_key=f"chat-ask-retry-{uuid.uuid4()}",
                         enable_tools=enable_local_tools_turn,
                         enable_web_search=True,
@@ -8313,6 +8404,13 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             except Exception:
                 conversation_mode = conversation_mode or "persistent"
 
+        if current_provider == "openrouter":
+            try:
+                await _refresh_model_capabilities()
+                console.print(_reasoning_status(), markup=False)
+            except (APIError, ModelSelectionError) as exc:
+                console.print(f"Model capabilities unavailable; sends will require validation: {exc}", markup=False)
+            return
         if models_task is None:
             return
         try:
@@ -8381,6 +8479,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
 
     async def _run_chat() -> str:
         nonlocal current_provider, current_model, current_thread_id
+        nonlocal current_reasoning_effort, current_reasoning_efforts
         nonlocal current_run_id, current_run_version, current_signature
         nonlocal plan_mode, conversation_mode, workspace_root, workspace_fp, approval_mode
         nonlocal verbose_tool_events
@@ -8548,11 +8647,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
 
                             async def _do_toggle() -> None:
                                 voice_effective = bool(
-                                    resolve_capability(
-                                        current_provider,
-                                        current_model,
-                                        "speech_to_text",
-                                    )
+                                    _chat_capability("speech_to_text")
                                 )
                                 if not voice_effective:
                                     console.print("[yellow]Voice capture unavailable for current provider/model.[/yellow]")
@@ -8626,6 +8721,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                                 attachments=pending_attachments,
                                 provider=current_provider,
                                 model=current_model,
+                                remote_capabilities=current_model_capabilities,
                             )
                             or ""
                         )
@@ -8820,14 +8916,18 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 if cmd == "/legend":
                     _show_legend()
                     continue
+                if cmd in {"/status", "/web"} and current_provider == "openrouter":
+                    if startup_bootstrap_task is not None:
+                        await asyncio.shield(startup_bootstrap_task)
+                    try:
+                        await _refresh_model_capabilities()
+                    except (APIError, ModelSelectionError) as exc:
+                        console.print(f"Capabilities unavailable: {exc}", markup=False)
                 if cmd == "/status":
+                    console.print(_reasoning_status(), markup=False)
                     web_search_effective = bool(
                         web_search_requested
-                        and resolve_capability(
-                            current_provider,
-                            current_model,
-                            "web_search",
-                        )
+                        and _chat_capability("web_search")
                     )
                     provider_line = (
                         f"[bold]Provider:[/bold] {current_provider}\n[bold]Model:[/bold] {current_model}\n"
@@ -8942,24 +9042,16 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     continue
                 if cmd == "/web":
                     web_search_effective = bool(
-                        resolve_capability(
-                            current_provider,
-                            current_model,
-                            "web_search",
-                        )
+                        _chat_capability("web_search")
                     )
                     console.print(
-                        "[dim]Web search is always on in chat. "
-                        f"effective={web_search_effective}[/dim]"
+                        "[dim]Web search uses the current model's supported capabilities. "
+                        f"requested={web_search_requested} effective={web_search_requested and web_search_effective}[/dim]"
                     )
                     continue
                 if cmd == "/voice":
                     voice_effective = bool(
-                        resolve_capability(
-                            current_provider,
-                            current_model,
-                            "speech_to_text",
-                        )
+                        _chat_capability("speech_to_text")
                     )
                     if not voice_effective:
                         console.print("[yellow]Voice capture unavailable for current provider/model.[/yellow]")
@@ -9175,6 +9267,26 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     approval_mode = mode
                     console.print(f"[green]Approval mode set to {approval_mode}.[/green]")
                     continue
+                if cmd == "/reasoning":
+                    if startup_bootstrap_task is not None:
+                        await asyncio.shield(startup_bootstrap_task)
+                    if len(parts) > 2:
+                        console.print("Use /reasoning [effort|default].")
+                        continue
+                    if len(parts) == 2 and parts[1] == "default":
+                        current_reasoning_effort = None
+                        console.print(_reasoning_status(), markup=False)
+                        continue
+                    try:
+                        await _refresh_model_capabilities()
+                        if len(parts) == 2:
+                            if parts[1] not in current_reasoning_efforts:
+                                raise ModelSelectionError("Effort is not reviewed for this model; selection unchanged.")
+                            current_reasoning_effort = parts[1]
+                        console.print(_reasoning_status(), markup=False)
+                    except (APIError, ModelSelectionError) as exc:
+                        console.print(f"Reasoning unchanged: {exc}", markup=False)
+                    continue
                 if cmd == "/continuity":
                     if parts not in [["/continuity", "on"], ["/continuity", "off"]]:
                         console.print("Use /continuity on for text-only history, or off for a fresh coding conversation.")
@@ -9248,6 +9360,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                                 raise ModelSelectionError("Backend did not validate canonical continuity.")
                             if not await _chat_modal(lambda: Confirm.ask("Transfer complete canonical text? Tools and attachments are unsupported. No model call is made by switching.", default=False)):
                                 continue
+                            target = await validate_selection(client, next_provider, next_model)
                             applied = await client._request("POST", "/models/switch", json={
                                 **payload, "commit": True, "expected_revision": proposal["revision"],
                             })
@@ -9261,6 +9374,10 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                             client._canonical_chat = {"revision": applied["revision"]}
                             web_search_requested = False
                             console.print(f"Selected {current_provider}/{current_model}; full canonical text retained, no tool replay.", markup=False)
+                            if "openrouter" in {current_provider, plan_args["current_provider"]}:
+                                _reasoning_for_model(target)
+                            else:
+                                console.print("Reasoning effort: provider default; selection unavailable in this adapter.")
                             continue
                         switch = plan_switch(target, **plan_args)
                         if switch.status == "confirm_fresh":
@@ -9276,11 +9393,18 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         current_provider, current_model, current_thread_id = (
                             switch.provider, switch.model, switch.thread_id,
                         )
+                        _use_model_capabilities(target)
                         web_search_requested = (
-                            current_provider == "openai"
+                            (current_provider == "openai" or (
+                                current_provider == "openrouter" and _chat_capability("web_search")
+                            ))
                             and _env_flag("OPENVEGAS_CHAT_WEB_SEARCH_DEFAULT", "1")
                         )
                         console.print(f"Selected {current_provider}/{current_model}. {switch.message}", markup=False)
+                        if "openrouter" in {current_provider, plan_args["current_provider"]}:
+                            _reasoning_for_model(target)
+                        else:
+                            console.print("Reasoning effort: provider default; selection unavailable in this adapter.")
                     except (APIError, ModelSelectionError) as exc:
                         console.print(f"Model unchanged: {exc}", markup=False)
                     continue
@@ -9400,53 +9524,25 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                             f"{markers} [yellow]Use /attach <path> before sending.[/yellow]"
                         )
 
-            (
-                capability_filtered_pending,
-                dropped_image_count,
-                blocked_all_images,
-            ) = _preflight_filter_attachments_for_capabilities(
-                pending_attachments,
-                provider=current_provider,
-                model=current_model,
+            try:
+                if startup_bootstrap_task is not None:
+                    await asyncio.shield(startup_bootstrap_task)
+                await _validate_openrouter_request(reasoning_effort=current_reasoning_effort)
+            except (APIError, ModelSelectionError) as exc:
+                console.print(f"Request not sent; attachments retained: {exc}", markup=False)
+                continue
+            _, unsupported_count, attachments_blocked = _preflight_filter_attachments_for_capabilities(
+                pending_attachments, provider=current_provider, model=current_model,
+                remote_capabilities=current_model_capabilities,
             )
-            if dropped_image_count > 0:
-                if blocked_all_images:
-                    console.print(
-                        "[yellow]"
-                        f"{current_provider}/{current_model} does not support image input. "
-                        "Remove image attachments or switch to a vision-capable model."
-                        "[/yellow]"
-                    )
-                    emit_metric(
-                        "chat_attachment_blocked_capability_total",
-                        {
-                            "feature": "image_input",
-                            "provider": current_provider,
-                            "model": current_model,
-                            "had_uploaded": False,
-                        },
-                    )
-                    render_status_bar(console, _status_actor(), "image input unavailable", workspace_root)
-                    pending_attachments.clear()
-                    continue
-                pending_attachments[:] = capability_filtered_pending
+            if attachments_blocked:
                 console.print(
-                    "[yellow]"
-                    f"Dropped {dropped_image_count} image attachment(s) — "
-                    f"{current_provider}/{current_model} does not support image input. "
-                    f"Continuing with {len(capability_filtered_pending)} non-image file(s)."
-                    "[/yellow]"
+                    f"{current_provider}/{current_model} does not support {unsupported_count} pending attachment(s). "
+                    "Nothing was sent; attachments retained. Remove unsupported files before switching or retrying.",
+                    markup=False,
                 )
-                emit_metric(
-                    "chat_attachment_dropped_capability_total",
-                    {
-                        "feature": "image_input",
-                        "provider": current_provider,
-                        "model": current_model,
-                        "dropped": dropped_image_count,
-                        "kept": len(capability_filtered_pending),
-                    },
-                )
+                render_status_bar(console, _status_actor(), "attachment input unavailable", workspace_root)
+                continue
 
             if pending_attachments:
                 _render_attachment_status_row(force=True)
@@ -9458,15 +9554,17 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 attachment_context_for_turn,
                 attachment_file_ids_for_turn,
             ) = await _prepare_attachments_for_turn()
+            if len(_uploaded_for_turn) != len(pending_attachments) or len(attachment_file_ids_for_turn) != len(pending_attachments):
+                console.print("Request not sent: some attachments failed to upload. All attachments retained; use /retry-failed or /detach.")
+                attachment_markers_for_turn, attachment_file_ids_for_turn = [], []
+                attachment_context_for_turn = ""
+                voice_transcript_context_for_turn = ""
+                continue
             voice_transcript_context_for_turn = ""
             last_voice_transcribe_used = False
             last_voice_transcribe_effective = bool(
                 voice_transcribe_requested
-                and resolve_capability(
-                    current_provider,
-                    current_model,
-                    "speech_to_text",
-                )
+                and _chat_capability("speech_to_text")
             )
             if _uploaded_for_turn:
                 (
@@ -9526,7 +9624,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 str(att.mime_type or "").lower().startswith("image/")
                 for att in _uploaded_for_turn
             )
-            if has_image_attachment and not resolve_capability(current_provider, current_model, "image_input"):
+            if has_image_attachment and not _chat_capability("image_input"):
                 emit_metric(
                     "chat_attachment_blocked_capability_total",
                     {
@@ -9548,29 +9646,10 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 _tool_debug(
                     "unexpected capability preflight bypass: uploaded image attachment reached post-upload guard"
                 )
-                non_image_uploaded = [att for att in _uploaded_for_turn if not _attachment_is_image(att)]
-                if non_image_uploaded:
-                    dropped_after_upload = len(_uploaded_for_turn) - len(non_image_uploaded)
-                    _uploaded_for_turn = non_image_uploaded
-                    attachment_markers_for_turn = [_attachment_marker(att.name) for att in _uploaded_for_turn]
-                    attachment_file_ids_for_turn = [
-                        str(att.remote_file_id).strip()
-                        for att in _uploaded_for_turn
-                        if str(att.remote_file_id or "").strip()
-                    ]
-                    console.print(
-                        "[yellow]"
-                        f"Dropped {dropped_after_upload} uploaded image attachment(s) — "
-                        "model does not support image input."
-                        "[/yellow]"
-                    )
-                else:
-                    console.print(
-                        "[yellow]Image input is not supported for this provider/model. "
-                        "Switch model/provider or remove image attachments.[/yellow]"
-                    )
-                    render_status_bar(console, _status_actor(), "image input unavailable", workspace_root)
-                    continue
+                console.print("Image input is unavailable. Request not sent; all attachments retained.")
+                attachment_markers_for_turn, attachment_file_ids_for_turn = [], []
+                attachment_context_for_turn = ""
+                continue
             active_emote_turn = None
             try:
                 active_emote_turn = emote_bridge.begin()
@@ -9593,7 +9672,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         }
                     )
                 await _schedule_low_balance_hint(force=False)
-                pending_attachments.clear()
+                if rendered:
+                    pending_attachments.clear()
                 attachment_markers_for_turn = []
                 attachment_context_for_turn = ""
                 voice_transcript_context_for_turn = ""
