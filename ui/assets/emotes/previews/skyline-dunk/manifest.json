@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
   "pack_id": "openvegas.skyline-dunk",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "display_name": "Skyline Dunk",
   "license_id": "openvegas-original-sports-review",
   "sheet": "sheet.png",
-  "sha256": "b25b5a67cb2b1700ada1539934c9e6b2b54dd5e0c9fbb52feac16c156fb0551a",
+  "sha256": "c43f18b758ad04dbc33501a54961177b5b4dc9578fa2ed9bd0abcbe7bcecd6cf",
   "frame": {
     "width": 160,
     "height": 120,

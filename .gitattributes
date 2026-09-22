@@ -1,0 +1,6 @@
+# Authored asset JSON participates in cross-platform byte/hash verification.
+openvegas/emotes/assets/**/*.json text eol=lf
+ui/assets/emotes/previews/**/*.json text eol=lf
+creatives/emotes/sources/sports/**/*.json text eol=lf
+creatives/emotes/marketing/assets/**/*.json text eol=lf
+creatives/emotes/marketing/DELIVERY.json text eol=lf

@@ -192,6 +192,7 @@ def build(
     }
     provenance = {
         "sheet_encoding": ENCODING,
+        "contact_preview_encoding": ENCODING,
         "source_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
         "generation": "built-in image_gen",
         "prompt": prompt,
@@ -213,7 +214,7 @@ def build(
         ("manifest.json", manifest),
         ("provenance.json", provenance),
     ):
-        (output / filename).write_text(json.dumps(value, indent=2) + "\n")
+        (output / filename).write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8", newline="\n")
     shutil.copyfile(source, output / "source.png")
     for theme, background in (("light", "#f6f7fb"), ("dark", "#11151c")):
         previews = []
@@ -225,9 +226,12 @@ def build(
             previews.append(
                 cell.resize((width * 4, height * 4), Image.Resampling.NEAREST)
             )
-        contact.resize(
-            (contact.width * 2, contact.height * 2), Image.Resampling.NEAREST
-        ).save(output / f"contact-{theme}.png")
+        write_rgba_png(
+            contact.resize(
+                (contact.width * 2, contact.height * 2), Image.Resampling.NEAREST
+            ).convert("RGBA"),
+            output / f"contact-{theme}.png",
+        )
         # Export the once-only clip, with final-pose hold rather than a false loop.
         previews[0].save(
             output / f"complete-{theme}.gif",
@@ -256,7 +260,7 @@ if __name__ == "__main__":
                 args.output,
                 pack_id=args.pack_id,
                 name=args.name,
-                prompt=args.prompt_file.read_text() if args.prompt_file else "",
+                prompt=args.prompt_file.read_text(encoding="utf-8") if args.prompt_file else "",
                 clean_matte=args.clean_neutral_matte,
                 detail_reference=args.detail_reference,
             )

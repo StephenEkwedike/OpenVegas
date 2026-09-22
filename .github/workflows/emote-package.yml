@@ -47,6 +47,14 @@ jobs:
           tests/test_emotes/test_windows_state.py
           tests/test_emotes/test_spool_platform.py
           --junitxml=emote-resource-tests.xml
+      - name: Rebuild authored sports assets identically on every OS
+        if: always()
+        run: >-
+          python -B -m pytest -q -p no:cacheprovider
+          --confcutdir=tests/test_emotes
+          tests/test_emotes/test_sports_packs.py
+          tests/test_emotes/test_completion_build.py
+          tests/test_emotes/test_deterministic_png.py
       - name: Native Windows private state and event transport (installed wheel, offline)
         if: always() && runner.os == 'Windows'
         run: >-

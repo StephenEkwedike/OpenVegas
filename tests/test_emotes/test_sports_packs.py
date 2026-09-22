@@ -8,6 +8,12 @@ from PIL import Image
 from openvegas.emotes.render import fit_frame
 from openvegas.emotes.resources import PackRepository
 
+SPORTS = ("skyline-dunk", "bicycle-finish", "three-point-glow")
+PACK_ARTIFACTS = ("sheet.png", "manifest.json", "provenance.json")
+PREVIEW_ARTIFACTS = (
+    "contact-light.png", "contact-dark.png", "complete-light.gif", "complete-dark.gif",
+)
+
 
 def _assert_artifact_bytes_equal(actual_path: Path, expected_path: Path) -> None:
     actual, expected = actual_path.read_bytes(), expected_path.read_bytes()
@@ -38,7 +44,7 @@ def test_artifact_comparison_reports_bounded_exact_byte_failure(tmp_path):
     assert "actual size=" in diagnostic and "expected size=" in diagnostic
 
 
-@pytest.mark.parametrize("slug", ["skyline-dunk", "bicycle-finish", "three-point-glow"])
+@pytest.mark.parametrize("slug", SPORTS)
 def test_authored_sports_pack_has_twelve_poses_and_one_bounded_completion(slug):
     pack = PackRepository().load(slug)
     assert (pack.manifest.width, pack.manifest.height) == (160, 120)
@@ -57,10 +63,11 @@ def test_authored_sports_pack_has_twelve_poses_and_one_bounded_completion(slug):
     runtime = root / "openvegas/emotes/assets" / slug
     web = root / "ui/assets/emotes/previews" / slug
     marketing = root / "creatives/emotes/marketing/assets/sports" / slug
-    for filename in ("manifest.json", "sheet.png", "provenance.json"):
+    for filename in PACK_ARTIFACTS:
         _assert_artifact_bytes_equal(runtime / filename, web / filename)
-        if slug != "skyline-dunk" or filename != "provenance.json":
-            _assert_artifact_bytes_equal(runtime / filename, marketing / filename)
+        _assert_artifact_bytes_equal(runtime / filename, marketing / filename)
+    for filename in PREVIEW_ARTIFACTS:
+        _assert_artifact_bytes_equal(web / filename, marketing / filename)
     provenance = json.loads((web / "provenance.json").read_text())
     assert provenance["purchasable"] is False
     assert provenance["authored_frames"] == 12
@@ -78,8 +85,8 @@ def test_authored_sports_pack_has_twelve_poses_and_one_bounded_completion(slug):
     )
 
 
-@pytest.mark.parametrize("slug", ["bicycle-finish", "three-point-glow"])
-def test_corrected_sports_rebuild_from_saved_authoring_source(slug, tmp_path):
+@pytest.mark.parametrize("slug", SPORTS)
+def test_all_sports_rebuild_every_required_artifact_from_saved_source(slug, tmp_path):
     from scripts.rebuild_sports_revision import rebuild
 
     root = Path(__file__).resolve().parents[2]
@@ -87,15 +94,88 @@ def test_corrected_sports_rebuild_from_saved_authoring_source(slug, tmp_path):
     rebuilt = tmp_path / slug
     rebuild(source, rebuilt, slug)
     provenance = json.loads((rebuilt / "provenance.json").read_text())
-    assert provenance["highlight_reference_sha256"] is None
-    assert provenance["revision"] == "0.1.2"
+    assert provenance["revision"] == ("0.1.1" if slug == "skyline-dunk" else "0.1.2")
+    assert provenance["sheet_encoding"] == "rgba8-filter0-stored-deflate-v1"
+    assert provenance["contact_preview_encoding"] == "rgba8-filter0-stored-deflate-v1"
+    if slug != "skyline-dunk":
+        assert provenance["highlight_reference_sha256"] is None
     assert (
         provenance["source_sha256"]
         == hashlib.sha256((source / "source.png").read_bytes()).hexdigest()
     )
     runtime = root / "openvegas/emotes/assets" / slug
-    for filename in ("sheet.png", "manifest.json", "provenance.json"):
-        _assert_artifact_bytes_equal(rebuilt / filename, runtime / filename)
+    web = root / "ui/assets/emotes/previews" / slug
+    marketing = root / "creatives/emotes/marketing/assets/sports" / slug
+    source_artifacts = (
+        ("source.png", "detail-reference.png") if slug == "skyline-dunk"
+        else ("source.png", "prepared-source.png", "prompt-set.json")
+    )
+    assert {p.name for p in rebuilt.iterdir()} == set(
+        PACK_ARTIFACTS + PREVIEW_ARTIFACTS + source_artifacts
+    )
+    for filename in PACK_ARTIFACTS:
+        for destination in (runtime, web, marketing):
+            _assert_artifact_bytes_equal(rebuilt / filename, destination / filename)
+    for filename in PREVIEW_ARTIFACTS:
+        for destination in (web, marketing):
+            _assert_artifact_bytes_equal(rebuilt / filename, destination / filename)
+    for filename in (*source_artifacts, "provenance.json"):
+        _assert_artifact_bytes_equal(rebuilt / filename, source / filename)
+
+
+def test_skyline_encoding_lineage_and_approval_gates():
+    from scripts.rebuild_sports_revision import SKYLINE_RGBA_SHA256
+
+    root = Path(__file__).resolve().parents[2]
+    pack = root / "openvegas/emotes/assets/skyline-dunk"
+    provenance = json.loads((pack / "provenance.json").read_text())
+    manifest = json.loads((pack / "manifest.json").read_text())
+    lineage = provenance["encoding_lineage"]
+    assert manifest["version"] == provenance["revision"] == "0.1.1"
+    assert lineage["previous_version"] == "0.1.0"
+    assert lineage["previous_sheet_sha256"] == "b25b5a67cb2b1700ada1539934c9e6b2b54dd5e0c9fbb52feac16c156fb0551a"
+    assert lineage["previous_manifest_sha256"] == "6071a5053d98faa8d5eed9bec176a21fc77e108afd950087e830d975fa21b1d0"
+    with Image.open(pack / "sheet.png") as image:
+        assert hashlib.sha256(image.convert("RGBA").tobytes()).hexdigest() == SKYLINE_RGBA_SHA256
+    assert lineage["rgba_sha256"] == SKYLINE_RGBA_SHA256
+    assert lineage["native_compatibility_approved"] is False
+    assert lineage["sales_activation_authorized"] is False
+    assert provenance["purchasable"] is False
+    assert "native-animation-and-sale-review-pending" in provenance["approval"]
+
+
+@pytest.mark.parametrize("filename", ["source.png", "detail-reference.png"])
+def test_skyline_rebuild_rejects_unreviewed_inputs(filename, tmp_path):
+    import shutil
+
+    from scripts.rebuild_sports_revision import rebuild
+
+    root = Path(__file__).resolve().parents[2]
+    source = tmp_path / "source"
+    shutil.copytree(root / "creatives/emotes/sources/sports/skyline-dunk", source)
+    (source / filename).write_bytes(b"changed artwork")
+    output = tmp_path / "output"
+    with pytest.raises(ValueError, match="Artwork changed"):
+        rebuild(source, output, "skyline-dunk")
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("slug", SPORTS)
+def test_sports_delivery_registry_matches_canonical_artifacts(slug):
+    root = Path(__file__).resolve().parents[2]
+    marketing = root / "creatives/emotes/marketing"
+    registry = json.loads((marketing / "assets/sports/slots.json").read_text())
+    slot = registry["slots"][slug]
+    assert slot["pack"] == "sports/" + slug
+    assert "pending" in slot["status"]
+    delivery = json.loads((marketing / "DELIVERY.json").read_text())
+    entry = next(item for item in delivery["sports"] if item["slug"] == slug)
+    pack = marketing / "assets/sports" / slug
+    manifest = json.loads((pack / "manifest.json").read_text())
+    assert entry["sha256"] == manifest["sha256"]
+    assert entry["provenanceSha256"] == hashlib.sha256((pack / "provenance.json").read_bytes()).hexdigest()
+    assert entry["highlightReferenceSha256"] == json.loads((pack / "provenance.json").read_text())["highlight_reference_sha256"]
+    assert entry["completionMs"] == 5400
 
 
 def test_revision_cleanup_rejects_unreviewed_artwork(tmp_path):

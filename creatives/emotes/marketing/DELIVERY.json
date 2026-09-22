@@ -86,7 +86,7 @@
     {
       "slug": "skyline-dunk",
       "sheet": "assets/sports/skyline-dunk/sheet.png",
-      "sha256": "b25b5a67cb2b1700ada1539934c9e6b2b54dd5e0c9fbb52feac16c156fb0551a",
+      "sha256": "c43f18b758ad04dbc33501a54961177b5b4dc9578fa2ed9bd0abcbe7bcecd6cf",
       "frame": {
         "width": 160,
         "height": 120,
@@ -96,8 +96,9 @@
         ]
       },
       "completionMs": 5400,
-      "provenanceSha256": "4120fec1f3964f9132304ce1a01ea1e6ee8611d1238934aa3473bd6a1e84eeb0",
-      "highlightReferenceSha256": "98b21bfb40778893d830b1b41f1d4be04623a8ec95f0011970543936faeb4e04"
+      "provenanceSha256": "5f592368bf09f2a7e24a9fd0bc183eca643a6d822431e1d15f9bcbe3fc530131",
+      "highlightReferenceSha256": "98b21bfb40778893d830b1b41f1d4be04623a8ec95f0011970543936faeb4e04",
+      "version": "0.1.1"
     },
     {
       "slug": "bicycle-finish",
@@ -112,7 +113,7 @@
         ]
       },
       "completionMs": 5400,
-      "provenanceSha256": "f8281c6f19256f3c887068f5bc57e6fbddec364a06589003c6eabe6c6a9ad9dd",
+      "provenanceSha256": "919b7ad353c35d22210e46b673c5af3323f4d0da412fc8cba5fdc41957c3eb04",
       "highlightReferenceSha256": null,
       "version": "0.1.2"
     },
@@ -129,7 +130,7 @@
         ]
       },
       "completionMs": 5400,
-      "provenanceSha256": "10a92af305d132250ec1688bcd3b1c098e50b44f535214701a996260b9d9fa42",
+      "provenanceSha256": "aec11bf4e36525fdeeffd54b657b7549f23c7fdfc81b31e7907a41a9930ca876",
       "highlightReferenceSha256": null,
       "version": "0.1.2"
     }
@@ -294,8 +295,10 @@
     "approvedContactSheetUnchanged": true,
     "encoding": "rgba8-filter0-stored-deflate-v1",
     "scope": [
+      "skyline-dunk",
       "bicycle-finish",
       "three-point-glow"
-    ]
+    ],
+    "contactPreviewEncoding": "rgba8-filter0-stored-deflate-v1"
   }
 }

@@ -27,9 +27,19 @@ else:
 
 
 REVIEWED_HASHES = {
+    "skyline-dunk": "172daebf30ecb07831e74552fe6ffba6c3e1c7e9aaad754ff0b60ab8e120789b",
     "bicycle-finish": "023c0fe0b44b9003df54fda8c7ba0e0724df3b25da886f0f77ba16f2d479dc44",
     "three-point-glow": "b8255945370c8118dd942c6dedf8efff8ffa60a2b2621885d1c2a4db172d4204",
 }
+SKYLINE_REFERENCE_SHA256 = "98b21bfb40778893d830b1b41f1d4be04623a8ec95f0011970543936faeb4e04"
+SKYLINE_RGBA_SHA256 = "c4edd8ac0fc4bcaca38511a163aeb67a1bbee150c65a60ae98cd1712c415a30a"
+SKYLINE_PROMPT = (
+    "Final condensed authoring brief: Blue-and-amber human dunker versus a generic "
+    "green-uniform human defender. Dribble, gather, leap, dunk, land and celebrate. "
+    "Twelve original chronological pixel-art poses, 4x3 equal grid, stable side "
+    "camera, no real athlete/team/brand marks. User correction: all opponents are "
+    "generic HUMAN players; no robots. Full edit requests are recorded in task history."
+)
 BICYCLE_MATTE_SEEDS = {
     0: [(130, 310)],
     1: [(140, 315)],
@@ -41,6 +51,8 @@ BICYCLE_MATTE_SEEDS = {
 
 
 def prepare(source: Path, slug: str) -> Image.Image:
+    if slug == "skyline-dunk":
+        raise ValueError("Skyline uses the reviewed highlight-reference rebuild, not preparation")
     digest = hashlib.sha256(source.read_bytes()).hexdigest()
     if digest != REVIEWED_HASHES.get(slug):
         raise ValueError("Artwork changed: review cleanup geometry before rebuilding")
@@ -84,9 +96,54 @@ def prepare(source: Path, slug: str) -> Image.Image:
     return out
 
 
+def rebuild_skyline(source_dir: Path, output: Path) -> dict:
+    """Encoding-only successor to the exact owner-approved v0.1.0 artwork."""
+    raw, reference = source_dir / "source.png", source_dir / "detail-reference.png"
+    for path, expected in (
+        (raw, REVIEWED_HASHES["skyline-dunk"]),
+        (reference, SKYLINE_REFERENCE_SHA256),
+    ):
+        if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+            raise ValueError("Artwork changed: review Skyline source and highlight reference")
+    provenance = build(
+        raw, output, pack_id="openvegas.skyline-dunk", name="Skyline Dunk",
+        prompt=SKYLINE_PROMPT, clean_matte=True, detail_reference=reference,
+    )
+    with Image.open(output / "sheet.png") as sheet:
+        rgba = hashlib.sha256(sheet.convert("RGBA").tobytes()).hexdigest()
+    if rgba != SKYLINE_RGBA_SHA256:
+        raise ValueError("Skyline RGBA changed: encoding-only revision must preserve every pixel")
+    provenance["highlight_reference"] = (
+        "Creative source detail-reference.png: transparent white highlights only; no opponent figures."
+    )
+    provenance["revision"] = "0.1.1"
+    provenance["cleanup_recipe"] = "scripts/rebuild_sports_revision.py"
+    provenance["encoding_lineage"] = {
+        "change": "PNG encoding and metadata only; authored RGBA and animation timelines unchanged",
+        "previous_version": "0.1.0",
+        "previous_sheet_sha256": "b25b5a67cb2b1700ada1539934c9e6b2b54dd5e0c9fbb52feac16c156fb0551a",
+        "previous_manifest_sha256": "6071a5053d98faa8d5eed9bec176a21fc77e108afd950087e830d975fa21b1d0",
+        "previous_provenance_sha256": "3f5056368d3dee059fe047af295f78d4c2b708f79e31b92d12310ebb33368ea9",
+        "previous_marketing_provenance_sha256": "4120fec1f3964f9132304ce1a01ea1e6ee8611d1238934aa3473bd6a1e84eeb0",
+        "rgba_sha256": rgba,
+        "approval_record": "evidence/emotes/phase7-owner-decisions.json",
+        "approval_scope": "Prior version artwork only; new encoded bytes are not directly named in that record",
+        "native_compatibility_approved": False,
+        "sales_activation_authorized": False,
+    }
+    manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+    manifest["version"] = provenance["revision"]
+    (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8", newline="\n")
+    (output / "provenance.json").write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8", newline="\n")
+    shutil.copyfile(reference, output / "detail-reference.png")
+    return provenance
+
+
 def rebuild(source_dir: Path, output: Path, slug: str) -> dict:
+    if slug == "skyline-dunk":
+        return rebuild_skyline(source_dir, output)
     raw = source_dir / "source.png"
-    prompts = json.loads((source_dir / "prompt-set.json").read_text())
+    prompts = json.loads((source_dir / "prompt-set.json").read_text(encoding="utf-8"))
     with tempfile.TemporaryDirectory(prefix="ov-sports-preparation-") as temp:
         prepared = Path(temp) / "prepared.png"
         write_rgba_png(prepare(raw, slug), prepared)
@@ -129,10 +186,10 @@ def rebuild(source_dir: Path, output: Path, slug: str) -> dict:
         (output / "source.png").rename(output / "prepared-source.png")
         shutil.copyfile(raw, output / "source.png")
         shutil.copyfile(source_dir / "prompt-set.json", output / "prompt-set.json")
-    manifest = json.loads((output / "manifest.json").read_text())
+    manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
     manifest["version"] = "0.1.2"
-    (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-    (output / "provenance.json").write_text(json.dumps(provenance, indent=2) + "\n")
+    (output / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8", newline="\n")
+    (output / "provenance.json").write_text(json.dumps(provenance, indent=2) + "\n", encoding="utf-8", newline="\n")
     return provenance
 
 
