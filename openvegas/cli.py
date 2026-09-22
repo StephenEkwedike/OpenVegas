@@ -3957,6 +3957,17 @@ def _deep_find_keyed_string(
     return None
 
 
+def _provider_call_identity(value: Any) -> dict[str, str]:
+    # Opaque correlation metadata only. Runtime ownership/approval is separate.
+    if (
+        isinstance(value, str)
+        and re.fullmatch(r"[A-Za-z0-9_.:-]{1,256}", value)
+        and not value.lower().startswith("sk-")
+    ):
+        return {"provider_call_id": value}
+    return {}
+
+
 def _collect_tool_call_candidates(tool_calls_payload: Any, fallback_text: str) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     if isinstance(tool_calls_payload, list):
@@ -3980,6 +3991,7 @@ def _collect_tool_call_candidates(tool_calls_payload: Any, fallback_text: str) -
                         "arguments": args,
                         "shell_mode": item.get("shell_mode", "read_only"),
                         "timeout_sec": item.get("timeout_sec", 30),
+                        **_provider_call_identity(item.get("provider_call_id")),
                     }
                 )
                 continue
@@ -4006,7 +4018,7 @@ def _collect_tool_call_candidates(tool_calls_payload: Any, fallback_text: str) -
             args_obj = parsed.get("arguments", {})
             if not isinstance(args_obj, dict):
                 args_obj = {}
-            if not args_obj:
+            if not args_obj and "arguments" not in parsed:
                 # Native function-call payloads may place arguments at the top level.
                 top_level = {k: v for k, v in parsed.items() if k not in {"tool_name", "shell_mode", "timeout_sec"}}
                 if isinstance(top_level, dict) and top_level:
@@ -4018,6 +4030,7 @@ def _collect_tool_call_candidates(tool_calls_payload: Any, fallback_text: str) -
                     "arguments": args_obj,
                     "shell_mode": parsed.get("shell_mode", "read_only"),
                     "timeout_sec": parsed.get("timeout_sec", 30),
+                    **_provider_call_identity(item.get("id")),
                 }
             )
 
@@ -4026,7 +4039,11 @@ def _collect_tool_call_candidates(tool_calls_payload: Any, fallback_text: str) -
 
     fallback_req, _ = extract_tool_instruction(fallback_text)
     if isinstance(fallback_req, dict):
-        candidates.append(fallback_req)
+        # Model-authored prose is not a source of native provider correlation IDs.
+        candidates.append({
+            key: value for key, value in fallback_req.items()
+            if key not in {"provider_call_id", "provider_request_id"}
+        })
     return candidates
 
 
@@ -4389,6 +4406,7 @@ def _preprocess_tool_request_for_runtime(
         "arguments": arguments,
         "shell_mode": shell_mode,
         "timeout_sec": timeout_sec,
+        **_provider_call_identity(tool_req.get("provider_call_id")),
     }
     if write_meta is not None:
         prepared["_write_meta"] = write_meta

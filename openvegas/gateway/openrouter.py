@@ -17,12 +17,65 @@ from typing import Any
 import httpx
 
 from openvegas.contracts.errors import APIErrorCode, ContractError
+from openvegas.telemetry import emit_metric
 
 BASE_URL = "https://openrouter.ai/api/v1"
 MAX_RESPONSE_BYTES = 2_000_000
 MAX_REQUEST_BYTES = 1_000_000
 TIMEOUT = 60
 MODEL_ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z")
+PROVIDER_CALL_ID = re.compile(r"[A-Za-z0-9_.:-]{1,256}\Z")
+
+
+class OpenRouterFailure(ContractError):
+    """Keep operator diagnostics separate from the customer-facing error text."""
+
+    def __init__(self, detail: str, *, reason: str, request_id: str | None = None):
+        super().__init__(APIErrorCode.PROVIDER_UNAVAILABLE, detail)
+        self.diagnostic_reason = reason
+        self.provider_request_id = request_id
+
+
+def _failure_category(error: Exception) -> str:
+    # Only fixed categories enter telemetry, never upstream text, prompts or keys.
+    if isinstance(error, (TimeoutError, httpx.TimeoutException)):
+        return "timeout"
+    if isinstance(error, httpx.HTTPError):
+        return "transport"
+    if isinstance(error, json.JSONDecodeError):
+        return "invalid_json"
+    if isinstance(error, KeyError):
+        return "missing_metering" if error.args == ("usage",) else "missing_response_field"
+    if type(error) is not ValueError or len(error.args) != 1 or not isinstance(error.args[0], str):
+        return "malformed_response"
+    return {
+        "Provider error response": "provider_error",
+        "Provider generated malformed function call": "provider_malformed_function_call",
+        "Provider failed completion": "provider_failed_completion",
+        "Unexpected routed model": "unexpected_model",
+        "Missing single completion/usage": "missing_completion_or_usage",
+        "Invalid metering": "invalid_metering",
+        "Input usage exceeded conservative reservation": "input_reservation_exceeded",
+        "Inconsistent usage": "inconsistent_metering",
+        "Reported cost exceeds approved token prices": "price_ceiling_exceeded",
+        "Missing, invalid or duplicate provider tool call ID": "invalid_tool_identity",
+        "Tool request violates the advertised schema": "invalid_tool_schema",
+        "Tool arguments violate the advertised primitive schema": "invalid_tool_arguments",
+        "Unapproved tool": "unapproved_tool",
+        "Unconfirmed completion": "unconfirmed_completion",
+        "Empty response": "empty_response",
+        "Missing request identifier": "invalid_request_identity",
+        "Response too large": "response_too_large",
+        "Reflected credential": "reflected_credential",
+    }.get(error.args[0], "malformed_response")
+
+
+def _request_identity(body: Any) -> str | None:
+    value = body.get("id") if isinstance(body, dict) else None
+    if (isinstance(value, str) and PROVIDER_CALL_ID.fullmatch(value)
+            and not value.lower().startswith("sk-")):
+        return value
+    return None
 
 
 def valid_model(model: object) -> bool:
@@ -55,6 +108,7 @@ def local_tool_definition() -> dict:
             "description": "Request local workspace tool execution.",
             "parameters": {
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "tool_name": {
                         "type": "string",
@@ -68,7 +122,38 @@ def local_tool_definition() -> dict:
                             "List",
                         ],
                     },
-                    "arguments": {"type": "object"},
+                    "arguments": {
+                        "type": "object",
+                        "description": (
+                            "Use only fields for the selected tool. Read requires filepath or path; "
+                            "Search requires pattern; Write and InsertAtEnd require filepath and "
+                            "content; FindAndReplace requires filepath, old_string and new_string; "
+                            "Bash requires command; List accepts an optional path. "
+                            "Runtime validation and approval still apply."
+                        ),
+                        "additionalProperties": False,
+                        "properties": {
+                            "filepath": {"type": "string"},
+                            "path": {"type": "string"},
+                            "pattern": {"type": "string"},
+                            "content": {"type": "string"},
+                            "old_string": {"type": "string"},
+                            "new_string": {"type": "string"},
+                            "replace_all": {"type": "boolean"},
+                            "write_mode": {
+                                "type": "string",
+                                "description": "Write mode, normally append or replace.",
+                            },
+                            "command": {"type": "string"},
+                            "recursive": {"type": "boolean"},
+                            "max_entries": {"type": "integer"},
+                            "max_bytes": {"type": "integer"},
+                            "result_content_max_chars": {"type": "integer"},
+                            "max_files": {"type": "integer"},
+                            "max_matches": {"type": "integer"},
+                            "foreground_job_id": {"type": "string"},
+                        },
+                    },
                     "shell_mode": {"type": "string", "enum": ["read_only", "mutating"]},
                     "timeout_sec": {"type": "integer", "minimum": 1, "maximum": 300},
                 },
@@ -185,10 +270,19 @@ def parse_response(body: Any, req: Any, model_config: dict, parse_tool) -> dict:
     accepted_models = {req.model, *aliases}
     if body.get("model") not in accepted_models:
         raise ValueError("Unexpected routed model")
-    choices, usage = body["choices"], body["usage"]
-    if not isinstance(choices, list) or len(choices) != 1 or not isinstance(usage, dict):
+    choices = body["choices"]
+    if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
         raise ValueError("Missing single completion/usage")
     choice = choices[0]
+    # Some providers return HTTP200 with a failed generation and omit usage.
+    # Preserve that known failure category before inspecting metering fields.
+    if choice.get("native_finish_reason") == "MALFORMED_FUNCTION_CALL":
+        raise ValueError("Provider generated malformed function call")
+    if choice.get("finish_reason") == "error":
+        raise ValueError("Provider failed completion")
+    usage = body["usage"]
+    if not isinstance(usage, dict):
+        raise TypeError("Missing single completion/usage")
     message = choice["message"]
     if message.get("role") != "assistant":
         raise ValueError("Unexpected response role")
@@ -217,6 +311,21 @@ def parse_response(body: Any, req: Any, model_config: dict, parse_tool) -> dict:
         or (native_calls and not req.enable_tools)
     ):
         raise ValueError("Unrequested or excess tool calls")
+    call_ids = set()
+    for call in native_calls:
+        call_id = call.get("id") if isinstance(call, dict) else None
+        if (
+            not isinstance(call_id, str)
+            or not PROVIDER_CALL_ID.fullmatch(call_id)
+            or call_id.lower().startswith("sk-")
+            or call_id in call_ids
+        ):
+            raise ValueError("Missing, invalid or duplicate provider tool call ID")
+        call_ids.add(call_id)
+    argument_properties = local_tool_definition()["function"]["parameters"]["properties"][
+        "arguments"
+    ]["properties"]
+    primitive_types = {"string": str, "boolean": bool, "integer": int}
     tools = []
     for call in native_calls:
         function = call["function"]
@@ -238,20 +347,25 @@ def parse_response(body: Any, req: Any, model_config: dict, parse_tool) -> dict:
             or not 1 <= tool.get("timeout_sec", 30) <= 300
         ):
             raise ValueError("Tool request violates the advertised schema")
+        for name, value in tool["arguments"].items():
+            schema = argument_properties.get(name)
+            if schema is None or type(value) is not primitive_types[schema["type"]]:
+                raise ValueError("Tool arguments violate the advertised primitive schema")
         parsed = parse_tool(function_name="call_local_tool", raw_arguments=arguments)
         if not parsed:
             raise ValueError("Invalid local tool request")
         # The legacy parser treats {} as absent. This schema requires arguments,
         # including a valid empty object; never replace it with the outer envelope.
         parsed["arguments"] = tool["arguments"]
+        parsed["provider_call_id"] = call["id"]
         tools.append(parsed)
     finish = choice.get("finish_reason")
     if finish not in {"stop", "length", "tool_calls"} or bool(tools) != (finish == "tool_calls"):
         raise ValueError("Unconfirmed completion")
     if not text.strip() and not tools:
         raise ValueError("Empty response")
-    request_id = body.get("id")
-    if not isinstance(request_id, str) or not 1 <= len(request_id) <= 256:
+    request_id = _request_identity(body)
+    if request_id is None:
         raise ValueError("Missing request identifier")
     return {
         "text": text,
@@ -272,6 +386,7 @@ async def complete(
         raise ContractError(
             APIErrorCode.PROVIDER_UNAVAILABLE, "Managed OpenRouter credential unavailable."
         )
+    request_id = None
     try:
         async with asyncio.timeout(TIMEOUT), _client(client) as http:
             async with http.stream(
@@ -288,24 +403,42 @@ async def complete(
                 auth=None,
             ) as response:
                 if response.status_code != 200:
+                    reason = {
+                        401: "credential_rejected", 402: "supplier_balance_exhausted",
+                        429: "rate_limited",
+                    }.get(response.status_code, "http_rejected")
+                    emit_metric("openrouter_failure_total", {"reason": reason})
                     messages = {
                         401: "Managed OpenRouter credential rejected; operator action required.",
                         402: "OpenRouter balance exhausted; no automatic top-up was made.",
                         429: "OpenRouter rate limit reached; no retry was made.",
                     }
-                    raise ContractError(
-                        APIErrorCode.PROVIDER_UNAVAILABLE,
+                    raise OpenRouterFailure(
                         messages.get(
                             response.status_code,
                             "OpenRouter unavailable or request rejected; no retry was made.",
                         ),
+                        reason=reason,
                     )
                 raw = bytearray()
                 async for chunk in response.aiter_bytes():
                     if len(raw) + len(chunk) > MAX_RESPONSE_BYTES:
                         raise ValueError("Response too large")
                     raw.extend(chunk)
-            return parse_response(json.loads(raw), req, model_config, parse_tool)
+            if api_key.encode("utf-8") in raw:
+                raise ValueError("Reflected credential")
+            body = json.loads(raw)
+            candidate_id = _request_identity(body)
+            if candidate_id and api_key in candidate_id:
+                raise ValueError("Reflected credential")
+            request_id = candidate_id
+            result = parse_response(body, req, model_config, parse_tool)
+            if api_key in json.dumps(result, default=str):
+                raise ValueError("Reflected credential")
+            return result
+    except asyncio.CancelledError:
+        emit_metric("openrouter_failure_total", {"reason": "cancelled"})
+        raise
     except ContractError:
         raise
     except (
@@ -317,8 +450,19 @@ async def complete(
         IndexError,
         AttributeError,
         RecursionError,
-    ):
-        raise ContractError(
-            APIErrorCode.PROVIDER_UNAVAILABLE,
-            "OpenRouter returned an unsupported response or failed. No retry was made; an accepted request may need billing reconciliation.",
+    ) as error:
+        reason = _failure_category(error)
+        emit_metric("openrouter_failure_total", {"reason": reason})
+        detail = (
+            "The selected model returned an invalid tool call. No tool from this response "
+            "was executed and no retry was made. Choose another model; the accepted "
+            "request may need billing reconciliation."
+            if reason == "provider_malformed_function_call" else
+            "OpenRouter returned an unsupported response or failed. No retry was made; "
+            "an accepted request may need billing reconciliation."
+        )
+        raise OpenRouterFailure(
+            detail,
+            reason=reason,
+            request_id=request_id,
         ) from None

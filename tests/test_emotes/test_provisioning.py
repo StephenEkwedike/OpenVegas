@@ -405,10 +405,26 @@ def test_existing_output_conflicts_are_never_overwritten(candidate, tamper):
         else:
             os.link(target, destination / "alias")
         destination.chmod(0o500)
-    before = {path: path.lstat() for path in destination.rglob("*")}
+    def snapshot():
+        result = {}
+        for path in destination.rglob("*"):
+            info = path.lstat()
+            # Validation reads may change atime, but must not rewrite data,
+            # replace inodes, change permissions or follow symlinks.
+            metadata = tuple(getattr(info, name) for name in (
+                "st_mode", "st_ino", "st_dev", "st_nlink", "st_uid", "st_gid",
+                "st_size", "st_mtime_ns", "st_ctime_ns",
+            ))
+            content = os.readlink(path) if path.is_symlink() else (
+                path.read_bytes() if path.is_file() else None
+            )
+            result[path] = (metadata, content)
+        return result
+
+    before = snapshot()
     with pytest.raises((PackError, OSError)):
         p.provision(plan, destination, apply=True)
-    assert before == {path: path.lstat() for path in destination.rglob("*")}
+    assert before == snapshot()
 
 
 def test_interrupted_output_fails_closed_and_never_reused(candidate, monkeypatch):

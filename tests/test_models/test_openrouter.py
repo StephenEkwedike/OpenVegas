@@ -242,6 +242,111 @@ def test_tool_definition_and_schema_are_in_reservation_bound():
     )
 
 
+def test_google_compatible_tool_schema_has_closed_typed_objects():
+    parameters = openrouter.build_payload(
+        request(enable_tools=True), catalog_row(), capabilities()
+    )["tools"][0]["function"]["parameters"]
+    assert parameters["required"] == ["tool_name", "arguments"]
+    assert set(parameters["properties"]) == {
+        "tool_name", "arguments", "shell_mode", "timeout_sec"
+    }
+    assert parameters["properties"]["tool_name"]["enum"] == [
+        "Read", "Search", "Write", "FindAndReplace", "InsertAtEnd", "Bash", "List"
+    ]
+    arguments = parameters["properties"]["arguments"]
+    assert {name: schema["type"] for name, schema in arguments["properties"].items()} == {
+        "filepath": "string",
+        "path": "string",
+        "pattern": "string",
+        "content": "string",
+        "old_string": "string",
+        "new_string": "string",
+        "replace_all": "boolean",
+        "write_mode": "string",
+        "command": "string",
+        "recursive": "boolean",
+        "max_entries": "integer",
+        "max_bytes": "integer",
+        "result_content_max_chars": "integer",
+        "max_files": "integer",
+        "max_matches": "integer",
+        "foreground_job_id": "string",
+    }
+
+    def check(schema):
+        assert schema["type"] in {"object", "array", "string", "boolean", "integer"}
+        if schema["type"] == "object":
+            assert schema["properties"] and schema["additionalProperties"] is False
+            assert set(schema.get("required", [])) <= schema["properties"].keys()
+            for child in schema["properties"].values():
+                check(child)
+        elif schema["type"] == "array":
+            assert isinstance(schema["items"], dict) and schema["items"]
+            check(schema["items"])
+
+    check(parameters)
+
+
+@pytest.mark.parametrize(
+    "tool_name,arguments",
+    [
+        ("Read", {"filepath": "README.md", "max_bytes": 4096, "result_content_max_chars": 1024}),
+        ("Read", {"path": "README.md"}),
+        ("Search", {"pattern": "TODO", "path": ".", "recursive": True,
+                    "max_files": 25, "max_matches": 10}),
+        ("Write", {"filepath": "fixture.txt", "content": "line\n", "write_mode": "replace"}),
+        ("FindAndReplace", {"filepath": "fixture.txt", "old_string": "line\n",
+                            "new_string": "", "replace_all": False}),
+        ("InsertAtEnd", {"filepath": "fixture.txt", "content": "next\n"}),
+        ("Bash", {"command": "printf fixture"}),
+        ("Bash", {"command": "printf fixture", "foreground_job_id": "job-fixture"}),
+        ("List", {"path": ".", "recursive": False, "max_entries": 20}),
+        ("List", {}),
+    ],
+)
+def test_supported_primitive_arguments_are_preserved_exactly(tool_name, arguments):
+    body = tool_response({"tool_name": tool_name, "arguments": arguments})
+    original = copy.deepcopy(body)
+    result = openrouter.parse_response(
+        body, request(enable_tools=True), catalog_row(), AIGateway._parse_local_tool_call
+    )
+    assert result["tool_calls"] == [{
+        "tool_name": tool_name, "arguments": arguments, "shell_mode": "read_only",
+        "timeout_sec": 30, "provider_call_id": "call-fixture",
+    }]
+    assert body == original
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"path": {"value": "README.md"}},
+        {"path": ["README.md"]},
+        {"filepath": None},
+        {"content": 123},
+        {"replace_all": "false"},
+        {"recursive": 1},
+        {"max_bytes": True},
+        {"max_files": "10"},
+        {"max_matches": 1.5},
+        {"path": "README.md", "unknown_option": True},
+        {"provider_call_id": "caller-supplied"},
+    ],
+)
+@pytest.mark.asyncio
+async def test_unadvertised_or_nonprimitive_arguments_fail_without_stripping(arguments):
+    body = tool_response({"tool_name": "Read", "arguments": arguments})
+    original = copy.deepcopy(body)
+    parse_tool = AsyncMock(side_effect=AssertionError("Invalid arguments reached parser"))
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=body))
+    ) as client:
+        with pytest.raises(ContractError):
+            await complete(request(enable_tools=True), client, parse_tool=parse_tool)
+    parse_tool.assert_not_called()
+    assert body == original
+
+
 @pytest.mark.asyncio
 async def test_exact_endpoint_per_request_credentials_no_client_mutation_or_native_sdk(monkeypatch):
     install_review(monkeypatch)
@@ -420,6 +525,112 @@ def test_hidden_reasoning_and_provider_private_fields_never_escape():
     )
 
 
+@pytest.mark.parametrize("mutation,expected", [
+    ("missing_usage", "missing_metering"),
+    ("provider_error", "provider_error"),
+    ("bad_id", "invalid_request_identity"),
+    ("tool_id", "invalid_tool_identity"),
+    ("metering", "invalid_metering"),
+    ("model", "unexpected_model"),
+    ("finish", "unconfirmed_completion"),
+])
+@pytest.mark.asyncio
+async def test_failure_diagnostics_are_fixed_categories_not_upstream_content(monkeypatch, mutation, expected):
+    body = tool_response()
+    if mutation == "missing_usage":
+        body.pop("usage")
+    elif mutation == "provider_error":
+        body["error"] = {"message": "private-provider-message"}
+    elif mutation == "bad_id":
+        body["id"] = "sk-private-key-shape"
+    elif mutation == "tool_id":
+        body["choices"][0]["message"]["tool_calls"][0].pop("id")
+    elif mutation == "metering":
+        body["usage"]["completion_tokens"] = -1
+    elif mutation == "model":
+        body["model"] = "private-not-selected"
+    else:
+        body["choices"][0]["finish_reason"] = "private-finish-message"
+    events, requests = [], []
+    monkeypatch.setattr(openrouter, "emit_metric", lambda name, tags: events.append((name, tags)))
+    def handler(req):
+        requests.append(req)
+        return httpx.Response(200, json=body)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(openrouter.OpenRouterFailure) as error:
+            await complete(request(enable_tools=True), client)
+    assert len(requests) == 1
+    assert error.value.diagnostic_reason == expected
+    assert error.value.provider_request_id == (None if mutation == "bad_id" else "synthetic-receipt")
+    assert events == [("openrouter_failure_total", {"reason": expected})]
+    assert "private-" not in str(error.value) + str(events)
+
+
+@pytest.mark.parametrize("field", ["id", "text", "tool_id"])
+@pytest.mark.parametrize("escaped", [False, True])
+@pytest.mark.asyncio
+async def test_reflected_credentials_never_enter_results_or_error_metadata(monkeypatch, field, escaped):
+    body = tool_response()
+    value = "prefix-" + SYNTHETIC_CREDENTIAL
+    if field == "id":
+        body["id"] = value
+    elif field == "text":
+        body["choices"][0]["message"]["content"] = value
+    else:
+        body["choices"][0]["message"]["tool_calls"][0]["id"] = value
+    raw = json.dumps(body)
+    if escaped:
+        raw = raw.replace(SYNTHETIC_CREDENTIAL, "".join(f"\\u{ord(c):04x}" for c in SYNTHETIC_CREDENTIAL))
+    events = []
+    monkeypatch.setattr(openrouter, "emit_metric", lambda name, tags: events.append((name, tags)))
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda _: httpx.Response(200, text=raw))) as client:
+        with pytest.raises(openrouter.OpenRouterFailure) as error:
+            await complete(request(enable_tools=True), client)
+    assert error.value.diagnostic_reason == "reflected_credential"
+    assert SYNTHETIC_CREDENTIAL not in str(vars(error.value)) + str(events)
+    assert events == [("openrouter_failure_total", {"reason": "reflected_credential"})]
+
+
+@pytest.mark.parametrize("value", [None, "", "x" * 257, "call\nunsafe", "sk-not-a-real-key", 1, {}])
+def test_generation_id_cannot_be_an_unbounded_or_key_shaped_token(value):
+    body = response()
+    body["id"] = value
+    with pytest.raises(ValueError, match="request identifier"):
+        openrouter.parse_response(body, request(), catalog_row(), AIGateway._parse_local_tool_call)
+
+
+def test_unknown_diagnostic_errors_never_echo_arbitrary_text():
+    for error in (ValueError("private-prompt"), KeyError("private-key"), TypeError("private-detail")):
+        assert "private" not in openrouter._failure_category(error)
+
+
+@pytest.mark.parametrize("native,expected", [
+    ("MALFORMED_FUNCTION_CALL", "provider_malformed_function_call"),
+    ("private-upstream-message", "provider_failed_completion"),
+])
+@pytest.mark.asyncio
+async def test_failed_native_completion_is_not_obscured_by_missing_usage(monkeypatch, native, expected):
+    body = response()
+    body.pop("usage")
+    body["choices"][0].update(finish_reason="error", native_finish_reason=native)
+    requests, events = [], []
+    monkeypatch.setattr(openrouter, "emit_metric", lambda name, tags: events.append((name, tags)))
+    parse_tool = AsyncMock(side_effect=AssertionError("Failed generation reached tool parser"))
+    def handler(req):
+        requests.append(req)
+        return httpx.Response(200, json=body)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        with pytest.raises(openrouter.OpenRouterFailure) as error:
+            await complete(request(enable_tools=True), client, parse_tool=parse_tool)
+    assert error.value.diagnostic_reason == expected
+    assert error.value.provider_request_id == "synthetic-receipt"
+    assert len(requests) == 1 and parse_tool.call_count == 0
+    assert events == [("openrouter_failure_total", {"reason": expected})]
+    assert "private-upstream-message" not in str(error.value) + str(events)
+    if native == "MALFORMED_FUNCTION_CALL":
+        assert "Choose another model" in error.value.detail
+
+
 @pytest.mark.parametrize("finish", ["length", "stop", "tool_calls", "content_filter", None])
 def test_completion_status_is_not_invented(finish):
     body = response()
@@ -450,6 +661,7 @@ def test_tools_are_requests_not_executed_and_require_opt_in():
             "arguments": {"path": "README.md"},
             "shell_mode": "read_only",
             "timeout_sec": 30,
+            "provider_call_id": "call-fixture",
         }
     ]
 
@@ -460,6 +672,87 @@ def test_valid_empty_tool_arguments_are_preserved_not_nested():
         body, request(enable_tools=True), catalog_row(), AIGateway._parse_local_tool_call
     )
     assert result["tool_calls"][0]["arguments"] == {}
+
+
+@pytest.mark.parametrize("call_id", ["a", "call-ABC_012.:-", "A" * 256])
+def test_native_call_id_is_preserved_without_rewriting(call_id):
+    body = tool_response()
+    body["choices"][0]["message"]["tool_calls"][0]["id"] = call_id
+    result = openrouter.parse_response(
+        body, request(enable_tools=True), catalog_row(), AIGateway._parse_local_tool_call
+    )
+    assert result["tool_calls"][0]["provider_call_id"] == call_id
+
+
+@pytest.mark.parametrize(
+    "call_id",
+    [None, "", True, 123, [], {}, "a" * 257, " call", "call ", "call/id", "call+id",
+     "call\n", "call\t", "call\x00", "call\x7f", "call\u00e9", "call\u202e",
+     "sk-fixture-not-a-real-key", "SK-or-v1-fixture-not-a-real-key"],
+)
+@pytest.mark.asyncio
+async def test_invalid_native_call_ids_are_sanitized_before_normalization(call_id):
+    body = tool_response()
+    body["choices"][0]["message"]["tool_calls"][0]["id"] = call_id
+    parse_tool = AsyncMock(side_effect=AssertionError("Invalid ID reached parser"))
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=body))
+    ) as client:
+        with pytest.raises(ContractError) as error:
+            await complete(request(enable_tools=True), client, parse_tool=parse_tool)
+    parse_tool.assert_not_called()
+    assert "fixture-not-a-real-key" not in error.value.detail
+
+
+@pytest.mark.parametrize("mutation", ["missing", "duplicate"])
+@pytest.mark.asyncio
+async def test_missing_or_duplicate_native_call_ids_fail_before_normalization(mutation):
+    body = tool_response()
+    calls = body["choices"][0]["message"]["tool_calls"]
+    if mutation == "missing":
+        calls[0].pop("id")
+    else:
+        calls.append(copy.deepcopy(calls[0]))
+    parse_tool = AsyncMock(side_effect=AssertionError("Invalid IDs reached parser"))
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda _: httpx.Response(200, json=body))
+    ) as client:
+        with pytest.raises(ContractError):
+            await complete(request(enable_tools=True), client, parse_tool=parse_tool)
+    parse_tool.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_distinct_native_ids_survive_gateway_and_cached_result_without_private_state(monkeypatch):
+    install_review(monkeypatch)
+    body = tool_response()
+    message = body["choices"][0]["message"]
+    second = copy.deepcopy(message["tool_calls"][0])
+    second["id"] = "call-fixture:2"
+    message["tool_calls"].append(second)
+    message["reasoning_details"] = [{"text": "private-thought", "signature": "private-signature"}]
+    message["tool_calls"][0]["extra_content"] = {"thought_signature": "private-signature"}
+    calls = []
+
+    def handler(req):
+        calls.append(req)
+        return httpx.Response(200, json=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        gateway = AIGateway(None, None, None, client)
+        req = request(enable_tools=True)
+        req._managed_model_config = catalog_row()
+        result = await gateway._call_openrouter(req, SYNTHETIC_CREDENTIAL)
+    expected = [{
+        "tool_name": "Read", "arguments": {"path": "README.md"},
+        "shell_mode": "read_only", "timeout_sec": 30, "provider_call_id": call_id,
+    } for call_id in ("call-fixture", "call-fixture:2")]
+    assert result.tool_calls == expected
+    assert len(calls) == 1
+    serialized = gateway._serialize_success_body(result)
+    replay = gateway._deserialize_result({"response_body_text": serialized})
+    assert replay.tool_calls == expected
+    assert "private-thought" not in serialized and "private-signature" not in serialized
 
 
 @pytest.mark.parametrize("mutation", ["name", "type", "json", "too_many", "too_large", "not_list"])
