@@ -1129,6 +1129,8 @@ class OpenVegasClient:
         shell_mode: str | None = None,
         timeout_sec: int | None = None,
         plan_mode: bool = False,
+        native_inference_request_id: str | None = None,
+        native_provider_call_id: str | None = None,
     ) -> dict:
         payload: dict = {
             "runtime_session_id": runtime_session_id,
@@ -1143,6 +1145,10 @@ class OpenVegasClient:
             payload["shell_mode"] = shell_mode
         if timeout_sec is not None:
             payload["timeout_sec"] = int(timeout_sec)
+        if native_inference_request_id is not None:
+            payload["native_inference_request_id"] = native_inference_request_id
+        if native_provider_call_id is not None:
+            payload["native_provider_call_id"] = native_provider_call_id
         return await self._request("POST", f"/agent/runs/{run_id}/tools/propose", json=payload)
 
     async def agent_tool_start(

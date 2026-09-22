@@ -55,6 +55,8 @@ class InferenceResult:
     web_search_sources: list[str] | None = None
     web_search_retry_without_tool: bool = False
     completion_status: str = "unknown"
+    # Set only by settlement/replay, never by a provider response or HTTP caller.
+    inference_request_id: str | None = field(default=None, init=False)
 
 
 @dataclass
@@ -463,6 +465,7 @@ class AIGateway:
                 result.provider_request_id,
             )
 
+        result.inference_request_id = request_id
         return result
 
     async def _cleanup_inference_after_failure(self, ctx: _InferenceExecutionContext) -> None:
@@ -1644,7 +1647,7 @@ class AIGateway:
                 "Idempotent replay body missing for succeeded request.",
             )
         payload = json.loads(str(raw))
-        return InferenceResult(
+        result = InferenceResult(
             text=str(payload.get("text", "")),
             completion_status=str(payload.get("completion_status", "unknown")),
             input_tokens=int(payload.get("input_tokens", 0)),
@@ -1657,6 +1660,8 @@ class AIGateway:
             web_search_sources=payload.get("web_search_sources") if isinstance(payload.get("web_search_sources"), list) else None,
             web_search_retry_without_tool=bool(payload.get("web_search_retry_without_tool", False)),
         )
+        result.inference_request_id = str(row["id"]) if row.get("id") is not None else None
+        return result
 
     @staticmethod
     def _is_stale(updated_at: datetime | None) -> bool:

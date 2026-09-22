@@ -696,6 +696,22 @@ async def _prepare_ask_context(
     )
 
 
+def _native_tool_references(result: Any, *, provider: str) -> list[dict]:
+    """Expose a settled internal request ID, never trust provider-supplied refs."""
+    request_id = getattr(result, "inference_request_id", None)
+    try:
+        valid = isinstance(request_id, str) and str(uuid.UUID(request_id)) == request_id
+    except ValueError:
+        valid = False
+    calls = []
+    for raw in result.tool_calls or []:
+        call = {k: v for k, v in raw.items() if k != "native_inference_request_id"}
+        if provider == "openrouter" and valid and isinstance(call.get("provider_call_id"), str):
+            call["native_inference_request_id"] = request_id
+        calls.append(call)
+    return calls
+
+
 async def _finalize_ask_result(
     prepared: _PreparedAskContext,
     *,
@@ -743,7 +759,7 @@ async def _finalize_ask_result(
         "input_tokens": result.input_tokens,
         "output_tokens": result.output_tokens,
         "provider_request_id": result.provider_request_id,
-        "tool_calls": result.tool_calls or [],
+        "tool_calls": _native_tool_references(result, provider=req.provider),
         "thread_id": prepared.thread_ctx.thread_id,
         "run_id": prepared.run_id,
         "thread_status": prepared.thread_ctx.thread_status,

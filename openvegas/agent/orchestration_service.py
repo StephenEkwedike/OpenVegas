@@ -34,9 +34,11 @@ from openvegas.agent.tool_cas import (
     heartbeat_tx,
     load_tool_for_result_tx,
     redact_hash_truncate,
+    redaction_required,
     terminalize_tx,
 )
 from openvegas.agent.tool_stream import publish_tool_event
+from openvegas.agent.native_history import accepted_native_receipts_tx, bind_native_call_tx, require_uuid
 from openvegas.contracts.errors import APIErrorCode, ContractError
 from openvegas.telemetry import emit_metric
 
@@ -635,8 +637,12 @@ class AgentOrchestrationService:
         shell_mode: str | None,
         timeout_sec: int | None,
         plan_mode: bool,
+        native_inference_request_id: str | None = None,
+        native_provider_call_id: str | None = None,
     ) -> MutationHTTPResult:
         del idempotency_key
+        if (native_inference_request_id is None) != (native_provider_call_id is None):
+            raise ContractError(APIErrorCode.INVALID_TRANSITION, "Native tool reference requires both IDs.")
         role_class = self._actor_role_class(actor_role)
         tool_name = str(tool_name).strip()
         if tool_name not in {t.value for t in ToolName}:
@@ -738,6 +744,14 @@ class AgentOrchestrationService:
                 started_at,
                 finished_at,
             )
+
+            if native_inference_request_id is not None:
+                await bind_native_call_tx(
+                    tx, run=run, inference_request_id=native_inference_request_id,
+                    provider_call_id=native_provider_call_id, tool_call_id=tool_call_id,
+                    tool_name=tool_name, arguments=normalized_args, shell_mode=shell_mode_norm,
+                    timeout_sec=timeout_value, normalize=self._normalize_tool_arguments,
+                )
 
             if status == "blocked":
                 await self._insert_durable_event_tx(
@@ -1033,12 +1047,14 @@ class AgentOrchestrationService:
         if bool(stderr_truncated) and not stderr_env.truncated:
             raise ContractError(APIErrorCode.INVALID_TRANSITION, "stderr_truncated mismatch.")
 
-        incoming_hash = result_submission_hash_value or result_submission_hash(
+        incoming_hash = result_submission_hash(
             result_status=result_status,
             result_payload=result_payload,
             stdout_sha256=stdout_env.sha256,
             stderr_sha256=stderr_env.sha256,
         )
+        if result_submission_hash_value is not None and result_submission_hash_value != incoming_hash:
+            raise ContractError(APIErrorCode.INVALID_TRANSITION, "result_submission_hash mismatch.")
 
         async with self.db.transaction() as tx:
             run = await tx.fetchrow(
@@ -1056,6 +1072,8 @@ class AgentOrchestrationService:
             await self._assert_runtime_session_tx(tx=tx, run=run, runtime_session_id=runtime_session_id)
 
             tool = await load_tool_for_result_tx(tx, run_id=run_id, tool_call_id=tool_call_id)
+            if str(tool["execution_token"] or "") != execution_token:
+                raise ContractError(APIErrorCode.INVALID_TRANSITION, "Tool result ownership mismatch.")
             tool_status = str(tool["status"] or "")
             if tool_status == "cancelled":
                 raise ContractError(APIErrorCode.INVALID_TRANSITION, "Tool was cancelled.")
@@ -1174,7 +1192,11 @@ class AgentOrchestrationService:
                 run_version=int(run["version"]),
                 actor_id=user_id,
                 event_type=event_type,
-                payload={"tool_call_id": tool_call_id, "status": result_status},
+                payload={
+                    "tool_call_id": tool_call_id, "status": result_status,
+                    "source": "runtime_callback", "redaction_checked": True,
+                    "redaction_required": redaction_required([stdout, stderr, result_payload, payload_text]),
+                },
             )
             publish_tool_event(
                 run_id=run_id,
@@ -1289,6 +1311,24 @@ class AgentOrchestrationService:
                     event={"run_id": run_id, "tool_call_id": tool_call_id, "status": "timed_out"},
                 )
         return touched
+
+    async def native_tool_receipts(
+        self, *, user_id: str, run_id: str, runtime_session_id: str, provider: str, model: str,
+    ) -> dict:
+        for value in (user_id, run_id, runtime_session_id):
+            require_uuid(value)
+        async with self.db.transaction() as tx:
+            run = await tx.fetchrow(
+                "SELECT * FROM agent_runs WHERE id=$1::uuid AND user_id=$2::uuid FOR UPDATE",
+                run_id, user_id,
+            )
+            if not run:
+                raise ContractError(APIErrorCode.INVALID_TRANSITION, "Run not found.")
+            await self._assert_runtime_session_tx(tx=tx, run=run, runtime_session_id=runtime_session_id)
+            receipts = await accepted_native_receipts_tx(tx, run=run, provider=provider, model=model)
+            return {"scope": "settled_native_call_receipts_v1", "receipts": receipts,
+                    "conversation_replay_supported": False,
+                    "original_turn_scope_verified": False, "execution_attested": False}
 
     async def _assert_runtime_session_tx(self, *, tx: Any, run: Any, runtime_session_id: str) -> None:
         if not runtime_session_id:

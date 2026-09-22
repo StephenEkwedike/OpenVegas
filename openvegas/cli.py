@@ -3968,6 +3968,33 @@ def _provider_call_identity(value: Any) -> dict[str, str]:
     return {}
 
 
+def _native_inference_identity(value: Any) -> dict[str, str]:
+    if not isinstance(value, str) or len(value) != 36:
+        return {}
+    try:
+        if str(uuid.UUID(value)) == value:
+            return {"native_inference_request_id": value}
+    except ValueError:
+        pass
+    return {}
+
+
+def _native_tool_proposal_metadata(
+    tool_req: dict[str, Any], *, enabled: bool = False,
+) -> dict[str, str]:
+    """Select receipt references, never approval, from a prepared native call."""
+    if not enabled:
+        return {}
+    metadata = _native_inference_identity(tool_req.get("native_inference_request_id"))
+    if not metadata:
+        return {}
+    provider = _provider_call_identity(tool_req.get("provider_call_id"))
+    if provider:
+        metadata["native_provider_call_id"] = provider["provider_call_id"]
+    # Keep a native half-pair visible for server rejection, not legacy downgrade.
+    return metadata
+
+
 def _collect_tool_call_candidates(tool_calls_payload: Any, fallback_text: str) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     if isinstance(tool_calls_payload, list):
@@ -3992,6 +4019,7 @@ def _collect_tool_call_candidates(tool_calls_payload: Any, fallback_text: str) -
                         "shell_mode": item.get("shell_mode", "read_only"),
                         "timeout_sec": item.get("timeout_sec", 30),
                         **_provider_call_identity(item.get("provider_call_id")),
+                        **_native_inference_identity(item.get("native_inference_request_id")),
                     }
                 )
                 continue
@@ -4031,6 +4059,7 @@ def _collect_tool_call_candidates(tool_calls_payload: Any, fallback_text: str) -
                     "shell_mode": parsed.get("shell_mode", "read_only"),
                     "timeout_sec": parsed.get("timeout_sec", 30),
                     **_provider_call_identity(item.get("id")),
+                    **_native_inference_identity(item.get("native_inference_request_id")),
                 }
             )
 
@@ -4042,7 +4071,10 @@ def _collect_tool_call_candidates(tool_calls_payload: Any, fallback_text: str) -
         # Model-authored prose is not a source of native provider correlation IDs.
         candidates.append({
             key: value for key, value in fallback_req.items()
-            if key not in {"provider_call_id", "provider_request_id"}
+            if key not in {
+                "native_inference_request_id", "native_provider_call_id",
+                "provider_call_id", "provider_request_id", "request_id",
+            }
         })
     return candidates
 
@@ -4407,6 +4439,8 @@ def _preprocess_tool_request_for_runtime(
         "shell_mode": shell_mode,
         "timeout_sec": timeout_sec,
         **_provider_call_identity(tool_req.get("provider_call_id")),
+        # Preserve provenance through rewrites; the server checks the exact payload.
+        **_native_inference_identity(tool_req.get("native_inference_request_id")),
     }
     if write_meta is not None:
         prepared["_write_meta"] = write_meta
@@ -7781,6 +7815,9 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                             shell_mode=str(shell_mode) if shell_mode is not None else None,
                             timeout_sec=timeout_sec,
                             plan_mode=plan_mode,
+                            **_native_tool_proposal_metadata(
+                                tool_req, enabled=_env_flag("OPENVEGAS_NATIVE_TOOL_HISTORY", "0"),
+                            ),
                         ),
                         endpoint="propose",
                     )
@@ -7798,6 +7835,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                                 "arguments": dict(arguments) if isinstance(arguments, dict) else {},
                                 "shell_mode": str(shell_mode or "read_only"),
                                 "timeout_sec": timeout_sec,
+                                **_provider_call_identity(tool_req.get("provider_call_id")),
+                                **_native_inference_identity(tool_req.get("native_inference_request_id")),
                             }
                     detail = body.get("detail", e.detail)
                     console.print(f"[red]{code}: {detail}[/red]")
@@ -7852,6 +7891,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                                 "arguments": dict(arguments) if isinstance(arguments, dict) else {},
                                 "shell_mode": str(shell_mode or "read_only"),
                                 "timeout_sec": timeout_sec,
+                                **_provider_call_identity(tool_req.get("provider_call_id")),
+                                **_native_inference_identity(tool_req.get("native_inference_request_id")),
                             }
                     detail = body.get("detail", e.detail)
                     console.print(f"[red]{code}: {detail}[/red]")
@@ -8075,6 +8116,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                                 "arguments": dict(arguments) if isinstance(arguments, dict) else {},
                                 "shell_mode": str(shell_mode or "read_only"),
                                 "timeout_sec": timeout_sec,
+                                **_provider_call_identity(tool_req.get("provider_call_id")),
+                                **_native_inference_identity(tool_req.get("native_inference_request_id")),
                             }
                     detail = body.get("detail", e.detail)
                     console.print(f"[red]{code}: {detail}[/red]")
