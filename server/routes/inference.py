@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field, model_validator
 from openvegas.capabilities import ReasoningEffort, resolve_capability
 from openvegas.gateway.providers import get_model_review, validate_reasoning_effort
 from openvegas.contracts.errors import APIErrorCode, ContractError
-from openvegas.contracts.native_scope import NativeInferenceScope
+from openvegas.contracts.native_scope import NativeContinuationRef, NativeInferenceScope
 from openvegas.events import mk_event
 from openvegas.security.policy import (
     contains_obvious_secret,
@@ -270,9 +270,15 @@ class AskRequest(BaseModel):
     enable_web_search: bool = False
     attachments: list[str] = Field(default_factory=list)
     native_scope: NativeInferenceScope | None = None
+    native_history: bool = Field(default=False, strict=True)
+    native_continuation: NativeContinuationRef | None = None
 
     @model_validator(mode="after")
     def validate_native_generation(self):
+        if self.native_history and self.native_scope is None:
+            raise ValueError("Native history requires an owned scope.")
+        if self.native_continuation is not None and not self.native_history:
+            raise ValueError("Native continuation requires explicit native history.")
         if self.native_scope is not None:
             from server.services.inference_replay import _key
             try:
@@ -282,8 +288,7 @@ class AskRequest(BaseModel):
             if (self.provider != "openrouter" or self.enable_tools is not True
                     or self.persist_context is not False or self.thread_id is not None
                     or self.conversation_mode != "ephemeral"):
-                raise ValueError("Native ownership requires OpenRouter tools, ephemeral mode and no thread/persistence; "
-                                 "native follow-up is not implemented.")
+                raise ValueError("Native ownership requires OpenRouter tools, ephemeral mode and no thread/persistence.")
         return self
 
 
@@ -466,16 +471,31 @@ async def _prepare_ask_context(
                 command=req.model_dump(mode="json", exclude={"idempotency_key"}),
                 **({"allow_native_dispatch": os.getenv("OPENVEGAS_NATIVE_GENERATION_SCOPE", "0") == "1"}
                    if req.native_scope is not None else {}),
+                **({"allow_native_history": os.getenv("OPENVEGAS_NATIVE_GENERATION_HISTORY", "0") == "1"}
+                   if req.native_history else {}),
             )
         except ContractError as exc:
             return JSONResponse(status_code=409, content={"error": exc.code.value, "detail": exc.detail})
         if claim.response is not None:
             return claim.response
     try:
+        if claim is not None and claim.native_claim is not None:
+            from openvegas.agent.native_continuation import restore_request
+            req = restore_request(req, claim.native_claim)
         prepared = await _prepare_authorized_ask_context(
             req, user=user, run_id=run_id, started=started,
             gateway_key=claim.gateway_idempotency_key if claim is not None else req.idempotency_key,
         )
+        if isinstance(prepared, _PreparedAskContext) and req.native_scope is not None:
+            if claim is None or claim.native_claim is None:
+                raise ContractError(APIErrorCode.INVALID_TRANSITION, "Native generation ownership was not reserved.")
+            from openvegas.agent.native_continuation import apply_request_history
+            prepared.inference_request._native_generation_claim = claim.native_claim
+            await apply_request_history(prepared, claim.native_claim)
+    except ContractError as exc:
+        if claim is not None:
+            await replay.abandon_before_dispatch(claim)
+        return JSONResponse(status_code=400, content={"error": exc.code.value, "detail": exc.detail})
     except BaseException:
         if claim is not None:
             await replay.abandon_before_dispatch(claim)
@@ -485,10 +505,6 @@ async def _prepare_ask_context(
             await replay.abandon_before_dispatch(claim)
         return prepared
     prepared.replay_service, prepared.replay_claim = replay, claim
-    if req.native_scope is not None:
-        if claim is None or claim.native_claim is None:
-            raise ContractError(APIErrorCode.INVALID_TRANSITION, "Native generation ownership was not reserved.")
-        prepared.inference_request._native_generation_claim = claim.native_claim
     return prepared
 
 

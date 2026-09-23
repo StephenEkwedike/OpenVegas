@@ -69,7 +69,9 @@ async def lock_run_tx(tx: Any, *, user_id: str, scope: NativeInferenceScope) -> 
     return run
 
 
-async def require_fresh_projection_tx(tx: Any, *, run: Any, scope: NativeInferenceScope) -> None:
+async def require_fresh_projection_tx(
+    tx: Any, *, run: Any, scope: NativeInferenceScope, continuing: bool = False,
+) -> None:
     if (run["state"] not in {"created", "running"} or run.get("cancel_requested_at")
             or (run.get("expires_at") is not None and run["expires_at"] <= datetime.now(UTC))):
         reject("Native generation requires an active, non-cancelling run.")
@@ -83,7 +85,7 @@ async def require_fresh_projection_tx(tx: Any, *, run: Any, scope: NativeInferen
     if (run["version"] != scope.expected_run_version
             or valid_actions_signature(run["version"], actions) != scope.expected_valid_actions_signature):
         raise ContractError(APIErrorCode.STALE_PROJECTION, "Native generation projection is stale.")
-    if (await tx.fetchrow("SELECT 1 FROM agent_run_tool_calls WHERE run_id=$1::uuid LIMIT 1", scope.run_id)
+    if not continuing and (await tx.fetchrow("SELECT 1 FROM agent_run_tool_calls WHERE run_id=$1::uuid LIMIT 1", scope.run_id)
             or await tx.fetchrow("SELECT 1 FROM agent_chat_turns WHERE run_id=$1::uuid LIMIT 1", scope.run_id)):
         reject("Native follow-up is not implemented; only one generation on a fresh run is supported.")
 
@@ -97,6 +99,10 @@ class NativeGenerationClaim:
     owner_token: str = field(repr=False)
     command_hash: str
     gateway_key: str = field(repr=False)
+    history_revision: int | None = None
+    previous_request_id: str | None = None
+    continuation_payload_json: str | None = field(default=None, repr=False)
+    history_inputs_json: str | None = field(default=None, repr=False)
 
 
 async def lock_dispatch_claim_tx(tx: Any, claim: NativeGenerationClaim, req: Any) -> None:
@@ -106,7 +112,8 @@ async def lock_dispatch_claim_tx(tx: Any, claim: NativeGenerationClaim, req: Any
             or req.provider != "openrouter" or not req.enable_tools):
         reject("Native generation account or request does not match its claim.")
     run = await lock_run_tx(tx, user_id=claim.user_id, scope=claim.scope)
-    await require_fresh_projection_tx(tx, run=run, scope=claim.scope)
+    await require_fresh_projection_tx(tx, run=run, scope=claim.scope,
+                                      continuing=claim.previous_request_id is not None)
     row = await tx.fetchrow(
         "SELECT * FROM inference_route_commands WHERE id=$1::uuid FOR UPDATE", claim.route_command_id,
     )
@@ -120,6 +127,11 @@ async def lock_dispatch_claim_tx(tx: Any, claim: NativeGenerationClaim, req: Any
     body = json.loads(row["response_body_text"])
     if body.get("owner_token") != claim.owner_token or body.get("gateway_key") != claim.gateway_key:
         reject("Native generation claim does not match its durable reservation.")
+    if claim.history_revision is not None and (run.get("native_history_revision") != claim.history_revision
+                or row.get("native_history_revision") != claim.history_revision
+                or (str(row["previous_native_request_id"]) if row.get("previous_native_request_id") else None)
+                != claim.previous_request_id):
+        reject("Native history revision changed before dispatch.")
 
 
 async def link_gateway_tx(tx: Any, claim: NativeGenerationClaim, request_id: str) -> None:
@@ -146,13 +158,18 @@ async def verify_source_scope_tx(tx: Any, *, run: Any, source: Any, request_id: 
     run_claim = run.get("native_generation_claim_id")
     if source_claim is None and run_claim is None:
         return None
-    if not source_claim or str(source_claim) != str(run_claim):
+    if not source_claim or not run_claim:
         reject("Native generation belongs to another run, or lacks original scope ownership.")
     row = await tx.fetchrow("SELECT * FROM inference_route_commands WHERE id=$1::uuid", str(source_claim))
     if (not row or str(row["user_id"]) != str(run["user_id"])
             or str(row["native_run_id"]) != str(run["id"])
             or str(row["gateway_request_id"]) != request_id):
         reject("Native generation ownership linkage does not match this proposal.")
+    if str(source_claim) != str(run_claim) and (
+                row.get("native_history_revision") is None or run.get("native_history_revision") is None
+                or row["native_history_revision"] >= run["native_history_revision"]
+                or row["status"] != "succeeded"):
+        reject("Native generation revision is not a completed owned ancestor.")
     doc = stored_scope(row)
     scope = parse_scope(doc["scope"])
     if (scope.run_id != str(run["id"]) or scope.runtime_session_id != str(run["runtime_session_id"])

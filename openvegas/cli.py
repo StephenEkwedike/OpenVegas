@@ -4185,7 +4185,25 @@ def _preprocess_tool_request_for_runtime(
     workspace_root: str,
     tool_observations: list[dict[str, Any]],
     force_patch_intent: bool = False,
+    native_exact: bool = False,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    if native_exact:
+        from openvegas.agent.native_history import expected_runtime_call
+        from openvegas.contracts.errors import ContractError
+
+        def normalize(*, tool_name, arguments):
+            args = dict(arguments)
+            if tool_name == "fs_read" and "path" not in args and "filepath" in args:
+                args["path"] = args["filepath"]
+            if tool_name in {"fs_list", "fs_search"}:
+                args.setdefault("path", ".")
+            return args
+
+        try:
+            name, args, mode = expected_runtime_call(tool_req, normalize)
+            return {**tool_req, "tool_name": name, "arguments": args, "shell_mode": mode}, None
+        except ContractError as exc:
+            return None, {"status": "blocked", "error": exc.code.value, "detail": exc.detail}
     tool_name_raw = str(tool_req.get("tool_name", "")).strip()
     raw_token = tool_name_raw.lower().replace("-", "_")
     if tool_name_raw and _tool_abi_mode() == "strict":
@@ -6374,6 +6392,23 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
 
         from openvegas.client import APIError
         emote_turn = emote_bridge.current_turn
+        native_history_mode = bool(
+            current_provider == "openrouter"
+            and _env_flag("OPENVEGAS_CHAT_NATIVE_GENERATION_SCOPE", "0")
+            and _env_flag("OPENVEGAS_CHAT_NATIVE_GENERATION_HISTORY", "0")
+        )
+        if native_generation_session.history_active and (
+            not native_history_mode or isinstance(getattr(client, "_canonical_chat", None), dict)
+        ):
+            raise APIError(409, "Native history cannot switch to a different provider or text-only history path. Start a fresh session explicitly.")
+        if native_history_mode and native_generation_session.history_active:
+            if not native_generation_session.finalized and not await _chat_modal(lambda: Confirm.ask(
+                "The previous native task is unfinished or unconfirmed. Start a separate task without resuming or retrying it?",
+                default=False,
+            )):
+                raise APIError(409, "Previous task retained. No new request or automatic retry was sent.")
+            await _reset_native_task()
+            console.print("Starting a separate native task; previous tool state is not transferred.", markup=False)
 
         canonical_chat = getattr(client, "_canonical_chat", None)
         if isinstance(canonical_chat, dict):
@@ -6463,14 +6498,17 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 if not await _ensure_runtime_run(wait=True):
                     raise APIError(409, "Native generation requires a registered workspace; no request was sent.")
                 try:
-                    scope = native_generation_session.reserve(key=idempotency_key, scope={
+                    native_context = native_generation_session.prepare(key=idempotency_key, scope={
                         "run_id": current_run_id, "runtime_session_id": runtime_session_id,
                         "expected_run_version": current_run_version,
                         "expected_valid_actions_signature": current_signature,
-                    })
+                    }, options={"provider": current_provider, "model": current_model,
+                                "enable_tools": enable_tools, "enable_web_search": enable_web_search,
+                                "attachments": list(attachments), "reasoning_effort": reasoning_effort},
+                        history=_env_flag("OPENVEGAS_CHAT_NATIVE_GENERATION_HISTORY", "0"))
                 except ValueError as exc:
                     raise APIError(409, str(exc)) from exc
-                request_context = {"native_scope": scope, "thread_id": None,
+                request_context = {**native_context, "thread_id": None,
                                    "conversation_mode": "ephemeral", "persist_context": False}
 
             def checked_result(result):
@@ -7149,12 +7187,19 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 raise last_exc
             raise RuntimeError("Unexpected mutation retry state.")
 
+        native_pending_calls: list[dict[str, Any]] = []
+        native_proposals: dict[str, dict[str, Any]] = {}
+        native_propose_keys: dict[str, str] = {}
+        native_start_keys: dict[str, str] = {}
         max_tool_steps = max(4, min(40, int(os.getenv("OPENVEGAS_CHAT_MAX_TOOL_STEPS", "24"))))
         for step in range(max_tool_steps):
             cleaned_text = ""
             model_text = ""
             candidate_tool_calls: list[dict[str, Any]] = []
-            if state.pending_retry_tool_req is not None:
+            retrying_native_batch = bool(native_history_mode and native_pending_calls)
+            if retrying_native_batch:
+                candidate_tool_calls, native_pending_calls = native_pending_calls, []
+            elif state.pending_retry_tool_req is not None:
                 candidate_tool_calls = [state.pending_retry_tool_req]
                 state.pending_retry_tool_req = None
             force_patch_intent = bool(
@@ -7167,6 +7212,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
 
             if (
                 step == 0
+                and not native_history_mode
                 and not candidate_tool_calls
                 and not tool_observations
                 and (planner_edit_intent or _is_patch_smoke_intent(user_message))
@@ -7232,7 +7278,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     else combined_attachment_context
                 )
 
-                enable_local_tools_turn = bool(_has_workspace_tooling_intent(user_message))
+                enable_local_tools_turn = native_history_mode or bool(_has_workspace_tooling_intent(user_message))
                 if not enable_local_tools_turn:
                     if web_search_activity_turn:
                         _render_capability_status("web_search", "searching...")
@@ -7334,8 +7380,20 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 model_text = _sanitize_user_visible_response_text(str(result.get("text", "")).strip())
                 cleaned_text = model_text
                 candidate_tool_calls = _collect_tool_call_candidates(result.get("tool_calls"), model_text)
+                if native_history_mode:
+                    # Native calls come only from the validated provider receipt, never prose.
+                    candidate_tool_calls = _collect_tool_call_candidates(result.get("tool_calls"), "")
+                    if len(candidate_tool_calls) != len(result.get("tool_calls") or []):
+                        raise APIError(409, "Native tool calls could not be preserved; no continuation was sent.")
+                    if not candidate_tool_calls:
+                        render_assistant(console, cleaned_text)
+                        last_assistant_text_for_turn = cleaned_text
+                        render_status_bar(console, _status_actor(), f"cost {result.get('v_cost', '?')} $V", workspace_root)
+                        _render_usage_summary(result)
+                        emote_bridge.finish(success=bool(cleaned_text), turn=emote_turn)
+                        return bool(cleaned_text)
                 if (
-                    web_search_effective_turn
+                    not native_history_mode and web_search_effective_turn
                     and not candidate_tool_calls
                     and _is_scrape_request(user_message)
                     and _is_scrape_refusal_text(model_text)
@@ -7401,7 +7459,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 )
                 _render_usage_summary(result if isinstance(result, dict) else {})
 
-            candidate_tool_calls, synth_pre_errors, synth_pre_fired = _maybe_prepend_synth_write(
+            candidate_tool_calls, synth_pre_errors, synth_pre_fired = (candidate_tool_calls, [], False) if native_history_mode else _maybe_prepend_synth_write(
                 tool_reqs=candidate_tool_calls,
                 user_message=user_message,
                 model_text=model_text,
@@ -7473,6 +7531,9 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
 
             preprocessed_calls: list[dict[str, Any]] = []
             for raw_call in candidate_tool_calls:
+                if retrying_native_batch:
+                    preprocessed_calls.append(raw_call)
+                    continue
                 prepared, prep_error = _preprocess_tool_request_for_runtime(
                     tool_req=raw_call,
                     user_message=user_message,
@@ -7480,8 +7541,11 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     workspace_root=workspace_root,
                     tool_observations=tool_observations,
                     force_patch_intent=planner_edit_intent,
+                    native_exact=native_history_mode,
                 )
                 if prep_error is not None:
+                    if native_history_mode:
+                        raise APIError(409, "Native tool preparation failed; its original call was not replaced or dropped.")
                     tool_observations.append(prep_error)
                     continue
                 if prepared is not None:
@@ -7489,7 +7553,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
 
             # Recovery: after preprocessing, if executable calls are still non-mutating
             # (or empty), synthesize and preprocess Write from model code block.
-            preprocessed_calls, synth_post_errors, _ = _maybe_prepend_synth_write(
+            preprocessed_calls, synth_post_errors, _ = (preprocessed_calls, [], False) if native_history_mode else _maybe_prepend_synth_write(
                 tool_reqs=preprocessed_calls,
                 user_message=user_message,
                 model_text=model_text,
@@ -7543,7 +7607,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
 
             # Continue-aligned execution discipline: process one tool call at a time,
             # then re-ask model with fresh observations.
-            if len(preprocessed_calls) > 1:
+            if len(preprocessed_calls) > 1 and not native_history_mode:
                 emit_metric(
                     "tool_batch_truncated_total",
                     {"count": str(len(preprocessed_calls))},
@@ -7555,7 +7619,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             policy_denied = False
             mutation_conflict = False
             terminal_reason: str | None = None
-            for tool_req in preprocessed_calls:
+            for native_call_index, tool_req in enumerate(preprocessed_calls):
                 tool_name = str(tool_req.get("tool_name", "")).strip()
                 arguments = tool_req.get("arguments", {})
                 shell_mode = tool_req.get("shell_mode")
@@ -7618,10 +7682,14 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
 
                 policy = evaluate_tool_policy(
                     tool_name=tool_name,
-                    shell_mode=str(shell_mode or "read_only"),
+                    # Arbitrary Bash is not sandboxed read-only. A provider label
+                    # must never grant permission; keep the wire call unchanged.
+                    shell_mode="mutating" if native_history_mode and tool_name == "shell_run" else str(shell_mode or "read_only"),
                     approval_mode=approval_mode,
                 )
                 if policy == ToolPolicyDecision.EXCLUDE:
+                    if native_history_mode:
+                        raise APIError(409, "Native tool excluded by your policy. No tool or replacement inference was executed.")
                     policy_denied = True
                     tool_observations.append(
                         {
@@ -7899,7 +7967,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                             )
 
                 call_key = _semantic_tool_signature(tool_name, arguments, str(shell_mode or "read_only"))
-                if executed_tool_calls.get(call_key, 0) >= 1:
+                if executed_tool_calls.get(call_key, 0) >= 1 and not native_history_mode:
                     duplicate_suppressed = True
                     if tool_name == "fs_read":
                         emit_metric("tool_duplicate_read_suppressed_total", {"tool": "fs_read"})
@@ -7932,6 +8000,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         _chat_drain_stdin()
                         apply_approval_decision(session_approval, action_scope, decision)
                         if decision == ApprovalDecision.DENY_AND_REPLAN:
+                            if native_history_mode:
+                                raise APIError(409, "Native tool permission was declined. That tool was not executed and no replacement inference was sent.")
                             policy_denied = True
                             tool_observations.append(
                                 {
@@ -7942,31 +8012,45 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                             )
                             continue
 
+                native_call_key = f"{tool_req.get('native_inference_request_id')}:{tool_req.get('provider_call_id')}"
+                propose_key = native_propose_keys.setdefault(native_call_key, f"tool-propose-{uuid.uuid4()}") if native_history_mode else None
+                start_key = native_start_keys.setdefault(native_call_key, f"tool-start-{uuid.uuid4()}") if native_history_mode else None
                 try:
-                    proposed = await _call_with_stale_retry(
-                        lambda: client.agent_tool_propose(
-                            run_id=current_run_id,
-                            runtime_session_id=runtime_session_id,
-                            expected_run_version=current_run_version,
-                            expected_valid_actions_signature=current_signature,
-                            idempotency_key=f"tool-propose-{uuid.uuid4()}",
-                            tool_name=tool_name,
-                            arguments=arguments,
-                            shell_mode=str(shell_mode) if shell_mode is not None else None,
-                            timeout_sec=timeout_sec,
-                            plan_mode=plan_mode,
-                            **_native_tool_proposal_metadata(
-                                tool_req, enabled=(
-                                    _env_flag("OPENVEGAS_NATIVE_TOOL_HISTORY", "0")
-                                    or _env_flag("OPENVEGAS_CHAT_NATIVE_GENERATION_SCOPE", "0")
+                    proposed = native_proposals.get(native_call_key) if native_history_mode else None
+                    reusing_native_proposal = proposed is not None
+                    if proposed is None:
+                        proposed = await _call_with_stale_retry(
+                            lambda: client.agent_tool_propose(
+                                run_id=current_run_id,
+                                runtime_session_id=runtime_session_id,
+                                expected_run_version=current_run_version,
+                                expected_valid_actions_signature=current_signature,
+                                idempotency_key=propose_key or f"tool-propose-{uuid.uuid4()}",
+                                tool_name=tool_name,
+                                arguments=arguments,
+                                shell_mode=str(shell_mode) if shell_mode is not None else None,
+                                timeout_sec=timeout_sec,
+                                plan_mode=plan_mode,
+                                **_native_tool_proposal_metadata(
+                                    tool_req, enabled=(
+                                        _env_flag("OPENVEGAS_NATIVE_TOOL_HISTORY", "0")
+                                        or _env_flag("OPENVEGAS_CHAT_NATIVE_GENERATION_SCOPE", "0")
+                                    ),
                                 ),
                             ),
-                        ),
-                        endpoint="propose",
-                    )
+                            endpoint="propose",
+                        )
+                        if native_history_mode:
+                            native_proposals[native_call_key] = proposed
                 except APIError as e:
                     body = e.data if isinstance(e.data, dict) else {}
                     code = body.get("error", "tool_propose_failed")
+                    if native_history_mode:
+                        if code == "active_mutation_in_progress" and not state.active_mutation_timeout_hit:
+                            native_pending_calls = preprocessed_calls[native_call_index:]
+                            mutation_conflict = True
+                            break
+                        raise APIError(e.status, "Native tool proposal was not accepted. Task paused; no replacement inference was sent.", data=body) from e
                     if code in {"stale_projection", "idempotency_conflict", "active_mutation_in_progress"}:
                         emit_metric("tool_cas_conflict_total", {"endpoint": "propose", "error": code})
                     if code == "active_mutation_in_progress":
@@ -7988,9 +8072,12 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         break
                     continue
 
-                _update_fence(proposed)
+                if not reusing_native_proposal:
+                    _update_fence(proposed)
                 tool_request = proposed.get("tool_request")
                 if not isinstance(tool_request, dict):
+                    if native_history_mode:
+                        raise APIError(502, "Native proposal had no valid tool request. Task paused before execution.")
                     err = proposed.get("error")
                     if err:
                         console.print(f"[yellow]{err}: {proposed.get('detail', '')}[/yellow]")
@@ -8002,6 +8089,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 tool_call_id = str(tool_request.get("tool_call_id", ""))
                 execution_token = str(tool_request.get("execution_token", ""))
                 if not tool_call_id or not execution_token:
+                    if native_history_mode:
+                        raise APIError(502, "Native proposal had no execution identity. Task paused before execution.")
                     console.print("[red]Invalid tool request payload from server.[/red]")
                     tool_observations.append({"tool_name": tool_name, "status": "start_error", "error": "invalid_tool_request_payload"})
                     continue
@@ -8015,7 +8104,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                             execution_token=execution_token,
                             expected_run_version=current_run_version,
                             expected_valid_actions_signature=current_signature,
-                            idempotency_key=f"tool-start-{uuid.uuid4()}",
+                            idempotency_key=start_key or f"tool-start-{uuid.uuid4()}",
                         ),
                         endpoint="start",
                     )
@@ -8023,6 +8112,12 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 except APIError as e:
                     body = e.data if isinstance(e.data, dict) else {}
                     code = body.get("error", "tool_start_failed")
+                    if native_history_mode:
+                        if code == "active_mutation_in_progress" and not state.active_mutation_timeout_hit:
+                            native_pending_calls = preprocessed_calls[native_call_index:]
+                            mutation_conflict = True
+                            break
+                        raise APIError(e.status, "Native tool start was not confirmed. Task paused without execution or replacement inference.", data=body) from e
                     if code in {"stale_projection", "idempotency_conflict", "active_mutation_in_progress"}:
                         emit_metric("tool_cas_conflict_total", {"endpoint": "start", "error": code})
                     if code == "active_mutation_in_progress":
@@ -8061,6 +8156,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 if tool_name == "shell_run":
                     streamed_tools_seen["shell_run"] = True
                 if outcome is None:
+                    if native_history_mode:
+                        raise APIError(409, "Native tool execution became inactive or uncertain. Task paused; it will not be executed again.")
                     emit_metric(
                         "tool_heartbeat_miss_total",
                         {"remote_status": str(inactive_status or "inactive")},
@@ -8248,6 +8345,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     body = e.data if isinstance(e.data, dict) else {}
                     _update_fence(body)
                     code = body.get("error", "tool_result_failed")
+                    if native_history_mode:
+                        raise APIError(e.status, "Native result acknowledgement is unconfirmed. Task paused; the tool will not be executed again.", data=body) from e
                     if code in {"stale_projection", "idempotency_conflict", "active_mutation_in_progress"}:
                         emit_metric("tool_cas_conflict_total", {"endpoint": "result", "error": code})
                     if code == "active_mutation_in_progress":
@@ -8356,6 +8455,10 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         return True
                     continue
 
+            if native_history_mode:
+                if native_pending_calls or did_any_execution:
+                    continue
+                raise APIError(409, "Native tool batch did not complete. Task paused; no calls were silently dropped.")
             if did_any_execution:
                 loop_action = await _continue_or_finalize_for_completion(
                     reason_if_finalize="completed",
@@ -8426,6 +8529,9 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     return True
                 continue
         console.print(f"[yellow]Stopped after max tool iterations ({max_tool_steps}).[/yellow]")
+        if native_history_mode:
+            console.print("Native task paused at the iteration limit. No finalizer or automatic retry was sent.", markup=False)
+            return False
         if completion_criteria.active and not _completion_eval().satisfied:
             final_res = await _request_final_response(tool_observations)
             action = await _force_finalize(final_res, reason="completion_criteria_unmet_after_retries")
@@ -8520,6 +8626,14 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             return bool(await runtime_run_task)
         except Exception:
             return False
+
+    async def _reset_native_task() -> None:
+        nonlocal native_generation_session, current_run_id, current_run_version, current_signature
+        previous = current_run_id, current_run_version, current_signature
+        if not await _create_and_register_runtime_run() or current_run_id == previous[0]:
+            current_run_id, current_run_version, current_signature = previous
+            raise APIError(409, "Could not register a fresh native task. No model request was sent.")
+        native_generation_session = NativeGenerationSession()
 
     async def _bootstrap_chat_session() -> None:
         await asyncio.gather(
@@ -9371,6 +9485,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                             })
                             if not created.get("thread_id") or not created.get("revision"):
                                 raise ModelSelectionError("Backend did not create canonical context; model unchanged.")
+                        if native_generation_session.history_active:
+                            await _reset_native_task()
                         current_thread_id = created["thread_id"] if created else None
                         client._canonical_chat = {"revision": created["revision"]} if created else None
                         chat_transcript.clear()

@@ -56,7 +56,8 @@ def invoke(consumer, *, key="same-key", enable_tools=True):
 def test_registered_scope_flows_through_actual_send(native_consumer, stream):
     c = native_consumer
     c.namespace["_env_flag"] = lambda name, default: (
-        True if name == "OPENVEGAS_CHAT_NATIVE_GENERATION_SCOPE" else stream
+        True if name == "OPENVEGAS_CHAT_NATIVE_GENERATION_SCOPE" else
+        stream if name == "OPENVEGAS_CHAT_STREAM_EVENTS" else default == "1"
     )
     result = c.run([event("response.completed", native_payload(c))])
     kwargs = c.requests[0][1] if stream else c.client.ask.call_args.kwargs

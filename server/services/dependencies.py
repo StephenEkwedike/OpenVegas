@@ -283,6 +283,8 @@ async def assert_schema_compatible(db: Any, flags: FeatureFlags) -> None:
     await require_migration_min(db, "038_private_runtime_rls")
     await require_migration_min(db, "044_inference_route_commands")
     await require_migration_min(db, "045_native_generation_ownership")
+    await require_migration_min(db, "046_native_generation_envelopes")
+    await require_migration_min(db, "047_native_continuation_revisions")
 
     await require_tables(
         db,
@@ -294,6 +296,7 @@ async def assert_schema_compatible(db: Any, flags: FeatureFlags) -> None:
             "provider_credentials",
             "inference_requests",
             "inference_route_commands",
+            "native_generation_envelopes",
             "wallet_history_projection",
             "wrapper_reward_events",
             "org_runtime_policies",
@@ -327,6 +330,19 @@ async def assert_schema_compatible(db: Any, flags: FeatureFlags) -> None:
             ("inference_route_commands", "gateway_request_id"),
             ("agent_runs", "native_generation_claim_id"),
             ("inference_requests", "native_route_command_id"),
+            ("agent_runs", "native_history_revision"),
+            ("inference_route_commands", "native_history_revision"),
+            ("inference_route_commands", "previous_native_request_id"),
+            ("native_generation_envelopes", "request_id"),
+            ("native_generation_envelopes", "route_command_id"),
+            ("native_generation_envelopes", "runtime_session_id"),
+            ("native_generation_envelopes", "assistant_message_json"),
+            ("native_generation_envelopes", "assistant_sha256"),
+            ("native_generation_envelopes", "request_payload_json"),
+            ("native_generation_envelopes", "request_sha256"),
+            ("native_generation_envelopes", "history_inputs_json"),
+            ("native_generation_envelopes", "inputs_sha256"),
+            ("native_generation_envelopes", "public_binding"),
                 ("profiles", "theme"),
                 ("chat_file_uploads", "content_bytes"),
                 ("chat_file_uploads", "status"),

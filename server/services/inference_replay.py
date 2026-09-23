@@ -35,11 +35,17 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID, uuid4
 
-from openvegas.contracts.errors import APIErrorCode, ContractError
 from openvegas.agent.native_generation import (
-    NativeGenerationClaim, lock_run_tx, parse_scope, registration,
-    require_fresh_projection_tx, scope_document, stored_scope,
+    NativeGenerationClaim,
+    lock_run_tx,
+    parse_scope,
+    registration,
+    require_fresh_projection_tx,
+    scope_document,
+    stored_scope,
 )
+from openvegas.contracts.errors import APIErrorCode, ContractError
+from openvegas.contracts.native_scope import NativeContinuationRef
 
 MAX_COMMAND_BYTES = 512 * 1024
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
@@ -56,7 +62,7 @@ _DEFAULTS = {
     "attachments": [],
     "reasoning_effort": None,
 }
-_COMMAND_FIELDS = {"prompt", "provider", "model", "native_scope", *_DEFAULTS}
+_COMMAND_FIELDS = {"prompt", "provider", "model", "native_scope", "native_continuation", "native_history", *_DEFAULTS}
 _ENVELOPE_FIELDS = {"kind", "state", "owner_token", "gateway_key"}
 
 
@@ -167,6 +173,21 @@ def command_fingerprint(command: dict[str, Any]) -> str:
         raise _invalid()
     value = {**_DEFAULTS, **command}
     scope = value.pop("native_scope", None)
+    continuation = value.pop("native_continuation", None)
+    native_history = value.pop("native_history", False)
+    if type(native_history) is not bool:
+        raise _invalid()
+    if native_history:
+        if scope is None:
+            raise _invalid()
+        value["native_history"] = True
+    if continuation is not None:
+        if not native_history:
+            raise _invalid()
+        try:
+            value["native_continuation"] = NativeContinuationRef.model_validate(continuation).model_dump()
+        except ValueError:
+            raise _invalid() from None
     if scope is not None:
         value["native_scope"] = parse_scope(scope).model_dump(mode="json")
     for name in ("prompt", "provider", "model"):
@@ -284,6 +305,7 @@ class InferenceReplayService:
     async def begin(
         self, *, user_id: str, idempotency_key: str, command: dict[str, Any],
         allow_native_dispatch: bool = True,
+        allow_native_history: bool = False,
     ) -> ReplayClaim:
         user_id, key = _uuid(user_id), _key(idempotency_key)
         digest = command_fingerprint(command)
@@ -298,38 +320,61 @@ class InferenceReplayService:
         }
         async with self.db.transaction() as tx:
             native = None
+            inserted = None
             if scope is not None:
                 # Always authenticate before inspecting replay, including exact completion.
                 run = await lock_run_tx(tx, user_id=user_id, scope=scope)
                 prior = await tx.fetchrow(
-                    "SELECT * FROM inference_route_commands WHERE native_run_id=$1::uuid FOR UPDATE",
-                    scope.run_id,
+                    "SELECT * FROM inference_route_commands WHERE user_id=$1::uuid AND idempotency_key=$2 FOR UPDATE",
+                    user_id, key,
                 )
+                history_revision = None
+                previous_id = payload_json = inputs_json = None
                 if prior is not None:
-                    if prior["idempotency_key"] != key:
-                        raise ContractError(APIErrorCode.INVALID_TRANSITION,
-                            "Native follow-up is not implemented; this run already owns a generation.")
-                    if (stored_scope(prior)["scope"] != scope.model_dump()
-                            or stored_scope(prior)["registration"] != registration(run)
-                            or str(run.get("native_generation_claim_id")) != str(prior["id"])):
+                    if (str(prior.get("native_run_id")) != scope.run_id
+                            or stored_scope(prior)["scope"] != scope.model_dump()
+                            or stored_scope(prior)["registration"] != registration(run)):
                         raise _blocked()
                 else:
                     if not allow_native_dispatch:
                         raise ContractError(APIErrorCode.INVALID_TRANSITION,
                             "Native generation ownership is disabled; no unscoped fallback was made.")
-                    if run.get("native_generation_claim_id") is not None:
-                        raise _blocked()
-                    await require_fresh_projection_tx(tx, run=run, scope=scope)
+                    if command.get("native_history"):
+                        if not allow_native_history:
+                            raise ContractError(APIErrorCode.INVALID_TRANSITION,
+                                "Native history is disabled; no paid request was sent.")
+                        # Acquire this route's key before touching a prior gateway
+                        # or any tool records. A conflicting key on another run
+                        # must never introduce a gateway -> route lock inversion.
+                        inserted = await tx.fetchrow(
+                            "INSERT INTO inference_route_commands "
+                            "(id,user_id,idempotency_key,payload_hash,status,response_body_text) "
+                            "VALUES($1::uuid,$2::uuid,$3,$4,'processing',$5) "
+                            "ON CONFLICT(user_id,idempotency_key) DO NOTHING RETURNING id",
+                            request_id, user_id, key, digest, _bounded_json(initial, MAX_ENVELOPE_BYTES),
+                        )
+                        if inserted is None:
+                            raise ContractError(APIErrorCode.IDEMPOTENCY_CONFLICT,
+                                                "Idempotency key already belongs to another command.")
+                        from openvegas.agent.native_continuation import reserve_history_tx
+                        history_revision, previous_id, payload_json, inputs_json = await reserve_history_tx(
+                            tx, run=run, scope=scope, command=command,
+                        )
+                    else:
+                        if run.get("native_generation_claim_id") is not None:
+                            raise _blocked()
+                        await require_fresh_projection_tx(tx, run=run, scope=scope)
                     # Claim and route identity are inserted under the same run lock.
-                    taken = await tx.fetchrow(
+                    taken = None if inserted else await tx.fetchrow(
                         "SELECT id FROM inference_route_commands WHERE user_id=$1::uuid "
                         "AND idempotency_key=$2 FOR UPDATE", user_id, key,
                     )
                     if taken:
                         raise ContractError(APIErrorCode.IDEMPOTENCY_CONFLICT, "Idempotency key already belongs to another command.")
                 native = NativeGenerationClaim(user_id, request_id, scope, scope_document(scope, run),
-                                               owner_token, digest, gateway_key)
-            inserted = await tx.fetchrow(
+                                               owner_token, digest, gateway_key, history_revision,
+                                               previous_id, payload_json, inputs_json)
+            inserted = inserted or await tx.fetchrow(
                 """INSERT INTO inference_route_commands
                    (id,user_id,idempotency_key,payload_hash,status,response_body_text)
                    VALUES ($1::uuid,$2::uuid,$3,$4,'processing',$5)
@@ -360,6 +405,13 @@ class InferenceReplayService:
                         "UPDATE agent_runs SET native_generation_claim_id=$2::uuid WHERE id=$1::uuid",
                         scope.run_id, request_id,
                     )
+                    if native.history_revision is not None:
+                        await tx.execute(
+                            "UPDATE inference_route_commands SET native_history_revision=$2,previous_native_request_id=$3::uuid WHERE id=$1::uuid",
+                            request_id, native.history_revision, native.previous_request_id,
+                        )
+                        await tx.execute("UPDATE agent_runs SET native_history_revision=$2 WHERE id=$1::uuid",
+                                         scope.run_id, native.history_revision)
             elif body["state"] != "completed":
                 raise _blocked()
             response_json = (
@@ -450,6 +502,12 @@ class InferenceReplayService:
                 or gateway["inference_source"] != "wrapper"
             ):
                 raise _blocked()
+            if claim.native_claim is not None and claim.native_claim.history_revision is not None:
+                from openvegas.agent.native_continuation import generation_receipt_tx
+                snapshot["native_generation"].update(await generation_receipt_tx(
+                    tx, claim=claim.native_claim, request_id=gateway_request_id,
+                ))
+                snapshot = json.loads(_bounded_json(snapshot, MAX_RESPONSE_BYTES))
             finished = {
                 **body,
                 "state": "completed",
@@ -520,6 +578,21 @@ class InferenceReplayService:
                 or body["state"] != "processing"
             ):
                 raise _blocked()
+            if claim.native_claim is not None and claim.native_claim.history_revision is not None:
+                previous = None
+                if claim.native_claim.previous_request_id is not None:
+                    previous = await tx.fetchval(
+                        "SELECT native_route_command_id FROM inference_requests WHERE id=$1::uuid",
+                        claim.native_claim.previous_request_id,
+                    )
+                    if previous is None:
+                        raise _blocked()
+                await tx.execute(
+                    "UPDATE agent_runs SET native_generation_claim_id=$2::uuid,native_history_revision=$3 "
+                    "WHERE id=$1::uuid AND native_generation_claim_id=$4::uuid",
+                    claim.native_claim.scope.run_id, previous,
+                    claim.native_claim.history_revision - 1 if previous else None, claim.request_id,
+                )
             removed = await tx.fetchrow(
                 """DELETE FROM inference_route_commands
                    WHERE id=$1::uuid AND user_id=$2::uuid AND status='processing'

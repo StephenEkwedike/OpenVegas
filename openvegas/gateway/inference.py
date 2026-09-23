@@ -46,6 +46,9 @@ class InferenceRequest:
     _managed_web_context: Any = field(default=None, init=False, repr=False)
     _managed_openrouter_dispatch: Any = field(default=None, init=False, repr=False)
     _native_generation_claim: Any = field(default=None, init=False, repr=False)
+    _native_history_inputs: Any = field(default=None, init=False, repr=False)
+    _native_history_required: bool = field(default=False, init=False, repr=False)
+    _native_envelope_capture: Any = field(default=None, init=False, repr=False)
 
 
 @dataclass
@@ -83,6 +86,7 @@ class _InferenceExecutionContext:
     payload_hash: str = ""
     provider_request_id: str | None = None
     web_enable_tools: bool = False
+    native_history_required: bool = False
 
 
 class AIGateway:
@@ -176,6 +180,8 @@ class AIGateway:
         req: InferenceRequest,
     ) -> tuple[_InferenceExecutionContext | None, InferenceResult | None]:
         native_claim = req._native_generation_claim
+        from openvegas.agent.native_envelope import prepare_history_request
+        native_history_required = prepare_history_request(req)
         if native_claim is not None:
             from openvegas.agent.native_generation import NativeGenerationClaim, reject
             if (type(native_claim) is not NativeGenerationClaim
@@ -270,6 +276,10 @@ class AIGateway:
                 if native_claim is not None:
                     from openvegas.agent.native_generation import lock_dispatch_claim_tx, link_gateway_tx
                     await lock_dispatch_claim_tx(tx, native_claim, req)
+                if native_history_required:
+                    # Detect an unmigrated server before any upstream dispatch.
+                    await tx.fetchrow("SELECT request_id,assistant_message_json,request_payload_json,history_inputs_json "
+                                      "FROM native_generation_envelopes WHERE false")
                 request_id, replay = await self._begin_inference_request(
                     user_id=user_id, idempotency_key=req.idempotency_key,
                     payload_hash=payload_hash, tx=tx,
@@ -286,6 +296,7 @@ class AIGateway:
                     web_context=req._managed_web_context if managed_web else None,
                     payload_hash=payload_hash,
                     web_enable_tools=bool(req.enable_tools) if managed_web else False,
+                    native_history_required=native_history_required,
                 )
                 ctx.reservation_ref = f"infer-preauth:{ctx.preauth_id}"
                 if replay is not None:
@@ -403,7 +414,15 @@ class AIGateway:
         grant_used_v = Decimal("0")
         charge_v = actual_v
 
+        native_envelope = None
+        if getattr(ctx, "native_history_required", False):
+            from openvegas.agent.native_envelope import validate_capture
+            native_envelope = validate_capture(req, result, request_hash=ctx.payload_hash)
+
         async with self.db.transaction() as tx:
+            if native_envelope is not None:
+                from openvegas.agent.native_envelope import lock_envelope_owner_tx
+                await lock_envelope_owner_tx(tx, req=req, request_id=request_id)
             request_row = await tx.fetchrow(
                 "SELECT * FROM inference_requests WHERE id = $1 FOR UPDATE", request_id,
             )
@@ -573,6 +592,10 @@ class AIGateway:
                 actual_usd,
                 result.provider_request_id,
             )
+
+            if native_envelope is not None:
+                from openvegas.agent.native_envelope import persist_native_envelope_tx
+                await persist_native_envelope_tx(tx, req=req, request_id=request_id, envelope=native_envelope)
 
         result.inference_request_id = request_id
         return result

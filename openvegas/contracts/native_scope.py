@@ -25,3 +25,16 @@ class NativeInferenceScope(BaseModel):
 
 def validate_native_scope(value: object) -> NativeInferenceScope:
     return NativeInferenceScope.model_validate(value)
+
+
+class NativeContinuationRef(BaseModel):
+    """A comparison fence, never caller-supplied conversation history."""
+
+    model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
+    previous_inference_request_id: str
+    expected_history_revision: int = Field(ge=0, lt=2**63 - 1)
+
+    @field_validator("previous_inference_request_id")
+    @classmethod
+    def canonical_uuid(cls, value: str) -> str:
+        return NativeInferenceScope.canonical_uuid(value)

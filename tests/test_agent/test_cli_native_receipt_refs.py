@@ -299,6 +299,7 @@ async def test_actual_proposal_call_wiring_and_legacy_mock_compatibility(
         "runtime_session_id": "runtime-test",
         "current_run_version": 7,
         "current_signature": "sig-test",
+        "propose_key": None,
         "tool_name": "fs_read",
         "arguments": {"path": "fixture.txt"},
         "shell_mode": "read_only",

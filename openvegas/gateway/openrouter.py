@@ -8,6 +8,7 @@ Capability and price limits come from our server catalog, not caller settings.
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import re
@@ -19,8 +20,12 @@ from typing import Any
 import httpx
 
 from openvegas.contracts.errors import APIErrorCode, ContractError
+from openvegas.gateway.openrouter_web import (
+    PreparedWebSearch,
+    WebValidationError,
+    prepare_server_review,
+)
 from openvegas.gateway.reasoning import reasoning_payload
-from openvegas.gateway.openrouter_web import PreparedWebSearch, WebValidationError, prepare_server_review
 from openvegas.telemetry import emit_metric
 
 BASE_URL = "https://openrouter.ai/api/v1"
@@ -224,13 +229,58 @@ def _flat_tool(function: dict, model: str) -> dict:
 
 
 def input_token_bound(req: Any) -> int:
+    from openvegas.agent.native_envelope import continuation_payload
+
+    native = continuation_payload(req)
+    if native is not None:
+        return _native_input_bound(req, native)
     attachments = getattr(req, "_managed_attachment_context", None)
     if attachments is not None:
-        return attachments.token_bound(req, local_tool_definitions(req.model) if req.enable_tools else None)
+        return _attachment_input_bound(req, local_tool_definitions(req.model) if req.enable_tools else None)
     bound = len(json.dumps(req.messages, ensure_ascii=False).encode("utf-8")) + 256
     if req.enable_tools:
         bound += len(json.dumps(local_tool_definitions(req.model)).encode("utf-8")) + 256
     return bound
+
+
+def _attachment_input_bound(req: Any, tools: list[dict] | None) -> int:
+    from openvegas.agent.native_envelope import continuation_payload
+
+    attachment = req._managed_attachment_context
+    if continuation_payload(req) is None:
+        return attachment.token_bound(req, tools)
+    projected = copy.copy(req)
+    projected.messages = _native_metering_view(req)
+    base = attachment.token_bound(projected, tools)
+    # The media validator sees exact owned media and plain text; additionally
+    # reserve ALL opaque/native metadata bytes omitted only from that view.
+    overhead = max(0, len(json.dumps(req.messages, ensure_ascii=False).encode("utf-8"))
+                   - len(json.dumps(projected.messages, ensure_ascii=False).encode("utf-8")))
+    return base + overhead + 256
+
+
+def _native_metering_view(req: Any) -> list[dict]:
+    from openvegas.agent.native_envelope import metering_messages
+
+    projected = metering_messages(req.messages)
+    attachment = getattr(req, "_managed_attachment_context", None)
+    if attachment is not None:
+        expected = attachment.prepared.blocks
+        for message in projected:
+            if message["role"] == "user" and isinstance(message["content"], list):
+                # Existing media accounting compares encoded key order. Match a
+                # semantically identical freshly owned block ONLY in this view;
+                # the original wire payload and signatures are never rewritten.
+                message["content"] = [copy.deepcopy(next((owned for owned in expected if owned == block), block))
+                                      for block in message["content"]]
+    return projected
+
+
+def _native_input_bound(req: Any, native: dict) -> int:
+    if getattr(req, "_managed_attachment_context", None) is not None:
+        extra = {k: v for k, v in native.items() if k not in {"messages", "tools"}}
+        return _attachment_input_bound(req, native.get("tools")) + len(json.dumps(extra).encode("utf-8")) + 256
+    return len(json.dumps(native, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) + 256
 
 
 def _web_binding(req: Any, model_config: dict) -> str:
@@ -267,7 +317,7 @@ class ManagedWebContext:
         payload = json.loads(self.payload_json)
         if dispatch and getattr(req, "_managed_attachment_context", None) is not None:
             _web_attachment_options(req, model_config, self.prepared)
-            req._managed_attachment_context.token_bound(req, payload["tools"])
+            _attachment_input_bound(req, payload["tools"])
         return payload
 
 
@@ -343,6 +393,11 @@ def prepare_web_context(req: Any, model_config: dict, capabilities: dict) -> Man
 
 
 def build_payload(req: Any, model_config: dict, capabilities: dict) -> dict:
+    from openvegas.agent.native_envelope import continuation_payload
+
+    native = continuation_payload(req)
+    if native is not None:
+        return _build_native_continuation(req, native, model_config, capabilities)
     if not valid_model(req.model):
         raise ContractError(
             APIErrorCode.INVALID_TRANSITION, "Choose an exact reviewed OpenRouter model ID."
@@ -427,6 +482,38 @@ def build_payload(req: Any, model_config: dict, capabilities: dict) -> dict:
     req._managed_openrouter_dispatch = DispatchMetering(input_bound, _web_binding(req, model_config))
     # Output metering includes reasoning. Do not forward private thought fields.
     return payload
+
+
+def _build_native_continuation(req: Any, native: dict, model_config: dict, capabilities: dict) -> dict:
+    projected = copy.copy(req)
+    projected.messages = _native_metering_view(req)
+    projected._native_generation_claim = None
+    projected._native_history_required = False
+    projected._managed_web_context = None
+    fresh = build_payload(projected, model_config, capabilities)
+    if {k: v for k, v in native.items() if k != "messages"} != {k: v for k, v in fresh.items() if k != "messages"}:
+        raise ContractError(APIErrorCode.INVALID_TRANSITION,
+                            "Native provider settings changed; no altered continuation was sent.")
+    encoded = json.dumps(native, ensure_ascii=False, separators=(",", ":"))
+    bound = _native_input_bound(req, native)
+    context_limit = capabilities.get("context_window_tokens")
+    if (len(encoded.encode("utf-8")) > MAX_REQUEST_BYTES or type(context_limit) is not int
+            or bound + req.max_tokens > context_limit):
+        raise ContractError(APIErrorCode.INVALID_TRANSITION,
+                            "Native history exceeds its reviewed bound; nothing was truncated.")
+    if req.enable_web_search:
+        previous = req._managed_web_context
+        prepared = projected._managed_web_context.prepared
+        if previous is not None:
+            if (not isinstance(previous, ManagedWebContext) or previous.prepared.snapshot != prepared.snapshot
+                    or previous.payload(req, model_config) != native):
+                raise ContractError(APIErrorCode.INVALID_TRANSITION, "Native web dispatch snapshot changed.")
+            # Settlement holds this exact object, not merely an equivalent new
+            # snapshot with a later timestamp. Rechecking dispatch must not replace it.
+        else:
+            req._managed_web_context = ManagedWebContext(prepared, _web_binding(req, model_config), encoded)
+    req._managed_openrouter_dispatch = DispatchMetering(bound, _web_binding(req, model_config))
+    return native
 
 
 @asynccontextmanager
@@ -603,12 +690,16 @@ async def complete(
     req, api_key: str, *, model_config: dict, capabilities: dict, parse_tool, client=None
 ) -> dict:
     payload = build_payload(req, model_config, capabilities)
+    from openvegas.agent.native_envelope import capture_dispatch, capture_response
+    native_dispatch = capture_dispatch(req, payload)
     if not api_key or not isinstance(api_key, str):
         raise ContractError(
             APIErrorCode.PROVIDER_UNAVAILABLE, "Managed OpenRouter credential unavailable."
         )
     request_id = None
     try:
+        if native_dispatch is not None and api_key in native_dispatch.payload_json:
+            raise ValueError("Reflected credential")
         async with asyncio.timeout(TIMEOUT), _client(client) as http:
             async with http.stream(
                 "POST",
@@ -649,6 +740,8 @@ async def complete(
             if api_key.encode("utf-8") in raw:
                 raise ValueError("Reflected credential")
             body = json.loads(raw, **({"parse_float": Decimal} if req.enable_web_search else {}))
+            if native_dispatch is not None and api_key in json.dumps(body, default=str):
+                raise ValueError("Reflected credential")
             candidate_id = _request_identity(body)
             if candidate_id and api_key in candidate_id:
                 raise ValueError("Reflected credential")
@@ -656,6 +749,7 @@ async def complete(
             result = parse_response(body, req, model_config, parse_tool)
             if api_key in json.dumps(result, default=str):
                 raise ValueError("Reflected credential")
+            capture_response(req, native_dispatch, bytes(raw), result)
             return result
     except asyncio.CancelledError:
         emit_metric("openrouter_failure_total", {"reason": "cancelled"})
