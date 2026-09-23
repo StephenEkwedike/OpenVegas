@@ -202,9 +202,24 @@ class LoopDriver:
             "runtime_run_task": None, "native_generation_session": _session_type()(),
             "APIError": APIError,
         }
-        cells = sorted({name for node in nodes.values() for child in ast.walk(node)
-                        if isinstance(child, ast.Nonlocal) for name in child.names})
-        assert set(cells) <= initial.keys(), "Add real outer state to the harness, not a production-path stub"
+        # Nested helpers declare cells in their enclosing function, not chat().
+        # Inspect each extracted function's own scope without descending into
+        # nested function definitions; the compiled production AST is unchanged.
+        cells = set()
+
+        class OuterCells(ast.NodeVisitor):
+            def visit_Nonlocal(self, node):
+                cells.update(node.names)
+
+            def visit_FunctionDef(self, node):
+                return
+
+            visit_AsyncFunctionDef = visit_FunctionDef
+
+        for node in nodes.values():
+            for statement in node.body:
+                OuterCells().visit(statement)
+        assert cells <= initial.keys(), "Add real outer state to the harness, not a production-path stub"
         # Read-only outer values are closure cells too (provider, model, APIError).
         wrapper = ast.parse("def factory():\n" + "".join(f"    {name} = initial[{name!r}]\n" for name in sorted(initial))
                             + "    return _run_tool_loop\n")

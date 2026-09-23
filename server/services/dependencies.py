@@ -285,6 +285,7 @@ async def assert_schema_compatible(db: Any, flags: FeatureFlags) -> None:
     await require_migration_min(db, "045_native_generation_ownership")
     await require_migration_min(db, "046_native_generation_envelopes")
     await require_migration_min(db, "047_native_continuation_revisions")
+    await require_migration_min(db, "048_native_mutation_preparations")
 
     await require_tables(
         db,

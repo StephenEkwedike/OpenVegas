@@ -6391,6 +6391,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
         nonlocal last_assistant_text_for_turn
 
         from openvegas.client import APIError
+        from openvegas.contracts.errors import ContractError
+
         emote_turn = emote_bridge.current_turn
         native_history_mode = bool(
             current_provider == "openrouter"
@@ -6733,13 +6735,18 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             tool_request: dict[str, Any],
             tool_call_id: str,
             execution_token: str,
+            native_plan: dict | None = None,
         ) -> tuple[Any | None, str | None]:
             tool_name_local = str(tool_request.get("tool_name", ""))
             args_local = tool_request.get("arguments", {})
             shell_mode_local = str(tool_request.get("shell_mode") or "read_only")
             timeout_local = int(tool_request.get("timeout_sec") or 30)
 
-            if tool_name_local == "shell_run":
+            if native_plan is not None:
+                from openvegas.agent.native_mutation_client import execute_prepared_mutation
+
+                task = asyncio.create_task(execute_prepared_mutation(workspace_root, native_plan))
+            elif tool_name_local == "shell_run":
                 task = asyncio.create_task(
                     execute_shell_run_streaming(
                         workspace_root=workspace_root,
@@ -6815,35 +6822,91 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
 
             heartbeat_interval = 2.0
             heartbeat_failures = 0
-            while True:
+            unknown_report_started = False
+            native_deadline = asyncio.get_running_loop().time() + timeout_local if native_plan is not None else None
+
+            async def _report_native_unknown():
+                nonlocal unknown_report_started
+                if native_plan is None or unknown_report_started:
+                    return
+                unknown_report_started = True
+                proof = {"kind": "runtime_observed_file_v1", "contract_sha256": native_plan["contract_sha256"],
+                         "relative_path": native_plan["relative_path"], "observed_before": None,
+                         "observed_after": None, "outcome": "unknown", "reason": "native_runtime_interrupted"}
                 try:
-                    return await asyncio.wait_for(asyncio.shield(task), timeout=heartbeat_interval), None
-                except asyncio.TimeoutError:
+                    await asyncio.wait_for(client.agent_tool_result(
+                        run_id=current_run_id, runtime_session_id=runtime_session_id,
+                        tool_call_id=tool_call_id, execution_token=execution_token,
+                        result_status="failed", result_payload={"native_mutation_proof": proof}, stdout="", stderr=""),
+                        timeout=5)
+                except Exception:  # noqa: BLE001 - Transport details may contain private payloads.
+                    # A 409 may acknowledge failure; transport loss cannot prove it.
+                    # The server reconciler independently fences expired native writes.
+                    emit_metric("native_mutation_unknown_report_total", {"status": "unconfirmed"})
+
+            async def _retire_task():
+                # Cancels only the coroutine, not an in-flight OS write. Always
+                # retrieve its result, including a failure during report upload.
+                if not task.done():
+                    task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001, S110 - Retrieve retired failures; never log private source.
+                    pass
+
+            async def _wait_for_tool():
+                nonlocal heartbeat_failures
+                while True:
+                    remaining = None if native_deadline is None else native_deadline - asyncio.get_running_loop().time()
+                    if remaining is not None and remaining <= 0:
+                        console.print("File edit exceeded its deadline; outcome is uncertain. No retry.", markup=False)
+                        await _report_native_unknown()
+                        await _retire_task()
+                        return None, "timed_out"
                     try:
-                        hb = await client.agent_tool_heartbeat(
-                            run_id=current_run_id,
-                            runtime_session_id=runtime_session_id,
-                            tool_call_id=tool_call_id,
-                            execution_token=execution_token,
-                        )
-                        if not bool(hb.get("active", False)):
-                            remote_status = str(hb.get("status") or "unknown")
-                            if not task.done():
-                                task.cancel()
-                                try:
-                                    await task
-                                except Exception:
-                                    pass
-                            return None, remote_status
-                    except APIError as e:
-                        heartbeat_failures += 1
-                        if heartbeat_failures <= 1:
-                            body = e.data if isinstance(e.data, dict) else {}
-                            code = body.get("error", "tool_heartbeat_failed")
-                            detail = body.get("detail", e.detail)
-                            console.print(f"[yellow]{code}: {detail}[/yellow]")
-                    except Exception:
-                        heartbeat_failures += 1
+                        wait_sec = heartbeat_interval if remaining is None else min(heartbeat_interval, remaining)
+                        return await asyncio.wait_for(asyncio.shield(task), timeout=wait_sec), None
+                    except ContractError as exc:
+                        if native_plan is not None and exc.code.value == "mutation_uncertain":
+                            await _report_native_unknown()
+                        raise APIError(409, exc.detail, data={"error": exc.code.value}) from None
+                    except TimeoutError:
+                        try:
+                            heartbeat = client.agent_tool_heartbeat(
+                                run_id=current_run_id, runtime_session_id=runtime_session_id,
+                                tool_call_id=tool_call_id, execution_token=execution_token)
+                            if native_deadline is None:
+                                hb = await heartbeat
+                            else:
+                                hb = await asyncio.wait_for(heartbeat,
+                                    timeout=max(0.001, native_deadline - asyncio.get_running_loop().time()))
+                            if not bool(hb.get("active", False)):
+                                remote_status = str(hb.get("status") or "unknown")
+                                if native_plan is not None:
+                                    console.print("File edit lost its active lease; outcome is uncertain. No retry.", markup=False)
+                                    await _report_native_unknown()
+                                await _retire_task()
+                                return None, remote_status
+                        except APIError as e:
+                            heartbeat_failures += 1
+                            if heartbeat_failures <= 1:
+                                body = e.data if isinstance(e.data, dict) else {}
+                                code = body.get("error", "tool_heartbeat_failed")
+                                detail = body.get("detail", e.detail)
+                                console.print(f"[yellow]{code}: {detail}[/yellow]")
+                        except Exception:  # noqa: BLE001 - Keep transient heartbeat failures separate from tool outcomes.
+                            heartbeat_failures += 1
+
+            try:
+                return await _wait_for_tool()
+            except asyncio.CancelledError:
+                if native_plan is not None:
+                    console.print("File edit interrupted; its outcome may be uncertain. It will not be retried.", markup=False)
+                    try:
+                        await _report_native_unknown()
+                    finally:
+                        await _retire_task()
+                raise
 
         completion_force_patch_intent = bool(
             last_successful_tool == "fs_apply_patch" and _is_patch_repeat_followup_intent(user_message)
@@ -7191,6 +7254,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
         native_proposals: dict[str, dict[str, Any]] = {}
         native_propose_keys: dict[str, str] = {}
         native_start_keys: dict[str, str] = {}
+        native_mutation_plans: dict[str, dict] = {}
+        native_mutation_approved: set[str] = set()
         max_tool_steps = max(4, min(40, int(os.getenv("OPENVEGAS_CHAT_MAX_TOOL_STEPS", "24"))))
         for step in range(max_tool_steps):
             cleaned_text = ""
@@ -7534,6 +7599,12 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 if retrying_native_batch:
                     preprocessed_calls.append(raw_call)
                     continue
+                if native_history_mode and raw_call.get("tool_name") in {"Write", "FindAndReplace", "InsertAtEnd"}:
+                    if plan_mode or not _env_flag("OPENVEGAS_CHAT_NATIVE_MUTATIONS", "0"):
+                        raise APIError(409, "Verified native file editing is unavailable in this session; no edit was performed.")
+                    # Snapshot only when this call executes, after earlier batch results.
+                    preprocessed_calls.append(raw_call)
+                    continue
                 prepared, prep_error = _preprocess_tool_request_for_runtime(
                     tool_req=raw_call,
                     user_message=user_message,
@@ -7620,6 +7691,23 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             mutation_conflict = False
             terminal_reason: str | None = None
             for native_call_index, tool_req in enumerate(preprocessed_calls):
+                native_call_key = f"{tool_req.get('native_inference_request_id')}:{tool_req.get('provider_call_id')}"
+                if native_history_mode and tool_req.get("tool_name") in {"Write", "FindAndReplace", "InsertAtEnd"}:
+                    if evaluate_tool_policy(tool_name="fs_apply_patch", shell_mode="mutating",
+                                            approval_mode=approval_mode) == ToolPolicyDecision.EXCLUDE:
+                        raise APIError(409, "Native file editing is excluded; no source was read or uploaded.")
+                    from openvegas.agent.native_mutation_client import prepare_native_mutation
+
+                    try:
+                        tool_req, prepared_plan = await prepare_native_mutation(client,
+                            run_id=current_run_id, runtime_session_id=runtime_session_id,
+                            expected_run_version=current_run_version, expected_valid_actions_signature=current_signature,
+                            idempotency_key=f"native-prepare-{uuid.uuid4()}", call=tool_req, workspace_root=workspace_root)
+                    except ContractError as exc:
+                        raise APIError(409, exc.detail, data={"error": exc.code.value}) from None
+                    native_mutation_plans[native_call_key] = prepared_plan
+                    preprocessed_calls[native_call_index] = tool_req
+                native_plan = native_mutation_plans.get(native_call_key) if native_history_mode else None
                 tool_name = str(tool_req.get("tool_name", "")).strip()
                 arguments = tool_req.get("arguments", {})
                 shell_mode = tool_req.get("shell_mode")
@@ -7981,7 +8069,16 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     )
                     continue
 
-                if policy == ToolPolicyDecision.ASK:
+                if native_plan is not None and native_call_key not in native_mutation_approved:
+                    console.print(str(arguments["patch"]) or "No content change.", markup=False, highlight=False)
+                    emote_bridge.pause(turn=emote_turn)
+                    try:
+                        approved = await _chat_modal(lambda: click.confirm("Apply this exact file edit?", default=False))
+                    finally:
+                        emote_bridge.resume(turn=emote_turn)
+                    if not approved:
+                        raise APIError(409, "Native file edit declined. No edit or replacement inference was performed.")
+                if policy == ToolPolicyDecision.ASK and native_plan is None:
                     action_scope = action_scope_for(tool_name, arguments if isinstance(arguments, dict) else {})
                     if not should_auto_allow(session_approval, action_scope):
                         dealer_panel.render(map_lifecycle_event_to_state("approval_wait"), "approval required")
@@ -8095,6 +8192,25 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     tool_observations.append({"tool_name": tool_name, "status": "start_error", "error": "invalid_tool_request_payload"})
                     continue
 
+                if native_plan is not None:
+                    expected = {"tool_name": tool_name, "arguments": arguments,
+                                "shell_mode": shell_mode, "timeout_sec": timeout_sec}
+                    if any(tool_request.get(key) != value for key, value in expected.items()):
+                        raise APIError(502, "Native edit proposal changed the approved request; nothing was executed.")
+                    if native_call_key not in native_mutation_approved:
+                        marker = arguments["native_mutation"]
+                        decision = await client.agent_native_mutation_approve(
+                            run_id=current_run_id, runtime_session_id=runtime_session_id,
+                            preparation_id=marker["preparation_id"], tool_call_id=tool_call_id,
+                            contract_sha256=marker["contract_sha256"], expected_run_version=current_run_version,
+                            expected_valid_actions_signature=current_signature, idempotency_key=f"native-approve-{uuid.uuid4()}")
+                        consumed = await client.agent_approval_consume(
+                            run_id=current_run_id, tool_call_id=tool_call_id, approval_id=decision["approval_id"],
+                            expected_run_version=current_run_version, expected_valid_actions_signature=current_signature,
+                            idempotency_key=f"native-consume-{uuid.uuid4()}")
+                        _update_fence(consumed)
+                        native_mutation_approved.add(native_call_key)
+
                 try:
                     started = await _call_with_stale_retry(
                         lambda: client.agent_tool_start(
@@ -8152,6 +8268,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     tool_request=tool_request,
                     tool_call_id=tool_call_id,
                     execution_token=execution_token,
+                    **({"native_plan": native_plan} if native_plan is not None else {}),
                 )
                 if tool_name == "shell_run":
                     streamed_tools_seen["shell_run"] = True
@@ -8386,6 +8503,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         break
                     continue
 
+                if native_plan is not None and outcome.result_status != "succeeded":
+                    raise APIError(409, "Native file edit did not complete safely. Task paused; no automatic retry or continuation.")
                 tool_observations.append(
                     {
                         "tool_call_id": tool_call_id,

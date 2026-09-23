@@ -80,6 +80,7 @@ from server.routes import casino_human as casino_human_routes
 from server.routes import store as store_routes
 from server.routes import agent as agent_routes
 from server.routes import agent_orchestration as agent_orchestration_routes
+from server.routes import native_mutations as native_mutation_routes
 from server.routes import ide_bridge as ide_bridge_routes
 from server.routes import payments as payment_routes
 from server.routes import profile_preferences as profile_preferences_routes
@@ -284,6 +285,7 @@ app.include_router(casino_human_routes.router, tags=["casino-human"])
 app.include_router(store_routes.router, tags=["store"])
 app.include_router(agent_routes.router, tags=["agent"])
 app.include_router(agent_orchestration_routes.router, tags=["agent-orchestration"])
+app.include_router(native_mutation_routes.router, tags=["native-mutations"])
 app.include_router(ide_bridge_routes.router, tags=["ide-bridge"])
 app.include_router(payment_routes.router, tags=["billing"])
 app.include_router(profile_preferences_routes.router, tags=["profile"])

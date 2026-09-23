@@ -1174,6 +1174,26 @@ class OpenVegasClient:
             json=payload,
         )
 
+    async def agent_native_mutation_prepare(self, *, run_id: str, **payload) -> dict:
+        from openvegas.contracts.native_mutation import PrepareNativeMutation
+
+        checked = PrepareNativeMutation.model_validate(payload).model_dump()
+        return await self._request("POST", f"/agent/runs/{run_id}/native-mutations/prepare", json=checked)
+
+    async def agent_native_mutation_approve(self, *, run_id: str, preparation_id: str, **payload) -> dict:
+        from openvegas.contracts.native_mutation import ApproveNativeMutation
+
+        checked = ApproveNativeMutation.model_validate(payload).model_dump()
+        return await self._request("POST", f"/agent/runs/{run_id}/native-mutations/{preparation_id}/approve", json=checked)
+
+    async def agent_approval_consume(self, *, run_id: str, tool_call_id: str, approval_id: str,
+                                     expected_run_version: int, expected_valid_actions_signature: str,
+                                     idempotency_key: str) -> dict:
+        return await self._request("POST", f"/agent/runs/{run_id}/approvals/{tool_call_id}/{approval_id}/consume",
+            json={"expected_run_version": expected_run_version,
+                  "expected_valid_actions_signature": expected_valid_actions_signature,
+                  "idempotency_key": idempotency_key})
+
     async def agent_tool_propose(
         self,
         *,

@@ -449,6 +449,9 @@ async def test_legacy_replay_schema_requires_all_native_migrations_for_readiness
     with pytest.raises(RuntimeError, match="047_native_continuation_revisions"):
         await assert_schema_compatible(replay_database.sandbox.db, current_flags())
     await replay_database.sandbox.migrate(through=47)
+    with pytest.raises(RuntimeError, match="048_native_mutation_preparations"):
+        await assert_schema_compatible(replay_database.sandbox.db, current_flags())
+    await replay_database.sandbox.migrate(through=48)
     await assert_schema_compatible(replay_database.sandbox.db, current_flags())
 
 

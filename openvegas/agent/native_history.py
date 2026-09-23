@@ -176,6 +176,72 @@ def expected_runtime_call(call: dict, normalize: Callable) -> tuple[str, dict, s
     return name, normalized, mode
 
 
+async def expected_runtime_call_tx(
+    tx: Any, *, run: Any, call: dict, normalize: Callable,
+    inference_request_id: str, provider_call_id: str,
+    preparation_id: str | None = None, contract_sha256: str | None = None,
+    require_unexpired: bool = True, require_latest: bool = True,
+) -> tuple[str, dict, str, dict | None, Any]:
+    """Resolve prepared mutations privately; direct tools add no loader/query.
+
+    Original calls remain unchanged. A preparation verifies a transform over a
+    runtime observation, not filesystem truth or permission to execute it.
+    """
+    if not isinstance(call.get("tool_name"), str):
+        fail("Invalid native tool name.")
+    if call["tool_name"] not in PATCH_TRANSFORMS:
+        if preparation_id is not None or contract_sha256 is not None:
+            fail("Direct native tools cannot carry mutation preparation references.")
+        name, arguments, mode = expected_runtime_call(call, normalize)
+        return name, arguments, mode, None, None
+    require_uuid(preparation_id)
+    if contract_sha256 is not None and (
+        not isinstance(contract_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", contract_sha256)
+    ):
+        fail("Invalid native mutation commitment.")
+    # The service imports native source helpers; defer imports to avoid a cycle.
+    from openvegas.agent.native_mutation_service import executable_arguments, load_preparation_tx
+
+    preparation, plan = await load_preparation_tx(
+        tx, run=run, preparation_id=preparation_id,
+        runtime_session_id=str(run["runtime_session_id"]), contract_sha256=contract_sha256,
+        native_inference_request_id=require_uuid(inference_request_id),
+        native_provider_call_id=require_call_id(provider_call_id),
+        require_unexpired=require_unexpired, require_latest=require_latest,
+    )
+    if (canonical_json(plan.document()["original_call"]) != canonical_json(call)
+            or str(preparation["id"]) != preparation_id):
+        fail("Prepared mutation does not match the original native call.")
+    arguments = executable_arguments(preparation_id, plan)
+    object_value(arguments)
+    safe_receipt_content(arguments)
+    return "fs_apply_patch", arguments, "mutating", preparation, plan
+
+
+def _mutation_binding_ref(binding: dict, call: dict) -> tuple[str | None, str | None]:
+    if not isinstance(call.get("tool_name"), str):
+        fail("Invalid native tool name.")
+    is_mutation = call.get("tool_name") in PATCH_TRANSFORMS
+    if type(binding.get("normalizer_version")) is not int or binding["normalizer_version"] != (2 if is_mutation else 1):
+        fail("Native binding transformation version does not match its original call.")
+    preparation_id = binding.get("native_mutation_preparation_id")
+    digest = binding.get("native_mutation_contract_sha256")
+    if is_mutation:
+        require_uuid(preparation_id)
+        if type(digest) is not str or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            fail("Native mutation binding is missing its private commitment.")
+    elif preparation_id is not None or digest is not None:
+        fail("Direct native binding cannot contain mutation preparation evidence.")
+    return preparation_id, digest
+
+
+def _executable_preparation_id(arguments: dict) -> str | None:
+    if "native_mutation" not in arguments:
+        return None
+    marker = object_value(arguments["native_mutation"])
+    return require_uuid(marker.get("preparation_id"))
+
+
 def _timeout_cap(tool_name: str) -> int:
     if tool_name != "shell_run":
         return 5
@@ -226,6 +292,8 @@ def native_proposal_request(request: dict) -> dict:
     for field in ("user_id", "run_id", "runtime_session_id", "native_inference_request_id"):
         require_uuid(request.get(field))
     require_call_id(request.get("native_provider_call_id"))
+    if request.get("native_mutation_preparation_id") is not None:
+        require_uuid(request["native_mutation_preparation_id"])
     key = request.get("idempotency_key")
     signature = request.get("expected_valid_actions_signature")
     version = request.get("expected_run_version")
@@ -289,13 +357,23 @@ async def replay_native_proposal_tx(
             or binding.get("runtime_session_id") != request["runtime_session_id"]
             or binding.get("inference_request_id") != request["native_inference_request_id"]
             or binding.get("provider_call_id") != request["native_provider_call_id"]
-            or type(binding.get("normalizer_version")) is not int or binding["normalizer_version"] != 1
             or binding.get("provider") != "openrouter" or not valid_model(binding.get("model"))):
         fail("Native proposal replay evidence is corrupt or incomplete.")
     tool_id = require_uuid(str(row["tool_call_id"]))
     require_call_id(binding.get("provider_request_id"))
     call = object_value(binding.get("native_call"))
-    name, arguments, mode = expected_runtime_call(call, normalize)
+    preparation_id, digest = _mutation_binding_ref(binding, call)
+    request_arguments = object_value(object_value(request.get("tool_request")).get("arguments"))
+    if _executable_preparation_id(request_arguments) != preparation_id:
+        fail("Native proposal preparation reference changed.")
+    name, arguments, mode, preparation, _ = await expected_runtime_call_tx(
+        tx, run=run, call=call, normalize=normalize,
+        inference_request_id=request["native_inference_request_id"],
+        provider_call_id=request["native_provider_call_id"],
+        preparation_id=preparation_id, contract_sha256=digest,
+    )
+    if preparation is not None and str(preparation.get("tool_call_id")) != tool_id:
+        fail("Native preparation belongs to another proposed tool.")
     _check_binding_workspace(binding, run)
     requires_approval = is_mutating_tool(name, mode)
     expected_hash = tool_payload_hash(name, arguments, mode)
@@ -317,7 +395,8 @@ async def replay_native_proposal_tx(
         "SELECT * FROM agent_run_tool_calls WHERE id=$1::uuid AND run_id=$2::uuid FOR UPDATE",
         tool_id, str(run["id"]),
     )
-    if not tool or tool["status"] != "proposed" or tool["commit_state"] != "not_applicable":
+    expected_commit = "pending_commit" if preparation is not None else "not_applicable"
+    if not tool or tool["status"] != "proposed" or tool["commit_state"] != expected_commit:
         fail("Native proposal is no longer unstarted; it must not be executed again.")
     proposed = object_value(body.get("tool_request"))
     # Transcript storage never carries execution authority. Recover the original
@@ -375,6 +454,7 @@ async def bind_native_call_tx(
     tool_call_id: str, tool_name: str, arguments: dict, shell_mode: str, timeout_sec: int,
     normalize: Callable, proposal_request: dict | None = None, proposal_response: dict | None = None,
     locked_source: tuple[Any, dict | None] | None = None,
+    native_mutation_preparation_id: str | None = None,
 ) -> None:
     request_id = require_uuid(inference_request_id)
     call_id = require_call_id(provider_call_id)
@@ -415,7 +495,21 @@ async def bind_native_call_tx(
         fail("No unique native tool call matches this reference.")
     ordinal = ids.index(call_id)
     call = calls[ordinal]
-    expected_name, expected_args, expected_mode = expected_runtime_call(call, normalize)
+    preparation_id = _executable_preparation_id(object_value(arguments))
+    if native_mutation_preparation_id is not None and preparation_id != native_mutation_preparation_id:
+        fail("Native proposal preparation reference changed.")
+    if proposal_request is not None:
+        requested_arguments = object_value(object_value(proposal_request.get("tool_request")).get("arguments"))
+        requested_preparation_id = _executable_preparation_id(requested_arguments)
+        if preparation_id != requested_preparation_id:
+            fail("Native proposal preparation reference changed.")
+    expected_name, expected_args, expected_mode, preparation, plan = await expected_runtime_call_tx(
+        tx, run=run, call=call, normalize=normalize,
+        inference_request_id=request_id, provider_call_id=call_id, preparation_id=preparation_id,
+    )
+    if preparation is not None and (preparation.get("tool_call_id") is not None
+                                    or preparation.get("original_ordinal") != ordinal):
+        fail("Native preparation is already bound or has another original ordinal.")
     expected_hash = tool_payload_hash(expected_name, expected_args, expected_mode)
     timeout_cap = _timeout_cap(expected_name)
     # Compare the effective timeout too: the older payload hash omits it.
@@ -439,7 +533,7 @@ async def bind_native_call_tx(
     if count >= MAX_CALLS:
         fail("Native history reached its bound; explicitly start a new run.")
     payload = {
-        "kind": KIND, "inference_request_id": request_id, "normalizer_version": 1,
+        "kind": KIND, "inference_request_id": request_id, "normalizer_version": 2 if preparation is not None else 1,
         "provider": preauth["provider"], "model": preauth["model_id"],
         "provider_request_id": body["provider_request_id"], "provider_call_id": call_id,
         "call_ordinal": ordinal, "native_call": call,
@@ -451,6 +545,9 @@ async def bind_native_call_tx(
     }
     if generation_scope is not None:
         payload["generation_scope"] = generation_scope
+    if preparation is not None:
+        payload["native_mutation_preparation_id"] = preparation_id
+        payload["native_mutation_contract_sha256"] = plan.contract_sha256
     if proposal_request is not None or proposal_response is not None:
         response_text = canonical_json(object_value(proposal_response))
         snapshot = json.loads(response_text)
@@ -467,6 +564,18 @@ async def bind_native_call_tx(
         }
         payload["proposal_replay_sha256"] = _binding_digest(payload)
     object_value(payload)
+    if preparation is not None:
+        updated = await tx.execute(
+            "UPDATE native_mutation_preparations SET tool_call_id=$2::uuid "
+            "WHERE id=$1::uuid AND run_id=$3::uuid AND user_id=$4::uuid "
+            "AND runtime_session_id=$5::uuid AND native_inference_request_id=$6::uuid "
+            "AND native_provider_call_id=$7 AND contract_sha256=$8 "
+            "AND tool_call_id IS NULL AND approval_id IS NULL",
+            preparation_id, tool_call_id, str(run["id"]), str(run["user_id"]),
+            str(run["runtime_session_id"]), request_id, call_id, plan.contract_sha256,
+        )
+        if updated != "UPDATE 1":
+            fail("Native preparation could not be bound exactly once.")
     await tx.execute(
         "INSERT INTO agent_chat_turns (run_id,turn_no,role,content_json,tool_call_id) "
         "SELECT $1::uuid,COALESCE(MAX(turn_no),0)+1,'assistant',$2::jsonb,$3::uuid "
@@ -500,12 +609,23 @@ async def accepted_native_receipts_tx(
     seen = set()
     for row in rows:
         binding = object_value(row["content_json"])
-        if (type(binding.get("normalizer_version")) is not int or binding["normalizer_version"] != 1
-                or binding.get("provider") != provider or binding.get("model") != model
+        if (binding.get("provider") != provider or binding.get("model") != model
                 or binding.get("runtime_session_id") != str(run["runtime_session_id"])):
             fail("Native receipts belong to another model or runtime session; nothing was transferred.")
         call = object_value(binding.get("native_call"))
-        name, arguments, mode = expected_runtime_call(call, normalize)
+        preparation_id, digest = _mutation_binding_ref(binding, call)
+        name, arguments, mode, preparation, plan = await expected_runtime_call_tx(
+            tx, run=run, call=call, normalize=normalize,
+            inference_request_id=binding.get("inference_request_id"),
+            provider_call_id=binding.get("provider_call_id"),
+            preparation_id=preparation_id, contract_sha256=digest,
+            require_unexpired=False, require_latest=False,
+        )
+        if preparation is not None and (
+            str(preparation.get("tool_call_id")) != str(row["tool_call_id"])
+            or preparation.get("original_ordinal") != binding.get("call_ordinal")
+        ):
+            fail("Native mutation receipt belongs to another prepared tool.")
         _check_binding_workspace(binding, run)
         identity = (require_uuid(binding.get("inference_request_id")),
                     require_call_id(binding.get("provider_call_id")))
@@ -546,6 +666,16 @@ async def accepted_native_receipts_tx(
         if not callback:
             fail("No accepted runtime callback is recorded; server timeouts are not tool results.")
         result = object_value(tool["result_payload"])
+        if preparation is not None:
+            # Conservative first release: only confirmed observed successes can
+            # continue. A timeout/failed/unknown local write is never rewritten.
+            if (tool["status"] != "succeeded" or tool["commit_state"] != "committed"
+                    or tool["stdout"] or tool["stderr"]
+                    or set(result) != {"native_mutation_proof"}):
+                fail("Native mutation has no committed observed success; continuation is paused.")
+            from openvegas.agent.native_mutation_lifecycle import validate_observation_tx
+
+            await validate_observation_tx(tx, run=run, tool=tool, preparation=preparation, plan=plan)
         if name == "shell_run":
             if result.get("status") in {"running", "running_in_background", "pending"}:
                 fail("Unfinished background work is not a completed native tool result.")
