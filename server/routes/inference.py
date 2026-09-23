@@ -487,6 +487,13 @@ async def _prepare_authorized_ask_context(
 
     try:
         validate_reasoning_effort(req.provider, req.model, req.reasoning_effort)
+        if req.reasoning_effort is not None and not resolve_capability(
+            req.provider, req.model, "reasoning_controls", user_id=user["user_id"],
+        ):
+            raise ContractError(
+                APIErrorCode.INVALID_TRANSITION,
+                "Reasoning controls are disabled for this account; no request was sent.",
+            )
     except ContractError as exc:
         return JSONResponse(
             status_code=400,
@@ -641,6 +648,17 @@ async def _prepare_authorized_ask_context(
                 user_id=str(user["user_id"]), model_id=req.model, model_config=selected_model,
                 upload_service=get_file_upload_service(),
             )
+            # Prepared blocks include both current and reauthorized retained images.
+            if (
+                any(block["type"] == "image_url" for block in managed_attachments.prepared.blocks)
+                and not resolve_capability(
+                    req.provider, req.model, "image_input", user_id=user["user_id"],
+                )
+            ):
+                raise ContractError(
+                    APIErrorCode.INVALID_TRANSITION,
+                    "Image input is disabled for this account; no request was sent.",
+                )
             attachments_gateway_effective = True
             response_warnings = [w for w in response_warnings if w != "capability_unavailable:file_upload"]
         except (AttachmentError, ContractError) as exc:

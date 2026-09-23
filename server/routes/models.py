@@ -277,6 +277,13 @@ async def ask_canonical_conversation(
     try:
         # Check requested capabilities even though this endpoint never enables tools.
         validate_reasoning_effort(request.provider, request.model, request.reasoning_effort)
+        if request.reasoning_effort is not None and not resolve_capability(
+            request.provider, request.model, "reasoning_controls", user_id=user["user_id"],
+        ):
+            raise ContractError(
+                APIErrorCode.INVALID_TRANSITION,
+                "Reasoning controls are disabled for this account; no request was sent.",
+            )
         await get_catalog().validate_selection(
             request.provider,
             request.model,

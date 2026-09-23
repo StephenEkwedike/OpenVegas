@@ -1261,6 +1261,7 @@ class AgentOrchestrationService:
         empty_hash = hashlib.sha256(b"").hexdigest()
         touched = 0
         async with self.db.transaction() as tx:
+            # Discover without tool locks: callbacks always lock the run first.
             stale_rows = await tx.fetch(
                 """
                 SELECT id, run_id
@@ -1271,17 +1272,36 @@ class AgentOrchestrationService:
                     OR
                     (last_heartbeat_at IS NOT NULL AND last_heartbeat_at < now() - make_interval(secs => $1))
                   )
-                FOR UPDATE SKIP LOCKED
                 """,
                 timeout_seconds,
             )
             for row in stale_rows:
                 run_id = str(row["run_id"])
                 tool_call_id = str(row["id"])
-                emit_metric("tool_heartbeat_miss_total", {"source": "reconciler"})
-                run = await tx.fetchrow("SELECT * FROM agent_runs WHERE id=$1::uuid FOR UPDATE", run_id)
+                run = await tx.fetchrow(
+                    "SELECT * FROM agent_runs WHERE id=$1::uuid FOR UPDATE SKIP LOCKED", run_id
+                )
                 if not run:
                     continue
+                # Discovery may race a heartbeat or result; recheck under both locks.
+                stale_tool = await tx.fetchrow(
+                    """
+                    SELECT id FROM agent_run_tool_calls
+                    WHERE id=$1::uuid AND run_id=$2::uuid AND status='started'
+                      AND (
+                        (last_heartbeat_at IS NULL AND started_at < now() - make_interval(secs => $3))
+                        OR
+                        (last_heartbeat_at IS NOT NULL AND last_heartbeat_at < now() - make_interval(secs => $3))
+                      )
+                    FOR UPDATE SKIP LOCKED
+                    """,
+                    tool_call_id,
+                    run_id,
+                    timeout_seconds,
+                )
+                if not stale_tool:
+                    continue
+                emit_metric("tool_heartbeat_miss_total", {"source": "reconciler"})
 
                 result_payload = {
                     "ok": False,

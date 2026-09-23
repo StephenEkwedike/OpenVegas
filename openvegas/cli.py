@@ -3987,6 +3987,33 @@ def _provider_call_identity(value: Any) -> dict[str, str]:
     return {}
 
 
+def _local_tool_usage_prompt(provider: str, model: str) -> str:
+    if provider == "openrouter" and model.startswith("google/"):
+        from openvegas.gateway.openrouter import local_tool_definitions
+
+        # Use the advertised native schema, not the generic dispatcher's aliases.
+        lines = []
+        for tool in local_tool_definitions(model):
+            function = tool["function"]
+            schema = function["parameters"]
+            required = set(schema["required"])
+            fields = ", ".join(
+                field if field in required else field + "?"
+                for field in schema["properties"]
+            )
+            lines.append(f"  - {function['name']}({{ {fields} }})\n")
+        return "".join(lines)
+    return (
+        "  - Read({ filepath })\n"
+        "  - Search({ pattern, path? })\n"
+        "  - FindAndReplace({ filepath, old_string, new_string, replace_all? })\n"
+        "  - InsertAtEnd({ filepath, content })\n"
+        "  - Write({ filepath, content, write_mode? })\n"
+        "  - Bash({ command })\n"
+        "  - List({ path? })\n"
+    )
+
+
 def _native_inference_identity(value: Any) -> dict[str, str]:
     if not isinstance(value, str) or len(value) != 36:
         return {}
@@ -6312,13 +6339,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             f"Plan mode: {'on' if plan_mode else 'off'}\n"
             f"Approval mode: {approval_mode}\n"
             "Available tools:\n"
-            "  - Read({ filepath })\n"
-            "  - Search({ pattern, path? })\n"
-            "  - FindAndReplace({ filepath, old_string, new_string, replace_all? })\n"
-            "  - InsertAtEnd({ filepath, content })\n"
-            "  - Write({ filepath, content, write_mode? })\n"
-            "  - Bash({ command })\n"
-            "  - List({ path? })\n"
+            f"{_local_tool_usage_prompt(current_provider, current_model)}"
             "Rules:\n"
             "1) If a tool is needed, emit a tool call via tool-calling (preferred).\n"
             "   Fallback only if tool-calling is unavailable: output ONE JSON tool_call object.\n"
