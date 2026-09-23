@@ -45,6 +45,7 @@ class InferenceRequest:
     _managed_attachment_context: Any = field(default=None, init=False, repr=False)
     _managed_web_context: Any = field(default=None, init=False, repr=False)
     _managed_openrouter_dispatch: Any = field(default=None, init=False, repr=False)
+    _native_generation_claim: Any = field(default=None, init=False, repr=False)
 
 
 @dataclass
@@ -174,8 +175,15 @@ class AIGateway:
         self,
         req: InferenceRequest,
     ) -> tuple[_InferenceExecutionContext | None, InferenceResult | None]:
+        native_claim = req._native_generation_claim
+        if native_claim is not None:
+            from openvegas.agent.native_generation import NativeGenerationClaim, reject
+            if (type(native_claim) is not NativeGenerationClaim
+                    or req.account_id != "user:" + native_claim.user_id
+                    or req.provider != "openrouter"):
+                reject("Invalid native generation claim/account; no request was sent.")
         managed_web = req.provider == "openrouter" and req.enable_web_search
-        if managed_web:
+        if managed_web and native_claim is None:
             replay = await self._replay_web_request(req)
             if replay is not None:
                 return None, replay
@@ -259,11 +267,18 @@ class AIGateway:
         ctx = None
         try:
             async with self.db.transaction() as tx:
+                if native_claim is not None:
+                    from openvegas.agent.native_generation import lock_dispatch_claim_tx, link_gateway_tx
+                    await lock_dispatch_claim_tx(tx, native_claim, req)
                 request_id, replay = await self._begin_inference_request(
                     user_id=user_id, idempotency_key=req.idempotency_key,
                     payload_hash=payload_hash, tx=tx,
-                    **({"allow_retry": False} if managed_web else {}),
+                    **({"allow_retry": False} if managed_web or native_claim is not None else {}),
                 )
+                if native_claim is not None:
+                    if replay is not None:
+                        raise ContractError(APIErrorCode.HOLD_CONFLICT, "Native gateway replay requires route reconciliation.")
+                    await link_gateway_tx(tx, native_claim, request_id)
                 ctx = _InferenceExecutionContext(
                     account_id=req.account_id, model_config=model_config, user_id=user_id,
                     provider_api_key=provider_api_key, reserve_v=reserve_v, request_id=request_id,
@@ -623,6 +638,8 @@ class AIGateway:
             )
             if row is None:
                 return None
+            if row.get("native_route_command_id") is not None:
+                raise ContractError(APIErrorCode.HOLD_CONFLICT, "Native generation requires scoped route replay.")
             if row["payload_hash"] != self._payload_hash(req):
                 raise ContractError(APIErrorCode.IDEMPOTENCY_CONFLICT, "Idempotency key conflict: payload mismatch.")
             if row["status"] == "succeeded" and row["response_status"] == 200:
@@ -681,7 +698,8 @@ class AIGateway:
             row = await tx.fetchrow(
                 """
                 SELECT id, payload_hash, status, response_status, response_body_text, updated_at,
-                       final_charge_v, final_provider_cost_usd, provider_request_id
+                       final_charge_v, final_provider_cost_usd, provider_request_id,
+                       to_jsonb(inference_requests)->>'native_route_command_id' AS native_route_command_id
                 FROM inference_requests
                 WHERE user_id = $1 AND idempotency_key = $2
                 FOR UPDATE
@@ -695,6 +713,9 @@ class AIGateway:
                     "Inference request idempotency state could not be resolved.",
                 )
             if row:
+                if row.get("native_route_command_id") is not None:
+                    raise ContractError(APIErrorCode.HOLD_CONFLICT,
+                                        "Native generation can only be replayed through its authenticated route.")
                 if str(row["payload_hash"]) != payload_hash:
                     raise ContractError(
                         APIErrorCode.IDEMPOTENCY_CONFLICT,
@@ -705,7 +726,7 @@ class AIGateway:
                 if status == "succeeded" and row["response_status"] == 200 and row["response_body_text"]:
                     return rid, self._deserialize_result(row)
                 if not allow_retry:
-                    raise ContractError(APIErrorCode.HOLD_CONFLICT, "Prior web attempt requires reconciliation.")
+                    raise ContractError(APIErrorCode.HOLD_CONFLICT, "Prior inference attempt requires reconciliation.")
                 if status == "processing" and not self._is_stale(row.get("updated_at")):
                     raise ContractError(
                         APIErrorCode.HOLD_CONFLICT,

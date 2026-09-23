@@ -18,6 +18,7 @@ from typing import Any
 from openvegas.agent.orchestration_contracts import canonical_json, valid_actions_signature
 from openvegas.agent.runtime_contracts import result_submission_hash, tool_payload_hash
 from openvegas.agent.tool_cas import redaction_required
+from openvegas.agent.native_generation import verify_source_scope_tx
 from openvegas.contracts.errors import APIErrorCode, ContractError
 from openvegas.gateway.conversation import _SECRET
 from openvegas.gateway.openrouter import PROVIDER_CALL_ID, valid_model
@@ -195,6 +196,12 @@ async def replay_native_proposal_tx(
     stored_request = native_proposal_request(object_value(replay.get("request")))
     if request is None or canonical_json(stored_request) != canonical_json(request):
         raise ContractError(APIErrorCode.IDEMPOTENCY_CONFLICT, "Native proposal key or request changed.")
+    if run.get("native_generation_claim_id") is not None or binding.get("generation_scope") is not None:
+        _, generation_scope = await lock_native_source_tx(
+            tx, run=run, request_id=request["native_inference_request_id"],
+        )
+        if binding.get("generation_scope") != generation_scope:
+            fail("Native proposal original generation ownership does not match.")
     if (type(replay.get("version")) is not int or replay["version"] != 1
             or type(replay.get("response_status")) is not int or replay["response_status"] != 200
             or binding.get("proposal_replay_sha256") != _binding_digest(binding)
@@ -263,27 +270,50 @@ async def replay_native_proposal_tx(
     return body
 
 
-async def bind_native_call_tx(
-    tx: Any, *, run: Any, inference_request_id: str, provider_call_id: str,
-    tool_call_id: str, tool_name: str, arguments: dict, shell_mode: str, timeout_sec: int,
-    normalize: Callable, proposal_request: dict | None = None, proposal_response: dict | None = None,
-) -> None:
-    request_id = require_uuid(inference_request_id)
-    call_id = require_call_id(provider_call_id)
-    require_active_native_run(run)
-    # Runtime owner/session/projection and policy checks precede this function.
+async def lock_native_source_tx(tx: Any, *, run: Any, request_id: str) -> tuple[Any, dict | None]:
+    # Scoped runs lock their route before the gateway. Legacy rows have no marker.
+    if run.get("native_generation_claim_id") is not None:
+        await tx.fetchrow("SELECT id FROM inference_route_commands WHERE id=$1::uuid FOR UPDATE",
+                          str(run["native_generation_claim_id"]))
     source = await tx.fetchrow(
         "SELECT * FROM inference_requests WHERE id=$1::uuid AND user_id=$2::uuid FOR UPDATE",
         request_id, str(run["user_id"]),
     )
     if not source or source["status"] != "succeeded" or source["response_status"] != 200:
         fail("No settled native inference is available for this user.")
+    scope = await verify_source_scope_tx(tx, run=run, source=source, request_id=request_id)
+    return source, scope
+
+
+async def bind_native_call_tx(
+    tx: Any, *, run: Any, inference_request_id: str, provider_call_id: str,
+    tool_call_id: str, tool_name: str, arguments: dict, shell_mode: str, timeout_sec: int,
+    normalize: Callable, proposal_request: dict | None = None, proposal_response: dict | None = None,
+    locked_source: tuple[Any, dict | None] | None = None,
+) -> None:
+    request_id = require_uuid(inference_request_id)
+    call_id = require_call_id(provider_call_id)
+    require_active_native_run(run)
+    # Runtime owner/session/projection and policy checks precede this function.
+    source, generation_scope = locked_source or await lock_native_source_tx(tx, run=run, request_id=request_id)
     preauth = await tx.fetchrow(
-        "SELECT provider,model_id,status FROM inference_preauthorizations "
+        "SELECT provider,model_id,status,account_id,settled_v FROM inference_preauthorizations "
         "WHERE request_id=$1 AND user_id=$2::uuid",
         request_id, str(run["user_id"]),
     )
-    if (not preauth or preauth["provider"] != "openrouter" or preauth["status"] != "settled"
+    zero_charge_settled = False
+    if (preauth and preauth["status"] == "refunded" and preauth.get("settled_v") == 0
+            and preauth.get("account_id") == "user:" + str(run["user_id"])
+            and source.get("inference_source") == "wrapper" and source.get("final_charge_v") == 0):
+        # A fully grant-covered successful generation refunds its wallet hold.
+        # Require committed zero-charge usage, not merely a refunded/voided hold.
+        zero_charge_settled = bool(await tx.fetchrow(
+            "SELECT id FROM inference_usage WHERE request_id=$1::uuid AND user_id=$2::uuid "
+            "AND account_id=$3 AND provider=$4 AND model_id=$5 AND v_cost=0 LIMIT 1",
+            request_id, str(run["user_id"]), preauth["account_id"], preauth["provider"], preauth["model_id"],
+        ))
+    if (not preauth or preauth["provider"] != "openrouter"
+            or (preauth["status"] != "settled" and not zero_charge_settled)
             or not valid_model(preauth["model_id"])):
         fail("Native binding requires a settled managed-provider request.")
     body = object_value(source["response_body_text"])
@@ -329,6 +359,8 @@ async def bind_native_call_tx(
         "runtime_timeout_sec": timeout_sec,
         "runtime_session_id": str(run["runtime_session_id"]),
     }
+    if generation_scope is not None:
+        payload["generation_scope"] = generation_scope
     if proposal_request is not None or proposal_response is not None:
         response_text = canonical_json(object_value(proposal_response))
         snapshot = json.loads(response_text)

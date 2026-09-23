@@ -36,6 +36,10 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from openvegas.contracts.errors import APIErrorCode, ContractError
+from openvegas.agent.native_generation import (
+    NativeGenerationClaim, lock_run_tx, parse_scope, registration,
+    require_fresh_projection_tx, scope_document, stored_scope,
+)
 
 MAX_COMMAND_BYTES = 512 * 1024
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
@@ -52,7 +56,7 @@ _DEFAULTS = {
     "attachments": [],
     "reasoning_effort": None,
 }
-_COMMAND_FIELDS = {"prompt", "provider", "model", *_DEFAULTS}
+_COMMAND_FIELDS = {"prompt", "provider", "model", "native_scope", *_DEFAULTS}
 _ENVELOPE_FIELDS = {"kind", "state", "owner_token", "gateway_key"}
 
 
@@ -162,6 +166,9 @@ def command_fingerprint(command: dict[str, Any]) -> str:
     ):
         raise _invalid()
     value = {**_DEFAULTS, **command}
+    scope = value.pop("native_scope", None)
+    if scope is not None:
+        value["native_scope"] = parse_scope(scope).model_dump(mode="json")
     for name in ("prompt", "provider", "model"):
         if type(value.get(name)) is not str:
             raise _invalid()
@@ -179,7 +186,8 @@ def command_fingerprint(command: dict[str, Any]) -> str:
         raise _invalid()
     for file_id in files:
         _uuid(file_id)
-    raw = _bounded_json({"schema": _KIND, "command": value}, MAX_COMMAND_BYTES)
+    raw = _bounded_json({"schema": _KIND if scope is None else "inference_route_native_v1",
+                         "command": value}, MAX_COMMAND_BYTES)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
@@ -199,6 +207,7 @@ class ReplayClaim:
     gateway_idempotency_key: str
     owner_token: str = field(repr=False)
     _response_json: str | None = field(default=None, repr=False)
+    native_claim: NativeGenerationClaim | None = field(default=None, repr=False)
 
     @property
     def response(self) -> dict[str, Any] | None:
@@ -273,12 +282,14 @@ class InferenceReplayService:
         self.db = db
 
     async def begin(
-        self, *, user_id: str, idempotency_key: str, command: dict[str, Any]
+        self, *, user_id: str, idempotency_key: str, command: dict[str, Any],
+        allow_native_dispatch: bool = True,
     ) -> ReplayClaim:
         user_id, key = _uuid(user_id), _key(idempotency_key)
         digest = command_fingerprint(command)
         request_id, owner_token = str(uuid4()), str(uuid4())
         gateway_key = _gateway_key(user_id, key)
+        scope = parse_scope(command["native_scope"]) if command.get("native_scope") is not None else None
         initial = {
             "kind": _KIND,
             "state": "processing",
@@ -286,6 +297,38 @@ class InferenceReplayService:
             "gateway_key": gateway_key,
         }
         async with self.db.transaction() as tx:
+            native = None
+            if scope is not None:
+                # Always authenticate before inspecting replay, including exact completion.
+                run = await lock_run_tx(tx, user_id=user_id, scope=scope)
+                prior = await tx.fetchrow(
+                    "SELECT * FROM inference_route_commands WHERE native_run_id=$1::uuid FOR UPDATE",
+                    scope.run_id,
+                )
+                if prior is not None:
+                    if prior["idempotency_key"] != key:
+                        raise ContractError(APIErrorCode.INVALID_TRANSITION,
+                            "Native follow-up is not implemented; this run already owns a generation.")
+                    if (stored_scope(prior)["scope"] != scope.model_dump()
+                            or stored_scope(prior)["registration"] != registration(run)
+                            or str(run.get("native_generation_claim_id")) != str(prior["id"])):
+                        raise _blocked()
+                else:
+                    if not allow_native_dispatch:
+                        raise ContractError(APIErrorCode.INVALID_TRANSITION,
+                            "Native generation ownership is disabled; no unscoped fallback was made.")
+                    if run.get("native_generation_claim_id") is not None:
+                        raise _blocked()
+                    await require_fresh_projection_tx(tx, run=run, scope=scope)
+                    # Claim and route identity are inserted under the same run lock.
+                    taken = await tx.fetchrow(
+                        "SELECT id FROM inference_route_commands WHERE user_id=$1::uuid "
+                        "AND idempotency_key=$2 FOR UPDATE", user_id, key,
+                    )
+                    if taken:
+                        raise ContractError(APIErrorCode.IDEMPOTENCY_CONFLICT, "Idempotency key already belongs to another command.")
+                native = NativeGenerationClaim(user_id, request_id, scope, scope_document(scope, run),
+                                               owner_token, digest, gateway_key)
             inserted = await tx.fetchrow(
                 """INSERT INTO inference_route_commands
                    (id,user_id,idempotency_key,payload_hash,status,response_body_text)
@@ -308,6 +351,15 @@ class InferenceReplayService:
                 # paid work just because a route envelope is absent.
                 if await tx.fetchrow(_PRIOR_GATEWAY, user_id, [key, gateway_key]):
                     raise _blocked()
+                if native is not None:
+                    await tx.execute(
+                        "UPDATE inference_route_commands SET native_run_id=$2::uuid,native_scope=$3::jsonb "
+                        "WHERE id=$1::uuid", request_id, scope.run_id, native.scope_json,
+                    )
+                    await tx.execute(
+                        "UPDATE agent_runs SET native_generation_claim_id=$2::uuid WHERE id=$1::uuid",
+                        scope.run_id, request_id,
+                    )
             elif body["state"] != "completed":
                 raise _blocked()
             response_json = (
@@ -323,6 +375,7 @@ class InferenceReplayService:
                 gateway_key,
                 body["owner_token"],
                 response_json,
+                native if inserted else None,
             )
 
     async def complete(
@@ -350,6 +403,17 @@ class InferenceReplayService:
         # Snapshot the caller's mutable dict before the first suspension point.
         snapshot = json.loads(response_json)
         async with self.db.transaction() as tx:
+            if claim.native_claim is not None:
+                run = await lock_run_tx(tx, user_id=claim.user_id, scope=claim.native_claim.scope)
+                if str(run.get("native_generation_claim_id")) != claim.request_id:
+                    raise _blocked()
+                ownership = await tx.fetchrow(
+                    "SELECT * FROM inference_route_commands WHERE id=$1::uuid FOR UPDATE", claim.request_id,
+                )
+                if (ownership is None or str(ownership["gateway_request_id"]) != gateway_request_id
+                        or stored_scope(ownership) != json.loads(claim.native_claim.scope_json)
+                        or stored_scope(ownership)["registration"] != registration(run)):
+                    raise _blocked()
             row = await tx.fetchrow(_READ, claim.user_id, claim.idempotency_key, MAX_ENVELOPE_BYTES)
             if row is None:
                 raise _blocked()
@@ -427,6 +491,14 @@ class InferenceReplayService:
         if claim.gateway_idempotency_key != _gateway_key(claim.user_id, claim.idempotency_key):
             raise _blocked()
         async with self.db.transaction() as tx:
+            if claim.native_claim is not None:
+                await lock_run_tx(tx, user_id=claim.user_id, scope=claim.native_claim.scope)
+                ownership = await tx.fetchrow(
+                    "SELECT gateway_request_id FROM inference_route_commands WHERE id=$1::uuid FOR UPDATE",
+                    claim.request_id,
+                )
+                if ownership is not None and ownership["gateway_request_id"] is not None:
+                    raise _blocked()
             row = await tx.fetchrow(_READ, claim.user_id, claim.idempotency_key, MAX_ENVELOPE_BYTES)
             if await tx.fetchrow(
                 _PRIOR_GATEWAY,

@@ -282,6 +282,7 @@ async def assert_schema_compatible(db: Any, flags: FeatureFlags) -> None:
     await require_migration_min(db, "037_chat_file_uploads")
     await require_migration_min(db, "038_private_runtime_rls")
     await require_migration_min(db, "044_inference_route_commands")
+    await require_migration_min(db, "045_native_generation_ownership")
 
     await require_tables(
         db,
@@ -321,6 +322,11 @@ async def assert_schema_compatible(db: Any, flags: FeatureFlags) -> None:
             ("profiles", "avatar_id"),
             ("profiles", "avatar_palette"),
             ("profiles", "dealer_skin_id"),
+            ("inference_route_commands", "native_run_id"),
+            ("inference_route_commands", "native_scope"),
+            ("inference_route_commands", "gateway_request_id"),
+            ("agent_runs", "native_generation_claim_id"),
+            ("inference_requests", "native_route_command_id"),
                 ("profiles", "theme"),
                 ("chat_file_uploads", "content_bytes"),
                 ("chat_file_uploads", "status"),

@@ -53,7 +53,7 @@ def consumer():
         "current_model_capabilities": None,
         "APIError": APIError,
         "client": client,
-        "_env_flag": lambda *_: True,
+        "_env_flag": lambda _name, default: default == "1",
         "resolve_capability": lambda *_: True,
         "current_provider": "openai",
         "current_model": "offline-test-model",

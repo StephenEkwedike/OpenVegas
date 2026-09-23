@@ -16,11 +16,12 @@ from typing import Any
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from openvegas.capabilities import ReasoningEffort, resolve_capability
 from openvegas.gateway.providers import get_model_review, validate_reasoning_effort
 from openvegas.contracts.errors import APIErrorCode, ContractError
+from openvegas.contracts.native_scope import NativeInferenceScope
 from openvegas.events import mk_event
 from openvegas.security.policy import (
     contains_obvious_secret,
@@ -268,6 +269,22 @@ class AskRequest(BaseModel):
     enable_tools: bool = False
     enable_web_search: bool = False
     attachments: list[str] = Field(default_factory=list)
+    native_scope: NativeInferenceScope | None = None
+
+    @model_validator(mode="after")
+    def validate_native_generation(self):
+        if self.native_scope is not None:
+            from server.services.inference_replay import _key
+            try:
+                _key(self.idempotency_key)
+            except ContractError as exc:
+                raise ValueError("Native scope requires an explicit valid idempotency key.") from exc
+            if (self.provider != "openrouter" or self.enable_tools is not True
+                    or self.persist_context is not False or self.thread_id is not None
+                    or self.conversation_mode != "ephemeral"):
+                raise ValueError("Native ownership requires OpenRouter tools, ephemeral mode and no thread/persistence; "
+                                 "native follow-up is not implemented.")
+        return self
 
 
 class ModeUpdateRequest(BaseModel):
@@ -447,6 +464,8 @@ async def _prepare_ask_context(
             claim = await replay.begin(
                 user_id=str(user["user_id"]), idempotency_key=req.idempotency_key,
                 command=req.model_dump(mode="json", exclude={"idempotency_key"}),
+                **({"allow_native_dispatch": os.getenv("OPENVEGAS_NATIVE_GENERATION_SCOPE", "0") == "1"}
+                   if req.native_scope is not None else {}),
             )
         except ContractError as exc:
             return JSONResponse(status_code=409, content={"error": exc.code.value, "detail": exc.detail})
@@ -466,6 +485,10 @@ async def _prepare_ask_context(
             await replay.abandon_before_dispatch(claim)
         return prepared
     prepared.replay_service, prepared.replay_claim = replay, claim
+    if req.native_scope is not None:
+        if claim is None or claim.native_claim is None:
+            raise ContractError(APIErrorCode.INVALID_TRANSITION, "Native generation ownership was not reserved.")
+        prepared.inference_request._native_generation_claim = claim.native_claim
     return prepared
 
 
@@ -521,7 +544,7 @@ async def _prepare_authorized_ask_context(
         )
 
     thread_svc = get_provider_thread_service()
-    context_enabled = bool(thread_svc.context_enabled())
+    context_enabled = bool(thread_svc.context_enabled()) and req.native_scope is None
     web_search_requested = bool(req.enable_web_search)
     attachments_requested = bool(req.attachments)
     web_search_effective = bool(
@@ -911,6 +934,14 @@ async def _finalize_ask_result(
         **prepared.mode_payload,
     }
     if prepared.replay_claim is not None:
+        if req.native_scope is not None:
+            payload["completion_status"] = result.completion_status
+            payload["native_generation"] = {
+                "scope_version": 1, "run_id": req.native_scope.run_id,
+                "runtime_session_id": req.native_scope.runtime_session_id,
+                "inference_request_id": result.inference_request_id,
+                "original_turn_scope_verified": True, "continuation_supported": False,
+            }
         return await prepared.replay_service.complete(
             prepared.replay_claim,
             gateway_request_id=getattr(result, "inference_request_id", None),
@@ -1168,6 +1199,10 @@ async def ask_stream(
                 "web_search_source_ranking": list(result_payload.get("web_search_source_ranking") or []),
                 "tool_calls": streamed_tool_calls,
                 "warnings": list(result_payload.get("warnings") or []),
+                **({"native_generation": result_payload["native_generation"],
+                    "completion_status": result_payload["completion_status"],
+                    "provider_request_id": result_payload.get("provider_request_id")}
+                   if "native_generation" in result_payload else {}),
             },
         )
 

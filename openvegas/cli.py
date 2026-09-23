@@ -5347,6 +5347,9 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
     current_run_version: int = 0
     current_signature: str = "sha256:"
     runtime_session_id: str = str(uuid.uuid4())
+    from openvegas.agent.native_scope_client import NativeGenerationSession
+
+    native_generation_session = NativeGenerationSession()
     from openvegas.emotes.bridge import ChatEmoteBridge
     from openvegas.emotes.compositor import TurnCancelled, create_owned_chat
     from openvegas.tui.voice_refresh import voice_refresh_during_prompt
@@ -6449,6 +6452,35 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             attachments: list[str],
             reasoning_effort: str | None = None,
         ) -> dict[str, Any]:
+            request_context = {
+                "thread_id": current_thread_id,
+                "conversation_mode": conversation_mode,
+                "persist_context": conversation_mode == "persistent",
+            }
+            if current_provider == "openrouter" and _env_flag("OPENVEGAS_CHAT_NATIVE_GENERATION_SCOPE", "0"):
+                if not enable_tools:
+                    raise APIError(409, "Native continuation is not available in this verification mode; no request was sent.")
+                if not await _ensure_runtime_run(wait=True):
+                    raise APIError(409, "Native generation requires a registered workspace; no request was sent.")
+                try:
+                    scope = native_generation_session.reserve(key=idempotency_key, scope={
+                        "run_id": current_run_id, "runtime_session_id": runtime_session_id,
+                        "expected_run_version": current_run_version,
+                        "expected_valid_actions_signature": current_signature,
+                    })
+                except ValueError as exc:
+                    raise APIError(409, str(exc)) from exc
+                request_context = {"native_scope": scope, "thread_id": None,
+                                   "conversation_mode": "ephemeral", "persist_context": False}
+
+            def checked_result(result):
+                if "native_scope" in request_context:
+                    try:
+                        native_generation_session.validate_result(result)
+                    except ValueError as exc:
+                        raise APIError(502, str(exc), data=result if isinstance(result, dict) else None) from exc
+                return result
+
             await _validate_openrouter_request(
                 enable_tools=enable_tools, enable_web_search=enable_web_search,
                 attachments=attachments, reasoning_effort=reasoning_effort,
@@ -6459,19 +6491,17 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             )
             ask_stream_fn = getattr(client, "ask_stream", None)
             if not stream_enabled or not callable(ask_stream_fn):
-                return await client.ask(
+                return checked_result(await client.ask(
                     prompt,
                     current_provider,
                     current_model,
                     idempotency_key=idempotency_key,
-                    thread_id=current_thread_id,
-                    conversation_mode=conversation_mode,
-                    persist_context=(conversation_mode == "persistent"),
+                    **request_context,
                     enable_tools=enable_tools,
                     enable_web_search=enable_web_search,
                     attachments=attachments,
                     **({"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {}),
-                )
+                ))
 
             seen_event_keys: set[tuple[str, str, str, int]] = set()
             chunks: list[str] = []
@@ -6482,9 +6512,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     current_provider,
                     current_model,
                     idempotency_key=idempotency_key,
-                    thread_id=current_thread_id,
-                    conversation_mode=conversation_mode,
-                    persist_context=(conversation_mode == "persistent"),
+                    **request_context,
                     enable_tools=enable_tools,
                     enable_web_search=enable_web_search,
                     attachments=attachments,
@@ -6575,19 +6603,17 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             except APIError as e:
                 # Backward compatibility: if stream endpoint is unavailable, retry once with non-stream ask.
                 if e.status in {404, 405, 501}:
-                    return await client.ask(
+                    return checked_result(await client.ask(
                         prompt,
                         current_provider,
                         current_model,
                         idempotency_key=idempotency_key,
-                        thread_id=current_thread_id,
-                        conversation_mode=conversation_mode,
-                        persist_context=(conversation_mode == "persistent"),
+                        **request_context,
                         enable_tools=enable_tools,
                         enable_web_search=enable_web_search,
                         attachments=attachments,
                         **({"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {}),
-                    )
+                    ))
                 raise
 
             if completed_payload is None:
@@ -6606,7 +6632,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             if warning_value and warning_value not in warnings_list:
                 warnings_list.append(warning_value)
 
-            return {
+            return checked_result({
                 "text": merged_text,
                 "v_cost": str(completed_payload.get("v_cost") or "0"),
                 "thread_id": completed_payload.get("thread_id"),
@@ -6626,7 +6652,9 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 "web_search_sources": list(completed_payload.get("web_search_sources") or []),
                 "web_search_source_ranking": list(completed_payload.get("web_search_source_ranking") or []),
                 "tool_calls": list(completed_payload.get("tool_calls") or []),
-            }
+                **{name: completed_payload[name] for name in
+                   ("native_generation", "completion_status", "provider_request_id") if name in completed_payload},
+            })
 
         async def _ask_direct_one_shot(
             prompt: str,
@@ -7928,7 +7956,10 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                             timeout_sec=timeout_sec,
                             plan_mode=plan_mode,
                             **_native_tool_proposal_metadata(
-                                tool_req, enabled=_env_flag("OPENVEGAS_NATIVE_TOOL_HISTORY", "0"),
+                                tool_req, enabled=(
+                                    _env_flag("OPENVEGAS_NATIVE_TOOL_HISTORY", "0")
+                                    or _env_flag("OPENVEGAS_CHAT_NATIVE_GENERATION_SCOPE", "0")
+                                ),
                             ),
                         ),
                         endpoint="propose",
@@ -8460,13 +8491,16 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             current_run_id = run_id
             current_run_version = int(run_info.get("run_version", 0))
             current_signature = str(run_info.get("valid_actions_signature", "sha256:"))
-            await client.agent_register_workspace(
+            registered = await client.agent_register_workspace(
                 run_id=current_run_id,
                 runtime_session_id=runtime_session_id,
                 workspace_root=workspace_root,
                 workspace_fingerprint=workspace_fp,
                 git_root=workspace_git_root,
             )
+            if isinstance(registered, dict):
+                current_run_version = int(registered.get("run_version", current_run_version))
+                current_signature = str(registered.get("valid_actions_signature", current_signature))
             return True
         except Exception:
             current_run_id = None
@@ -8893,6 +8927,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
         else:
             console.print(f"OpenVegas Chat · {conversation_mode}")
         console.print("Type /help for commands")
+        if _env_flag("OPENVEGAS_CHAT_NATIVE_GENERATION_SCOPE", "0"):
+            console.print("Native ownership verification: one scoped generation only; continuation is not enabled.", markup=False)
         if attach_search_home_enabled:
             console.print(
                 "[yellow]OPENVEGAS_CHAT_ATTACH_SEARCH_HOME=1 may slow auto-attach. "

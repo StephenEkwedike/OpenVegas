@@ -40,6 +40,16 @@ class APIError(Exception):
         super().__init__(f"API error {status}: {detail}")
 
 
+def _native_scope_payload(scope: dict | None, *, provider: str, key: str | None) -> dict | None:
+    if scope is None:
+        return None
+    if provider != "openrouter" or not isinstance(key, str) or not key.strip():
+        raise ValueError("Native scope requires OpenRouter and an explicit idempotency key.")
+    from openvegas.contracts.native_scope import NativeInferenceScope
+
+    return NativeInferenceScope.model_validate(scope).model_dump(mode="json")
+
+
 class OpenVegasClient:
     """REST client for the OpenVegas backend."""
 
@@ -369,8 +379,12 @@ class OpenVegasClient:
         enable_web_search: bool | None = None,
         attachments: list[str] | None = None,
         reasoning_effort: str | None = None,
+        native_scope: dict | None = None,
     ) -> dict:
         payload = {"prompt": prompt, "provider": provider, "model": model}
+        scope = _native_scope_payload(native_scope, provider=provider, key=idempotency_key)
+        if scope is not None:
+            payload["native_scope"] = scope
         if reasoning_effort is not None:
             payload["reasoning_effort"] = reasoning_effort
         if idempotency_key or provider == "openrouter":
@@ -417,8 +431,12 @@ class OpenVegasClient:
         enable_web_search: bool | None = None,
         attachments: list[str] | None = None,
         reasoning_effort: str | None = None,
+        native_scope: dict | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         payload = {"prompt": prompt, "provider": provider, "model": model}
+        scope = _native_scope_payload(native_scope, provider=provider, key=idempotency_key)
+        if scope is not None:
+            payload["native_scope"] = scope
         if reasoning_effort is not None:
             payload["reasoning_effort"] = reasoning_effort
         if idempotency_key or provider == "openrouter":

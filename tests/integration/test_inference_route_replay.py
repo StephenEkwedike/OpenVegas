@@ -437,9 +437,12 @@ async def test_migration_rejects_inconsistent_terminal_status(replay_database, s
     assert await envelope(ctx, claim) == before
 
 
-async def test_migration_44_passes_current_schema_readiness(replay_database):
+async def test_legacy_replay_schema_requires_45_for_current_runtime_readiness(replay_database):
     from server.services.dependencies import assert_schema_compatible, current_flags
 
+    with pytest.raises(RuntimeError, match="045_native_generation_ownership"):
+        await assert_schema_compatible(replay_database.sandbox.db, current_flags())
+    await replay_database.sandbox.migrate(through=45)
     await assert_schema_compatible(replay_database.sandbox.db, current_flags())
 
 

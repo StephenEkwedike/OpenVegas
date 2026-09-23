@@ -593,6 +593,11 @@ class AgentOrchestrationService:
             existing_fp = str(existing_fp_raw) if existing_fp_raw else None
             existing_git = str(existing_git_raw) if existing_git_raw else None
 
+            if _row_optional(run, "native_generation_claim_id") is not None and (
+                existing_session, existing_root_raw, existing_fp_raw, existing_git_raw
+            ) != (runtime_session_id, workspace_root, workspace_fingerprint, git_root):
+                raise ContractError(APIErrorCode.INVALID_TRANSITION,
+                                    "Workspace registration is immutable after native generation reservation.")
             if has_tool and any(
                 [
                     existing_session and existing_session != runtime_session_id,
@@ -709,6 +714,9 @@ class AgentOrchestrationService:
             )
 
             # Even removing native references must not bypass an existing native key.
+            if run.get("native_generation_claim_id") is not None and native_request is None:
+                raise ContractError(APIErrorCode.INVALID_TRANSITION,
+                                    "This run requires its original scoped native generation reference.")
             replay = await replay_native_proposal_tx(
                 tx, run=run, idempotency_key=idempotency_key, request=native_request,
                 normalize=self._normalize_tool_arguments,
@@ -748,6 +756,11 @@ class AgentOrchestrationService:
                 terminal_status = 409
 
             tool_call_id = str(uuid.uuid4())
+            native_source = None
+            if native_request is not None:
+                # Claim provenance and gateway lock precede any tool row write.
+                from openvegas.agent.native_history import lock_native_source_tx
+                native_source = await lock_native_source_tx(tx, run=run, request_id=native_inference_request_id)
             execution_token = uuid.uuid4().hex
             await tx.execute(
                 """
@@ -819,6 +832,7 @@ class AgentOrchestrationService:
                     tool_name=tool_name, arguments=normalized_args, shell_mode=shell_mode_norm,
                     timeout_sec=timeout_value, normalize=self._normalize_tool_arguments,
                     proposal_request=native_request, proposal_response=env,
+                    locked_source=native_source,
                 )
             self._log_tool_lifecycle(
                 event="tool_proposed",
