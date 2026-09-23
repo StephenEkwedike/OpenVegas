@@ -15,7 +15,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
-from openvegas.agent.orchestration_contracts import canonical_json
+from openvegas.agent.orchestration_contracts import canonical_json, valid_actions_signature
 from openvegas.agent.runtime_contracts import result_submission_hash, tool_payload_hash
 from openvegas.agent.tool_cas import redaction_required
 from openvegas.contracts.errors import APIErrorCode, ContractError
@@ -34,7 +34,7 @@ def fail(detail: str = "Native tool history is incomplete or does not match this
 
 def require_uuid(value: Any) -> str:
     try:
-        if not isinstance(value, str) or str(uuid.UUID(value)) != value:
+        if not isinstance(value, str) or len(value) != 36 or str(uuid.UUID(value)) != value:
             raise ValueError
     except (ValueError, AttributeError):
         fail("Native tool reference must use a canonical request ID.")
@@ -42,22 +42,45 @@ def require_uuid(value: Any) -> str:
 
 
 def require_call_id(value: Any) -> str:
-    if (not isinstance(value, str) or not PROVIDER_CALL_ID.fullmatch(value)
+    if (not isinstance(value, str) or not 1 <= len(value) <= 256 or not PROVIDER_CALL_ID.fullmatch(value)
             or value.lower().startswith("sk-")):
         fail("Invalid native provider call reference.")
     return value
 
 
 def object_value(raw: Any) -> dict:
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                fail()
+            result[key] = value
+        return result
+
     if isinstance(raw, str):
         try:
-            if len(raw.encode("utf-8")) > MAX_BYTES:
+            if len(raw) > MAX_BYTES or len(raw.encode("utf-8")) > MAX_BYTES:
                 fail()
-            raw = json.loads(raw)
+            raw = json.loads(raw, object_pairs_hook=unique_object)
         except (ValueError, RecursionError, UnicodeError):
             fail()
     if not isinstance(raw, dict):
         fail()
+    pending = [(raw, 0)]
+    visited = 0
+    while pending:
+        value, depth = pending.pop()
+        visited += 1
+        if visited > 10000 or depth > 32:
+            fail()
+        if type(value) is dict:
+            if any(type(key) is not str for key in value):
+                fail()
+            pending.extend((item, depth + 1) for item in value.values())
+        elif type(value) is list:
+            pending.extend((item, depth + 1) for item in value)
+        elif value is not None and type(value) not in {str, int, float, bool}:
+            fail()
     try:
         encoded = json.dumps(raw, allow_nan=False, ensure_ascii=False).encode()
     except (ValueError, TypeError, RecursionError, UnicodeError):
@@ -92,7 +115,10 @@ def safe_receipt_content(value: Any) -> None:
 
 def expected_runtime_call(call: dict, normalize: Callable) -> tuple[str, dict, str]:
     """Allow deterministic aliases/defaults, not inferred paths or patch rewrites."""
-    name = DIRECT_TOOLS.get(call.get("tool_name"))
+    native_name = call.get("tool_name")
+    if not isinstance(native_name, str):
+        fail("Invalid native tool name.")
+    name = DIRECT_TOOLS.get(native_name)
     if not name:
         fail("This native tool requires an unverified local transformation; no binding was created.")
     args = object_value(call.get("arguments"))
@@ -102,23 +128,149 @@ def expected_runtime_call(call: dict, normalize: Callable) -> tuple[str, dict, s
     if "path" in args and "filepath" in args and args["path"] != args["filepath"]:
         fail("Conflicting native path aliases cannot be bound.")
     mode = call.get("shell_mode", "read_only")
-    if mode not in {"read_only", "mutating"}:
+    if not isinstance(mode, str) or mode not in {"read_only", "mutating"}:
         fail()
     if mode != "read_only":
         fail("Read-only native tools cannot change execution mode.")
     return name, normalize(tool_name=name, arguments=args), mode
 
 
+def require_active_native_run(run: Any) -> None:
+    if (run["state"] not in {"created", "running"} or run.get("cancel_requested_at")
+            or (run.get("expires_at") is not None and run["expires_at"] <= datetime.now(UTC))):
+        fail("Native references cannot be bound or recovered for an inactive or cancelling run.")
+
+
+def native_proposal_request(request: dict) -> dict:
+    """Bound the normalized identity, including the client's original projection."""
+    request = object_value(request)
+    for field in ("user_id", "run_id", "runtime_session_id", "native_inference_request_id"):
+        require_uuid(request.get(field))
+    require_call_id(request.get("native_provider_call_id"))
+    key = request.get("idempotency_key")
+    signature = request.get("expected_valid_actions_signature")
+    version = request.get("expected_run_version")
+    if (not isinstance(key, str) or not re.fullmatch(r"[!-~]{1,200}", key)
+            or not isinstance(signature, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", signature)
+            or type(version) is not int or not 0 <= version < 2**63
+            or type(request.get("plan_mode")) is not bool):
+        fail("Invalid native proposal key, projection or plan mode.")
+    return request
+
+
+def _binding_digest(binding: dict) -> str:
+    return hashlib.sha256(canonical_json({
+        key: value for key, value in binding.items() if key != "proposal_replay_sha256"
+    }).encode()).hexdigest()
+
+
+async def replay_native_proposal_tx(
+    tx: Any, *, run: Any, idempotency_key: str, request: dict | None, normalize: Callable,
+) -> dict | None:
+    """Caller holds the authenticated run lock and has checked the current session.
+
+    A replay is only a receipt of proposal creation, not permission to start.
+    Do not re-derive its envelope from current actions or mutable inference rows.
+    """
+    if request is not None:
+        require_active_native_run(run)
+    rows = await tx.fetch(
+        "SELECT run_id,role,content_json,tool_call_id FROM agent_chat_turns "
+        "WHERE run_id=$1::uuid AND ("
+        "content_json->'proposal_replay'->'request'->>'idempotency_key'=$2 OR "
+        "(content_json->>'inference_request_id'=$3 AND content_json->>'provider_call_id'=$4)) "
+        "ORDER BY turn_no LIMIT 2",
+        str(run["id"]), idempotency_key,
+        request["native_inference_request_id"] if request else None,
+        request["native_provider_call_id"] if request else None,
+    )
+    if not rows:
+        return None
+    require_active_native_run(run)
+    if len(rows) != 1:
+        fail("Native proposal replay is ambiguous; nothing was recovered.")
+    row = rows[0]
+    binding = object_value(row["content_json"])
+    replay = object_value(binding.get("proposal_replay"))
+    stored_request = native_proposal_request(object_value(replay.get("request")))
+    if request is None or canonical_json(stored_request) != canonical_json(request):
+        raise ContractError(APIErrorCode.IDEMPOTENCY_CONFLICT, "Native proposal key or request changed.")
+    if (type(replay.get("version")) is not int or replay["version"] != 1
+            or type(replay.get("response_status")) is not int or replay["response_status"] != 200
+            or binding.get("proposal_replay_sha256") != _binding_digest(binding)
+            or binding.get("kind") != KIND or row["role"] != "assistant"
+            or str(row["run_id"]) != request["run_id"]
+            or str(run["user_id"]) != request["user_id"]
+            or binding.get("runtime_session_id") != request["runtime_session_id"]
+            or binding.get("inference_request_id") != request["native_inference_request_id"]
+            or binding.get("provider_call_id") != request["native_provider_call_id"]
+            or type(binding.get("normalizer_version")) is not int or binding["normalizer_version"] != 1
+            or binding.get("provider") != "openrouter" or not valid_model(binding.get("model"))):
+        fail("Native proposal replay evidence is corrupt or incomplete.")
+    tool_id = require_uuid(str(row["tool_call_id"]))
+    require_call_id(binding.get("provider_request_id"))
+    call = object_value(binding.get("native_call"))
+    name, arguments, mode = expected_runtime_call(call, normalize)
+    expected_hash = tool_payload_hash(name, arguments, mode)
+    original = object_value(request.get("tool_request"))
+    if (require_call_id(call.get("provider_call_id")) != request["native_provider_call_id"]
+            or type(binding.get("call_ordinal")) is not int or not 0 <= binding["call_ordinal"] < 16
+            or type(call.get("timeout_sec")) is not int
+            or original != {"tool_name": name, "arguments": arguments, "shell_mode": mode,
+                            "timeout_sec": max(1, min(call["timeout_sec"], 5))}
+            or binding.get("runtime_payload_hash") != expected_hash
+            or binding.get("runtime_timeout_sec") != original["timeout_sec"]):
+        fail()
+    body_text = replay.get("response_body_text")
+    if not isinstance(body_text, str):
+        fail()
+    body = object_value(body_text)
+    tool = await tx.fetchrow(
+        "SELECT * FROM agent_run_tool_calls WHERE id=$1::uuid AND run_id=$2::uuid FOR UPDATE",
+        tool_id, str(run["id"]),
+    )
+    if not tool or tool["status"] != "proposed" or tool["commit_state"] != "not_applicable":
+        fail("Native proposal is no longer unstarted; it must not be executed again.")
+    proposed = object_value(body.get("tool_request"))
+    # Transcript storage never carries execution authority. Recover the original
+    # token only from its locked, unstarted tool row, and verify both commitments.
+    token = tool["execution_token"]
+    if ("execution_token" in proposed or not isinstance(token, str)
+            or not re.fullmatch(r"[0-9a-f]{32}", token)
+            or replay.get("token_sha256") != hashlib.sha256(token.encode()).hexdigest()):
+        fail("Native proposal token commitment does not match its tool row.")
+    proposed["execution_token"] = token
+    if (replay.get("response_sha256") != hashlib.sha256(canonical_json(body).encode()).hexdigest()
+            or tool["payload_hash"] != expected_hash
+            or tool["tool_name"] != name or tool["tool_class"] != "read_only"
+            or tool["approval_required"] is not False
+            or tool["run_version"] != request["expected_run_version"]
+            or canonical_json(object_value(tool["request_payload_json"])) != canonical_json(original)
+            or canonical_json(proposed) != canonical_json(dict(
+                original, tool_call_id=tool_id, execution_token=token,
+                payload_hash=expected_hash, requires_approval=False))
+            or body.get("run_id") != request["run_id"] or body.get("error") is not None
+            or type(body.get("run_version")) is not int
+            or body["run_version"] != request["expected_run_version"]
+            or not isinstance(body.get("current_state"), str)
+            or body["current_state"] not in {"created", "running"}
+            or type(body.get("projection_version")) is not int or body["projection_version"] < 0
+            or not isinstance(body.get("valid_actions"), list)
+            or any(not isinstance(action, dict) for action in body["valid_actions"])
+            or body.get("valid_actions_signature") != valid_actions_signature(
+                body["run_version"], body["valid_actions"])):
+        fail("Native proposal no longer matches its immutable tool request.")
+    return body
+
+
 async def bind_native_call_tx(
     tx: Any, *, run: Any, inference_request_id: str, provider_call_id: str,
     tool_call_id: str, tool_name: str, arguments: dict, shell_mode: str, timeout_sec: int,
-    normalize: Callable,
+    normalize: Callable, proposal_request: dict | None = None, proposal_response: dict | None = None,
 ) -> None:
     request_id = require_uuid(inference_request_id)
     call_id = require_call_id(provider_call_id)
-    if (run["state"] not in {"created", "running"} or run.get("cancel_requested_at")
-            or (run.get("expires_at") is not None and run["expires_at"] <= datetime.now(UTC))):
-        fail("Native references cannot be bound to an inactive or cancelling run.")
+    require_active_native_run(run)
     # Runtime owner/session/projection and policy checks precede this function.
     source = await tx.fetchrow(
         "SELECT * FROM inference_requests WHERE id=$1::uuid AND user_id=$2::uuid FOR UPDATE",
@@ -177,6 +329,22 @@ async def bind_native_call_tx(
         "runtime_timeout_sec": timeout_sec,
         "runtime_session_id": str(run["runtime_session_id"]),
     }
+    if proposal_request is not None or proposal_response is not None:
+        response_text = canonical_json(object_value(proposal_response))
+        snapshot = json.loads(response_text)
+        proposed = object_value(snapshot.get("tool_request"))
+        token = proposed.pop("execution_token", None)
+        if not isinstance(token, str) or not re.fullmatch(r"[0-9a-f]{32}", token):
+            fail("Native proposal response is missing its original token.")
+        payload["proposal_replay"] = {
+            "version": 1, "request": native_proposal_request(proposal_request),
+            "response_status": 200,
+            "response_body_text": canonical_json(snapshot),
+            "token_sha256": hashlib.sha256(token.encode()).hexdigest(),
+            "response_sha256": hashlib.sha256(response_text.encode()).hexdigest(),
+        }
+        payload["proposal_replay_sha256"] = _binding_digest(payload)
+    object_value(payload)
     await tx.execute(
         "INSERT INTO agent_chat_turns (run_id,turn_no,role,content_json,tool_call_id) "
         "SELECT $1::uuid,COALESCE(MAX(turn_no),0)+1,'assistant',$2::jsonb,$3::uuid "

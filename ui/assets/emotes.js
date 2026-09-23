@@ -10,6 +10,7 @@ const $ = (id) => document.getElementById(id);
 const media = window.matchMedia("(prefers-reduced-motion: reduce)");
 const players = new Set();
 const images = new Map();
+const previewRequests = new WeakMap();
 const owned = new Map();
 const purchaseKeys = new Map();
 let items = [];
@@ -24,6 +25,18 @@ function node(tag, text, className) {
 }
 
 function tell(message) { $("catalog-status").textContent = message; }
+
+function compatibilityLabel(item) {
+  const labels = Array.isArray(item?.compatibility)
+    ? [...new Set(item.compatibility.slice(0, 20)
+      .filter((value) => typeof value === "string" && value.trim().length > 0
+        && value.length <= 128 && !/[\u0000-\u001f\u007f]/.test(value))
+      .map((value) => value.trim()))]
+    : [];
+  return labels.length
+    ? `Catalog compatibility: ${labels.join("; ")}. Native terminal certification is not provided by this listing.`
+    : "Compatibility: not certified. No terminal or host compatibility is listed for this pack.";
+}
 
 function draw(player, now) {
   const { canvas, image, spec } = player;
@@ -85,12 +98,22 @@ async function previewData(item) {
   return images.get(cacheKey);
 }
 
+function clearPreview(stage) {
+  previewRequests.delete(stage);
+  for (const player of players) if (stage.contains(player.canvas)) players.delete(player);
+  stage.replaceChildren();
+}
+
 async function mountPreview(stage, item) {
+  const request = {};
+  previewRequests.set(stage, request);
+  // The modal reuses its connected stage when another pack is selected.
+  const current = () => stage.isConnected && previewRequests.get(stage) === request;
   const message = node("p", "Loading animation preview...", "text-mono-xs");
   stage.append(message);
   try {
     const { image, spec } = await previewData(item);
-    if (!stage.isConnected) return;
+    if (!current()) return;
     const canvas = node("canvas");
     canvas.width = spec.width;
     canvas.height = spec.height;
@@ -102,15 +125,17 @@ async function mountPreview(stage, item) {
     players.add(player);
     draw(player, performance.now());
     if (animationId === null) updateMotion();
-  } catch (error) { message.textContent = error.message || "Preview unavailable."; }
+  } catch (error) {
+    if (current()) message.textContent = error.message || "Preview unavailable.";
+  }
 }
 
 function openPreview(item) {
   $("preview-title").textContent = item.name;
   $("preview-description").textContent = item.description || "";
-  $("preview-stage").replaceChildren();
+  clearPreview($("preview-stage"));
   $("preview-command").textContent = `openvegas emote preview ${item.pack_id || item.id}`;
-  $("preview-notice").textContent = "Visual prototype. Previewing does not purchase or equip this pack.";
+  $("preview-notice").textContent = `Visual prototype. Previewing does not purchase or equip this pack. ${compatibilityLabel(item)}`;
   $("replay-preview").hidden = item.category !== "completion";
   $("replay-preview").disabled = media.matches;
   $("emote-dialog").showModal();
@@ -173,6 +198,7 @@ function render() {
     const stage = node("div", undefined, "sprite-stage");
     const body = node("div", undefined, "emote-card-body");
     body.append(node("h3", item.name), node("p", item.description || "Original pixel companion."));
+    body.append(node("p", compatibilityLabel(item), "text-mono-xs"));
     const priceLabel = plannedPriceLabel(item);
     if (priceLabel) body.append(node("p", priceLabel, "text-mono-xs"));
     const actions = node("div", undefined, "emote-card-actions");
@@ -211,12 +237,19 @@ $("emote-category").addEventListener("change", render);
 $("motion-toggle").addEventListener("click", () => { paused = !paused; updateMotion(); });
 media.addEventListener("change", () => { paused = media.matches; $("replay-preview").disabled = media.matches; updateMotion(); });
 document.addEventListener("visibilitychange", updateMotion);
-$("emote-dialog").addEventListener("close", () => { $("preview-stage").replaceChildren(); });
+$("emote-dialog").addEventListener("close", () => {
+  // A queued close event must not invalidate a modal that has already reopened.
+  if (!$("emote-dialog").open) clearPreview($("preview-stage"));
+});
 $("copy-command").addEventListener("click", async () => {
   try { await navigator.clipboard.writeText("openvegas emote"); $("copy-command").textContent = "Copied"; }
   catch { $("copy-command").textContent = "Select the command below to copy"; }
 });
-window.addEventListener("pagehide", () => { if (animationId !== null) cancelAnimationFrame(animationId); players.clear(); });
+window.addEventListener("pagehide", () => {
+  clearPreview($("preview-stage"));
+  if (animationId !== null) cancelAnimationFrame(animationId);
+  players.clear();
+});
 updateMotion();
 void load();
 

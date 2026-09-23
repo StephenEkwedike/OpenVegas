@@ -1170,7 +1170,33 @@ class OpenVegasClient:
             payload["native_inference_request_id"] = native_inference_request_id
         if native_provider_call_id is not None:
             payload["native_provider_call_id"] = native_provider_call_id
-        return await self._request("POST", f"/agent/runs/{run_id}/tools/propose", json=payload)
+        # Freeze nested arguments across awaits; recovery must repeat the exact proposal.
+        payload = json.loads(json.dumps(payload, allow_nan=False))
+        path = f"/agent/runs/{run_id}/tools/propose"
+        try:
+            return await self._request("POST", path, json=payload)
+        except APIError as error:
+            try:
+                canonical_native_id = (
+                    isinstance(native_inference_request_id, str)
+                    and str(uuid.UUID(native_inference_request_id)) == native_inference_request_id
+                )
+            except ValueError:
+                canonical_native_id = False
+            recoverable = (
+                canonical_native_id
+                and isinstance(native_provider_call_id, str)
+                and bool(native_provider_call_id)
+                and bool(idempotency_key)
+                and tool_name in {"fs_read", "fs_list"}
+                and shell_mode in {None, "read_only"}
+                and error.status == 503
+                and isinstance(error.__cause__, httpx.TransportError)
+            )
+            if not recoverable:
+                raise
+            # This endpoint only proposes work. Never retry paid inference or a start.
+            return await self._request("POST", path, json=payload)
 
     async def agent_tool_start(
         self,

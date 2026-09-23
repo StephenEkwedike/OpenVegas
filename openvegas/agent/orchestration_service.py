@@ -38,7 +38,15 @@ from openvegas.agent.tool_cas import (
     terminalize_tx,
 )
 from openvegas.agent.tool_stream import publish_tool_event
-from openvegas.agent.native_history import accepted_native_receipts_tx, bind_native_call_tx, require_uuid
+from openvegas.agent.native_history import (
+    KIND as NATIVE_BINDING_KIND,
+    accepted_native_receipts_tx,
+    bind_native_call_tx,
+    native_proposal_request,
+    object_value,
+    replay_native_proposal_tx,
+    require_uuid,
+)
 from openvegas.contracts.errors import APIErrorCode, ContractError
 from openvegas.telemetry import emit_metric
 
@@ -640,9 +648,14 @@ class AgentOrchestrationService:
         native_inference_request_id: str | None = None,
         native_provider_call_id: str | None = None,
     ) -> MutationHTTPResult:
-        del idempotency_key
         if (native_inference_request_id is None) != (native_provider_call_id is None):
             raise ContractError(APIErrorCode.INVALID_TRANSITION, "Native tool reference requires both IDs.")
+        if native_inference_request_id is not None:
+            object_value(arguments)
+            if (not isinstance(tool_name, str)
+                    or (shell_mode is not None and not isinstance(shell_mode, str))
+                    or (timeout_sec is not None and type(timeout_sec) is not int)):
+                raise ContractError(APIErrorCode.INVALID_TRANSITION, "Invalid native tool request.")
         role_class = self._actor_role_class(actor_role)
         tool_name = str(tool_name).strip()
         if tool_name not in {t.value for t in ToolName}:
@@ -659,8 +672,22 @@ class AgentOrchestrationService:
 
         is_mutating = is_mutating_tool(tool_name, shell_mode_norm)
         requires_approval = is_mutating
-        execution_token = uuid.uuid4().hex
         payload_hash = tool_payload_hash(tool_name, normalized_args, shell_mode_norm)
+        request_payload = {
+            "tool_name": tool_name, "arguments": normalized_args,
+            "shell_mode": shell_mode_norm, "timeout_sec": timeout_value,
+        }
+        native_request = None
+        if native_inference_request_id is not None:
+            native_request = native_proposal_request({
+                "user_id": user_id, "actor_role_class": role_class, "run_id": run_id,
+                "runtime_session_id": runtime_session_id, "idempotency_key": idempotency_key,
+                "expected_run_version": expected_run_version,
+                "expected_valid_actions_signature": expected_valid_actions_signature,
+                "plan_mode": plan_mode, "tool_request": request_payload,
+                "native_inference_request_id": native_inference_request_id,
+                "native_provider_call_id": native_provider_call_id,
+            })
 
         async with self.db.transaction() as tx:
             run = await tx.fetchrow(
@@ -680,6 +707,14 @@ class AgentOrchestrationService:
                 run=run,
                 runtime_session_id=runtime_session_id,
             )
+
+            # Even removing native references must not bypass an existing native key.
+            replay = await replay_native_proposal_tx(
+                tx, run=run, idempotency_key=idempotency_key, request=native_request,
+                normalize=self._normalize_tool_arguments,
+            )
+            if replay is not None:
+                return MutationHTTPResult(status_code=200, payload=replay)
 
             valid_actions = await self._derive_valid_actions_tx(
                 tx=tx, run=run, actor_id=user_id, actor_role_class=role_class
@@ -704,6 +739,8 @@ class AgentOrchestrationService:
             finished_at = None
             terminal_status = 200
             if plan_mode and is_mutating:
+                if native_request is not None:
+                    raise ContractError(APIErrorCode.INVALID_TRANSITION, "Native binding requires a read-only tool.")
                 status = "blocked"
                 reason_code = "tool_not_allowed_in_plan_mode"
                 started_at = _utc_now()
@@ -711,6 +748,7 @@ class AgentOrchestrationService:
                 terminal_status = 409
 
             tool_call_id = str(uuid.uuid4())
+            execution_token = uuid.uuid4().hex
             await tx.execute(
                 """
                 INSERT INTO agent_run_tool_calls (
@@ -729,14 +767,7 @@ class AgentOrchestrationService:
                 tool_name,
                 "mutating" if is_mutating else "read_only",
                 payload_hash,
-                canonical_json(
-                    {
-                        "tool_name": tool_name,
-                        "arguments": normalized_args,
-                        "shell_mode": shell_mode_norm,
-                        "timeout_sec": timeout_value,
-                    }
-                ),
+                canonical_json(request_payload),
                 execution_token,
                 status,
                 bool(requires_approval),
@@ -744,14 +775,6 @@ class AgentOrchestrationService:
                 started_at,
                 finished_at,
             )
-
-            if native_inference_request_id is not None:
-                await bind_native_call_tx(
-                    tx, run=run, inference_request_id=native_inference_request_id,
-                    provider_call_id=native_provider_call_id, tool_call_id=tool_call_id,
-                    tool_name=tool_name, arguments=normalized_args, shell_mode=shell_mode_norm,
-                    timeout_sec=timeout_value, normalize=self._normalize_tool_arguments,
-                )
 
             if status == "blocked":
                 await self._insert_durable_event_tx(
@@ -789,6 +812,14 @@ class AgentOrchestrationService:
                 "shell_mode": shell_mode_norm,
                 "timeout_sec": timeout_value,
             }
+            if native_request is not None:
+                await bind_native_call_tx(
+                    tx, run=run, inference_request_id=native_inference_request_id,
+                    provider_call_id=native_provider_call_id, tool_call_id=tool_call_id,
+                    tool_name=tool_name, arguments=normalized_args, shell_mode=shell_mode_norm,
+                    timeout_sec=timeout_value, normalize=self._normalize_tool_arguments,
+                    proposal_request=native_request, proposal_response=env,
+                )
             self._log_tool_lifecycle(
                 event="tool_proposed",
                 run_id=run_id,
@@ -851,6 +882,18 @@ class AgentOrchestrationService:
                 tool_call_id=tool_call_id,
                 execution_token=execution_token,
             )
+            if start_outcome == "idempotent" and await tx.fetchval(
+                "SELECT id FROM agent_chat_turns WHERE run_id=$1::uuid "
+                "AND tool_call_id=$2::uuid AND content_json->>'kind'=$3 LIMIT 1",
+                run_id, tool_call_id, NATIVE_BINDING_KIND,
+            ):
+                # Two callers may recover a proposal before either starts it.
+                # Only the fresh claim authorizes native execution; a lost start
+                # response is uncertain, never permission to execute again.
+                raise ContractError(
+                    APIErrorCode.INVALID_TRANSITION,
+                    "Native tool was already started; do not execute it again.",
+                )
             if start_outcome == "claimed":
                 await self._insert_durable_event_tx(
                     tx=tx,

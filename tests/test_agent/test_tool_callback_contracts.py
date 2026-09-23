@@ -163,6 +163,11 @@ class _FakeServiceTx:
     def __init__(self, run_row: dict):
         self._run_row = dict(run_row)
 
+    async def fetchval(self, query, *args):
+        assert "FROM agent_chat_turns" in query
+        assert args == ("r1", "t1", "openvegas.native-tool-binding.v1")
+        return "native-binding" if getattr(self, "native_bound", False) else None
+
     async def fetchrow(self, query: str, *_args):
         if "FROM agent_runs" in query:
             return dict(self._run_row)
@@ -198,7 +203,8 @@ class _RegisterWorkspaceTx:
 
 
 @pytest.mark.asyncio
-async def test_duplicate_start_same_tuple_no_second_event_or_version_bump(monkeypatch):
+@pytest.mark.parametrize("native_bound", [False, True])
+async def test_duplicate_start_same_tuple_no_second_event_or_version_bump(monkeypatch, native_bound):
     run_row = {
         "id": "r1",
         "user_id": "85add5d1-aaad-4caa-8422-8cd41ff400f7",
@@ -206,6 +212,7 @@ async def test_duplicate_start_same_tuple_no_second_event_or_version_bump(monkey
         "version": 7,
     }
     tx = _FakeServiceTx(run_row)
+    tx.native_bound = native_bound
     svc = AgentOrchestrationService(db=_FakeServiceDB(tx))
     event_counter = {"count": 0}
     outcomes = iter(["claimed", "idempotent"])
@@ -252,7 +259,7 @@ async def test_duplicate_start_same_tuple_no_second_event_or_version_bump(monkey
         expected_valid_actions_signature=expected_sig,
         idempotency_key="k1",
     )
-    second = await svc.start_tool_call(
+    second_call = svc.start_tool_call(
         user_id="85add5d1-aaad-4caa-8422-8cd41ff400f7",
         actor_role="authenticated",
         run_id="r1",
@@ -263,6 +270,15 @@ async def test_duplicate_start_same_tuple_no_second_event_or_version_bump(monkey
         expected_valid_actions_signature=expected_sig,
         idempotency_key="k2",
     )
+
+    if native_bound:
+        with pytest.raises(ContractError, match="already started; do not execute"):
+            await second_call
+        assert first.status_code == 200
+        assert int(first.payload["run_version"]) == 7
+        assert event_counter["count"] == 1
+        return
+    second = await second_call
 
     assert first.status_code == 200
     assert second.status_code == 200

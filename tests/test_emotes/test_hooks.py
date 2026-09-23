@@ -178,7 +178,8 @@ def test_deleted_owned_hook_does_not_prevent_conservative_uninstall(settings):
 
 
 @pytest.mark.parametrize("data", [b"{", b"[]", b'{"hooks":[],"hooks":{}}', b'{"hooks":{"Stop":{}}}',
-                                 b'{"hooks":{"Stop":[{"hooks":["bad"]}]}}', b" " * (h.MAX_SETTINGS + 1)])
+                                 b'{"hooks":{"Stop":[{"hooks":["bad"]}]}}',
+                                 pytest.param(b" " * (h.MAX_SETTINGS + 1), id="oversized-settings")])
 def test_invalid_or_oversized_settings_untouched(settings, data):
     write(settings, data)
     with pytest.raises(h.HookError):
@@ -296,9 +297,9 @@ def test_early_terminal_tombstones_delayed_start(settings, tmp_path):
     assert events(spool, receipt) == []
 
 
-@pytest.mark.parametrize("data", [b"not json", b"[]", b"[" * 10000, b'{"x":NaN}',
+@pytest.mark.parametrize("data", [b"not json", b"[]", pytest.param(b"[" * 10000, id="deeply-nested"), b'{"x":NaN}',
                                   b'{"hook_event_name":"Stop","hook_event_name":"UserPromptSubmit"}',
-                                  b" " * (h.MAX_INPUT + 1), b"\xff"])
+                                  pytest.param(b" " * (h.MAX_INPUT + 1), id="oversized-input"), b"\xff"])
 def test_malformed_input_is_silent_and_no_side_effects(settings, tmp_path, capsys, data):
     root, receipt = install(settings)
     spool = EventSpool(tmp_path / "events")

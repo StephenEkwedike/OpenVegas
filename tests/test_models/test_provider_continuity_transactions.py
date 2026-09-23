@@ -386,7 +386,7 @@ async def test_duplicate_completion_and_preflight_revision_race_no_second_charge
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("bad", ["sk-" + "a" * 30, "x" * 64001, "<tool>untrusted</tool>"])
+@pytest.mark.parametrize("bad", ["sk-" + "a" * 30, pytest.param("x" * 64001, id="oversized-prompt"), "<tool>untrusted</tool>"])
 async def test_bad_prompt_rejected_before_gateway(setup, bad):
     created = await create(setup)
     gateway = SimpleNamespace(infer=AsyncMock())

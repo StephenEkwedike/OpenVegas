@@ -77,7 +77,7 @@ def test_strict_shape_role_order_and_count(bad):
     [
         "",
         " ",
-        "x" * (MAX_TEXT_BYTES + 1),
+        pytest.param("x" * (MAX_TEXT_BYTES + 1), id="oversized-text"),
         "\ud800",
         "\x1b[31mred",
         "\x00data",
