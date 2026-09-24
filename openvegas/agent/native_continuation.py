@@ -27,6 +27,8 @@ def frozen_settings(req: Any, *, max_tokens: int) -> dict:
         from openvegas.contracts.native_scope import validate_native_user_text
 
         settings["native_user_text"] = validate_native_user_text(req.native_user_text)
+    if getattr(req, "native_handoff", None) is not None:
+        settings["native_handoff"] = req.native_handoff.model_dump(mode="json")
     return settings
 
 
@@ -44,6 +46,10 @@ def check_options(command: dict, inputs: dict) -> None:
     settings = inputs.get("settings")
     if not isinstance(settings, dict):
         reject("Native history settings are missing; no continuation was sent.")
+    if command.get("native_handoff") != settings.get("native_handoff"):
+        reject("Native continuation cannot change its confirmed handoff identity.")
+    if command.get("native_handoff") is not None and command.get("max_tokens") != settings.get("max_tokens"):
+        reject("Native continuation cannot change its reviewed output budget.")
     for name, default in (("provider", None), ("model", None), ("enable_tools", False),
                           ("enable_web_search", False), ("reasoning_effort", None), ("attachments", [])):
         if name not in settings or command.get(name, default) != settings[name]:
@@ -154,7 +160,7 @@ def restore_request(req: Any, claim: NativeGenerationClaim) -> Any:
 
 
 async def apply_request_history(prepared: Any, claim: NativeGenerationClaim) -> None:
-    from openvegas.agent.native_envelope import history_inputs
+    from openvegas.agent.native_envelope import NativeHistoryInputs, history_inputs
 
     request = prepared.inference_request
     if claim.history_revision is None:
@@ -163,10 +169,22 @@ async def apply_request_history(prepared: Any, claim: NativeGenerationClaim) -> 
     inputs = history_inputs(attachment_refs=list(prepared.attachment_refs or []), settings=settings)
     if claim.continuation_payload_json is not None:
         original = json.loads(claim.history_inputs_json)
-        if original != {"attachment_refs": list(prepared.attachment_refs or []), "settings": settings}:
+        expected = {"attachment_refs": list(prepared.attachment_refs or []), "settings": settings}
+        if original.get("incoming_handoff") is not None:
+            incoming = original["incoming_handoff"]
+            reference = getattr(prepared.req, "native_handoff", None)
+            if (reference is None or reference.model_dump() != {
+                    "handoff_id": incoming.get("handoff_id"),
+                    "handoff_sha256": incoming.get("handoff_sha256")}):
+                reject("Native retained handoff identity changed; no continuation was sent.")
+            expected["incoming_handoff"] = incoming
+        if original != expected:
             reject("Native retained files or request settings changed; no continuation was sent.")
         # Fresh preparation reauthorizes each original upload and capabilities;
         # then discard its newly assembled text in favor of exact private history.
         payload = json.loads(claim.continuation_payload_json)
         request.messages = payload["messages"]
+        # Preserve the exact original private input encoding. Subsequent
+        # handoff validation reauthorizes inherited uploads separately.
+        inputs = NativeHistoryInputs(claim.history_inputs_json)
     request._native_history_inputs = inputs

@@ -188,7 +188,7 @@ class LoopDriver:
         source = Path(os.getenv("CLI_NATIVE_LOOP_SOURCE", str(ROOT / "openvegas/cli.py")))
         tree = ast.parse(source.read_text())
         names = {"_run_tool_loop", "_update_fence", "_create_and_register_runtime_run", "_ensure_runtime_run"}
-        optional = {"_reset_native_task"}
+        optional = {"_reset_native_task", "_stage_handoff_destination"}
         nodes = {node.name: node for node in ast.walk(tree)
                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in names | optional}
         assert names <= nodes.keys()
@@ -200,6 +200,7 @@ class LoopDriver:
             "web_search_requested": False, "last_web_search_effective": False, "last_web_search_used": False,
             "last_web_search_retry_without_tool": False, "last_assistant_text_for_turn": "",
             "runtime_run_task": None, "native_generation_session": _session_type()(),
+            "pending_native_handoff": None,
             "APIError": APIError,
         }
         # Nested helpers declare cells in their enclosing function, not chat().

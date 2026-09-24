@@ -147,6 +147,8 @@ def _validate_intent(req, inputs):
         "attachments", "native_user_text")}
     command.update(native_history=True, native_scope=claim.scope.model_dump(mode="json"),
                    persist_context=False, thread_id=None, conversation_mode="ephemeral")
+    if settings.get("native_handoff") is not None:
+        command.update(native_handoff=settings["native_handoff"], max_tokens=settings["max_tokens"])
     if command_fingerprint(command) != claim.command_hash:
         _fail()
     content = req.messages[-1]["content"]
@@ -175,6 +177,9 @@ async def _assemble(tx, *, req, handoff_id, handoff_sha256):
         _fail()
     settings = inputs["settings"]
     _validate_intent(req, inputs)
+    if settings.get("native_handoff") is not None and settings["native_handoff"] != {
+            "handoff_id": record.handoff_id, "handoff_sha256": record.handoff_sha256}:
+        _fail()
     for key in ("provider", "model", "enable_tools", "enable_web_search", "reasoning_effort", "max_tokens"):
         if settings.get(key) != getattr(req, key):
             _fail()

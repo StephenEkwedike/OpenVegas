@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field, model_validator
 from openvegas.capabilities import ReasoningEffort, resolve_capability
 from openvegas.gateway.providers import get_model_review, validate_reasoning_effort
 from openvegas.contracts.errors import APIErrorCode, ContractError
+from openvegas.contracts.native_handoff import NativeHandoffRef
 from openvegas.contracts.native_scope import NativeContinuationRef, NativeInferenceScope
 from openvegas.events import mk_event
 from openvegas.security.policy import (
@@ -274,9 +275,27 @@ class AskRequest(BaseModel):
     native_history: bool = Field(default=False, strict=True)
     native_continuation: NativeContinuationRef | None = None
     native_user_text: str | None = Field(default=None, strict=True, repr=False)
+    native_handoff: NativeHandoffRef | None = None
+    max_tokens: int | None = Field(default=None, strict=True, ge=1, le=1_000_000)
+
+    @model_validator(mode="before")
+    @classmethod
+    def literal_handoff_flags(cls, value):
+        if isinstance(value, dict) and value.get("native_handoff") is not None:
+            for name in ("enable_tools", "enable_web_search", "persist_context"):
+                if name in value and type(value[name]) is not bool:
+                    raise ValueError("Confirmed handoff options require literal boolean values.")
+        return value
 
     @model_validator(mode="after")
     def validate_native_generation(self):
+        if self.native_handoff is not None:
+            if not self.native_history or self.max_tokens is None:
+                raise ValueError("A confirmed handoff requires native history and its exact output budget.")
+            if self.native_continuation is None and self.native_user_text is None:
+                raise ValueError("A handoff destination requires verified original user input.")
+        elif self.max_tokens is not None:
+            raise ValueError("An explicit output budget requires a confirmed native handoff.")
         if self.native_user_text is not None:
             from openvegas.contracts.native_scope import validate_native_user_text
 
@@ -481,6 +500,8 @@ async def _prepare_ask_context(
                    if req.native_scope is not None else {}),
                 **({"allow_native_history": os.getenv("OPENVEGAS_NATIVE_GENERATION_HISTORY", "0") == "1"}
                    if req.native_history else {}),
+                **({"allow_native_handoff": os.getenv("OPENVEGAS_NATIVE_TASK_HANDOFF", "0") == "1"}
+                   if req.native_handoff is not None else {}),
             )
         except ContractError as exc:
             return JSONResponse(status_code=409, content={"error": exc.code.value, "detail": exc.detail})
@@ -500,6 +521,18 @@ async def _prepare_ask_context(
             from openvegas.agent.native_continuation import apply_request_history
             prepared.inference_request._native_generation_claim = claim.native_claim
             await apply_request_history(prepared, claim.native_claim)
+            if req.native_handoff is not None:
+                if claim.native_claim.previous_request_id is None:
+                    from server.services.native_handoff_dispatch import prepare_first_dispatch
+                    prepared.inference_request = await prepare_first_dispatch(
+                        replay.db, request=prepared.inference_request,
+                        handoff_id=req.native_handoff.handoff_id,
+                        handoff_sha256=req.native_handoff.handoff_sha256,
+                    )
+                else:
+                    from server.services.native_handoff_continuation import prepare_continuation
+                    continuation = await prepare_continuation(replay.db, request=prepared.inference_request)
+                    prepared.inference_request = continuation.request
     except ContractError as exc:
         if claim is not None:
             await replay.abandon_before_dispatch(claim)
@@ -643,6 +676,9 @@ async def _prepare_authorized_ask_context(
     try:
         # Validate before creating/updating a provider thread; no capability opt-in for text.
         selected_model = await get_catalog().validate_selection(req.provider, req.model)
+        if req.max_tokens is not None and req.max_tokens > selected_model.get("max_tokens", 0):
+            raise ContractError(APIErrorCode.HANDOFF_BLOCKED,
+                                "The reviewed output budget is no longer supported; nothing was sent.")
         thread_ctx = await thread_svc.prepare_thread(
             user_id=user["user_id"],
             provider=req.provider,
@@ -814,7 +850,8 @@ async def _prepare_authorized_ask_context(
     inference_request = InferenceRequest(
         account_id=f"user:{user['user_id']}", provider=req.provider, model=req.model,
         messages=outbound_messages, idempotency_key=gateway_key,
-        max_tokens=min(1024, selected_model.get("max_tokens", 1024)),
+        max_tokens=(req.max_tokens if req.native_handoff is not None
+                    else min(1024, selected_model.get("max_tokens", 1024))),
         enable_tools=bool(req.enable_tools), enable_web_search=web_search_effective,
         reasoning_effort=req.reasoning_effort,
     )

@@ -34,7 +34,8 @@ async def test_cli_canonical_switch_commits_only_after_confirmation(scenario):
     current_provider, current_model, current_thread_id = 'openai', 'old', 'source'
     allow_model_switch, startup_bootstrap_task = True, None
     pending_attachments, chat_transcript = [], [{'role': 'user'}]
-    native_generation_session = SimpleNamespace(history_active=False)
+    native_generation_session = SimpleNamespace(history_active=False, awaiting_first_dispatch=False)
+    pending_native_handoff = None
     model_switch_local_tools = SimpleNamespace(_BACKGROUND_JOBS=jobs)
 """
     tree = ast.parse((Path(__file__).parents[2] / "openvegas/cli.py").read_text())
@@ -54,6 +55,7 @@ async def test_cli_canonical_switch_commits_only_after_confirmation(scenario):
     ]
     namespace = {
         "asyncio": asyncio,
+        "_env_flag": lambda name, default: default == "1",
         "SimpleNamespace": SimpleNamespace,
         "jobs": {"running": SimpleNamespace(process=SimpleNamespace(returncode=None))}
         if scenario == "pending"

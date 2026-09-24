@@ -12,7 +12,6 @@ from typing import Any
 from openvegas.agent.native_continuation import original_user_text
 from openvegas.agent.native_envelope import load_native_envelope_tx
 from openvegas.agent.native_generation import (
-    lock_run_tx,
     registration,
     require_fresh_projection_tx,
     stored_scope,
@@ -84,11 +83,15 @@ Prepare AND dispatch must separately resolve ownership, expiry and media support
         NativeInferenceScope.canonical_uuid(user_id)
         if type(scope) is not NativeInferenceScope or type(source_ref) is not NativeContinuationRef:
             _fail()
-        run = await lock_run_tx(tx, user_id=user_id, scope=scope)
+        # Public handoff coordinators may lock a source/destination graph before
+        # reaching this assembler. Always use that same global ancestor order.
+        from openvegas.agent.native_handoff_store import _runs
+        runs = await _runs(tx, user_id, scope)
+        run = runs[scope.run_id]
+        incoming = None
         if run.get("native_handoff_id") is not None:
-            # Successive handoff must import verified consumed ancestry, not
-            # silently emit only this task. Keep closed until that integration.
-            _fail()
+            from server.services.native_handoff_provenance import verify_consumed_handoff_tx
+            incoming = await verify_consumed_handoff_tx(tx, user_id=user_id, scope=scope)
         await require_fresh_projection_tx(tx, run=run, scope=scope, continuing=True)
         revision = run.get("native_history_revision")
         if (type(revision) is not int or not 0 <= revision < MAX_GENERATIONS
@@ -145,6 +148,8 @@ Prepare AND dispatch must separately resolve ownership, expiry and media support
             )
             inputs = envelope.history_inputs()
             original_user_text(inputs)
+            if inputs.get("incoming_handoff") != (incoming.provenance() if incoming else None):
+                _fail()
             if original_inputs is None:
                 original_inputs = inputs
             elif inputs != original_inputs:
@@ -184,7 +189,8 @@ Prepare AND dispatch must separately resolve ownership, expiry and media support
             "SELECT count(*) FROM agent_run_tool_calls WHERE run_id=$1::uuid", scope.run_id,
         ):
             _fail()
-        document = PortableTaskDocument.from_tasks([{
+        inherited = incoming.document.values()["tasks"] if incoming else []
+        document = PortableTaskDocument.from_tasks([*inherited, {
             "user_text": original_user_text(original_inputs),
             "attachment_refs": original_inputs["attachment_refs"], "generations": generations,
         }])

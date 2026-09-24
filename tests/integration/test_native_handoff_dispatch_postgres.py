@@ -41,10 +41,10 @@ from tests.integration.test_native_handoff_service_postgres import (
 pytestmark = pytest.mark.asyncio
 
 
-async def first(c, *, selection=None, current_files=()):
+async def first(c, *, selection=None, current_files=(), key='private-destination'):
     preview, scope = await prepare(c, **({'selection': selection} if selection else {})), await destination(c)
     await confirm(c, preview, scope)
-    key, route_id, owner = 'private-destination', str(uuid4()), str(uuid4())
+    route_id, owner = str(uuid4()), str(uuid4())
     gateway_key = _gateway_key(c.user, key)
     command = {**c.command, 'model': preview.selection.model, 'prompt': 'Now compare the answer.',
                'native_user_text': 'Now compare the answer.', 'native_scope': scope.model_dump(),

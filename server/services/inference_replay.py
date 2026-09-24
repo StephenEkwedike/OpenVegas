@@ -63,7 +63,7 @@ _DEFAULTS = {
     "reasoning_effort": None,
 }
 _COMMAND_FIELDS = {"prompt", "provider", "model", "native_scope", "native_continuation",
-                   "native_history", "native_user_text", *_DEFAULTS}
+                   "native_history", "native_user_text", "native_handoff", "max_tokens", *_DEFAULTS}
 _ENVELOPE_FIELDS = {"kind", "state", "owner_token", "gateway_key"}
 
 
@@ -177,12 +177,25 @@ def command_fingerprint(command: dict[str, Any]) -> str:
     continuation = value.pop("native_continuation", None)
     native_history = value.pop("native_history", False)
     user_text = value.pop("native_user_text", None)
+    handoff = value.pop("native_handoff", None)
+    max_tokens = value.pop("max_tokens", None)
     if type(native_history) is not bool:
         raise _invalid()
     if native_history:
         if scope is None:
             raise _invalid()
         value["native_history"] = True
+    if handoff is not None:
+        from openvegas.contracts.native_handoff import NativeHandoffRef
+        if not native_history or type(max_tokens) is not int or not 1 <= max_tokens <= 1_000_000:
+            raise _invalid()
+        try:
+            value["native_handoff"] = NativeHandoffRef.model_validate(handoff).model_dump()
+        except ValueError:
+            raise _invalid() from None
+        value["max_tokens"] = max_tokens
+    elif max_tokens is not None:
+        raise _invalid()
     if user_text is not None:
         if not native_history or continuation is not None:
             raise _invalid()
@@ -315,8 +328,12 @@ class InferenceReplayService:
         self, *, user_id: str, idempotency_key: str, command: dict[str, Any],
         allow_native_dispatch: bool = True,
         allow_native_history: bool = False,
+        allow_native_handoff: bool = False,
     ) -> ReplayClaim:
         user_id, key = _uuid(user_id), _key(idempotency_key)
+        # Later awaits must never observe a caller-mutated command under an
+        # already computed idempotency identity.
+        command = json.loads(_bounded_json(command, MAX_COMMAND_BYTES))
         digest = command_fingerprint(command)
         request_id, owner_token = str(uuid4()), str(uuid4())
         gateway_key = _gateway_key(user_id, key)
@@ -332,11 +349,17 @@ class InferenceReplayService:
             inserted = None
             if scope is not None:
                 # Always authenticate before inspecting replay, including exact completion.
-                run = await lock_run_tx(tx, user_id=user_id, scope=scope)
-                if run.get("native_handoff_id") is not None:
-                    # Durable binding survives a disabled rollout flag. Until
-                    # first-request consumption is wired, never execute this run
-                    # without its confirmed portable context.
+                handoff = None
+                if command.get("native_handoff") is not None:
+                    from server.services.native_handoff_reservation import lock_request_run_tx
+                    run, handoff = await lock_request_run_tx(
+                        tx, user_id=user_id, scope=scope, command=command,
+                    )
+                else:
+                    run = await lock_run_tx(tx, user_id=user_id, scope=scope)
+                if run.get("native_handoff_id") is not None and handoff is None:
+                    # Binding survives a disabled gate or omitted reference;
+                    # never execute a confirmed destination without its context.
                     raise ContractError(APIErrorCode.HANDOFF_BLOCKED,
                         "This task requires its committed model handoff; destination dispatch is not enabled.")
                 prior = await tx.fetchrow(
@@ -351,6 +374,9 @@ class InferenceReplayService:
                             or stored_scope(prior)["registration"] != registration(run)):
                         raise _blocked()
                 else:
+                    if handoff is not None and not allow_native_handoff:
+                        raise ContractError(APIErrorCode.HANDOFF_BLOCKED,
+                                            "Native model handoff is disabled; no request was sent.")
                     if not allow_native_dispatch:
                         raise ContractError(APIErrorCode.INVALID_TRANSITION,
                             "Native generation ownership is disabled; no unscoped fallback was made.")
@@ -371,6 +397,13 @@ class InferenceReplayService:
                         if inserted is None:
                             raise ContractError(APIErrorCode.IDEMPOTENCY_CONFLICT,
                                                 "Idempotency key already belongs to another command.")
+                        if handoff is not None:
+                            from server.services.native_handoff_reservation import (
+                                validate_new_handoff_tx,
+                            )
+                            await validate_new_handoff_tx(
+                                tx, user_id=user_id, scope=scope, command=command, run=run, record=handoff,
+                            )
                         from openvegas.agent.native_continuation import reserve_history_tx
                         history_revision, previous_id, payload_json, inputs_json = await reserve_history_tx(
                             tx, run=run, scope=scope, command=command,

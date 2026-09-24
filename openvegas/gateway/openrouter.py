@@ -692,7 +692,7 @@ async def complete(
 ) -> dict:
     payload = build_payload(req, model_config, capabilities)
     if handoff_binding is not None:
-        from server.services.native_handoff_dispatch import (
+        from server.services.native_handoff_guard import (
             validate_bound_request,
             validate_dispatch_deadline,
         )

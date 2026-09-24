@@ -157,14 +157,15 @@ def prepare_history_request(req: Any) -> bool:
     if validated._json != req._native_history_inputs._json:
         _fail()
     attachment = req._managed_attachment_context
-    inherited = ()
-    if inputs.get("incoming_handoff") is not None or getattr(req, "_native_handoff_binding", None) is not None:
-        from server.services.native_handoff_dispatch import validate_bound_request
-        inherited = validate_bound_request(req).inherited_file_ids
+    files = tuple(ref["file_id"] for ref in inputs["attachment_refs"])
+    if (inputs.get("incoming_handoff") is not None or getattr(req, "_native_handoff_binding", None) is not None
+            or getattr(req, "_native_handoff_continuation_binding", None) is not None):
+        from server.services.native_handoff_guard import attachment_file_ids
+        files = attachment_file_ids(req)
     if attachment is not None:
-        if inherited + tuple(ref["file_id"] for ref in inputs["attachment_refs"]) != attachment.prepared.file_ids:
+        if files != attachment.prepared.file_ids:
             _fail()
-    elif inherited or inputs["attachment_refs"]:
+    elif files:
         _fail()
     return True
 
@@ -181,9 +182,10 @@ class NativeDispatch:
 
 def capture_dispatch(req: Any, payload: dict) -> NativeDispatch | None:
     if (getattr(req, "_native_handoff_binding", None) is not None
+            or getattr(req, "_native_handoff_continuation_binding", None) is not None
             or (type(getattr(req, "_native_history_inputs", None)) is NativeHistoryInputs
                 and req._native_history_inputs.values().get("incoming_handoff") is not None)):
-        from server.services.native_handoff_dispatch import (
+        from server.services.native_handoff_guard import (
             validate_bound_request,
             validate_dispatch_deadline,
         )
@@ -332,9 +334,12 @@ def capture_response(req: Any, dispatch: NativeDispatch | None, raw: bytes, resu
         _fail()
 
 
-async def _owned_source_tx(tx, *, user_id, run_id, runtime_session_id, request_id):
+async def _owned_source_tx(tx, *, user_id, run_id, runtime_session_id, request_id,
+                           expected_route_command_id=None):
     for value in (user_id, run_id, runtime_session_id, request_id):
         _uuid(value)
+    if expected_route_command_id is not None:
+        _uuid(expected_route_command_id)
     run = await tx.fetchrow(
         "SELECT * FROM agent_runs WHERE id=$1::uuid AND user_id=$2::uuid FOR UPDATE", run_id, user_id,
     )
@@ -344,11 +349,13 @@ async def _owned_source_tx(tx, *, user_id, run_id, runtime_session_id, request_i
         "SELECT native_route_command_id FROM inference_requests WHERE id=$1::uuid AND user_id=$2::uuid",
         request_id, user_id,
     )
-    if route_id is None:
+    if (route_id is None or (expected_route_command_id is not None
+                            and str(route_id) != expected_route_command_id)):
         _fail()
     route = await tx.fetchrow("SELECT * FROM inference_route_commands WHERE id=$1::uuid FOR UPDATE", route_id)
     source = await tx.fetchrow("SELECT * FROM inference_requests WHERE id=$1::uuid FOR UPDATE", request_id)
-    if route is None or source is None:
+    if (route is None or source is None
+            or str(source.get("native_route_command_id")) != str(route_id)):
         _fail()
     scope = await verify_source_scope_tx(tx, run=run, source=source, request_id=request_id)
     if scope is None:
@@ -363,6 +370,7 @@ async def lock_envelope_owner_tx(tx, *, req, request_id: str) -> None:
     _, route, source = await _owned_source_tx(
         tx, user_id=claim.user_id, run_id=claim.scope.run_id,
         runtime_session_id=claim.scope.runtime_session_id, request_id=request_id,
+        expected_route_command_id=claim.route_command_id,
     )
     if (str(route["id"]) != claim.route_command_id or source["payload_hash"] != req._native_envelope_capture.request_hash
             or req.account_id != "user:" + claim.user_id or req.provider != "openrouter"):
@@ -397,13 +405,14 @@ async def _settled_source_tx(tx, *, source, user_id, provider, model):
 
 def validate_capture(req, result, *, request_hash: str) -> NativeEnvelope:
     if (getattr(req, "_native_handoff_binding", None) is not None
+            or getattr(req, "_native_handoff_continuation_binding", None) is not None
             or (type(getattr(req, "_native_history_inputs", None)) is NativeHistoryInputs
                 and req._native_history_inputs.values().get("incoming_handoff") is not None)):
-        from server.services.native_handoff_dispatch import validate_bound_request
+        from server.services.native_handoff_guard import payload_sha256, validate_bound_request
         binding = validate_bound_request(req)
         from server.services.native_handoff_attachments import _hash
         if (type(req._native_envelope_capture) is not NativeEnvelope
-                or _hash(req._native_envelope_capture.request_payload()) != binding.payload_sha256):
+                or _hash(req._native_envelope_capture.request_payload()) != payload_sha256(binding)):
             _fail()
     envelope = req._native_envelope_capture
     from openvegas.gateway.inference import AIGateway
@@ -452,12 +461,14 @@ async def _insert_private_tx(tx, query, *args):
 
 
 async def load_native_envelope_tx(tx, *, user_id: str, run_id: str, runtime_session_id: str,
-                                  request_id: str, provider: str, model: str) -> NativeEnvelope:
+                                  request_id: str, provider: str, model: str,
+                                  expected_route_command_id: str | None = None) -> NativeEnvelope:
     """Server-internal only. Caller owns transaction; never return via public API."""
     if provider != "openrouter":
         _fail()
     _, route, source = await _owned_source_tx(tx, user_id=user_id, run_id=run_id,
-                                            runtime_session_id=runtime_session_id, request_id=request_id)
+        runtime_session_id=runtime_session_id, request_id=request_id,
+        expected_route_command_id=expected_route_command_id)
     await _settled_source_tx(tx, source=source, user_id=user_id, provider=provider, model=model)
     row = await tx.fetchrow("SELECT * FROM native_generation_envelopes WHERE request_id=$1::uuid", request_id)
     if not row or any(str(row[key]) != value for key, value in {

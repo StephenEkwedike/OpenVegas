@@ -127,8 +127,9 @@ def test_incomplete_text_is_not_a_final_answer(native_consumer, status):
     c = native_consumer
     with pytest.raises(APIError, match="incomplete") as exc:
         c.run([event("response.completed", native_payload(c, status=status, v_cost="0.01"))])
-    assert exc.value.data["v_cost"] == "0.01"
-    assert exc.value.data["text"] == "answer"
+    # Rejected native envelopes must not be retained for generic CLI error
+    # rendering. Billing is recorded server-side, not inferred from this body.
+    assert exc.value.data == {}
     c.client.ask.assert_not_awaited()
 
 

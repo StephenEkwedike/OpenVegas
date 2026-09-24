@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 import openvegas.cli as cli
+from openvegas.agent.native_scope_client import NativeGenerationSession
 from openvegas.client import APIError
 from openvegas.tui.model_picker import (
     ModelSelectionError,
@@ -91,10 +92,16 @@ def chat_shell(client, pending=(), effort=None):
     end = next(i for i in range(start, len(lines)) if lines[i].strip() == "last_voice_transcribe_used = False")
     # Include validation, whole-queue capability guard, real uploads and batch-failure guard.
     guards = "\n".join(line[12:] for line in lines[start:end])
-    routing_names = {"web_search_requested_turn", "web_search_effective_turn", "attachments_effective_turn"}
-    routing = [node for node in ast.walk(tree) if isinstance(node, ast.Assign)
-               and any(isinstance(t, ast.Name) and t.id in routing_names for t in node.targets)]
-    assert len(routing) == 3
+    # Execute the complete production span, including conditional handoff guards,
+    # rather than flattening nested assignments into unconditional statements.
+    def assigns(node, name):
+        return isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id == name for target in node.targets)
+    routing_parent = next(node for node in ast.walk(tree) if isinstance(node, ast.If)
+                          and any(assigns(item, "web_search_requested_turn") for item in node.body))
+    routing_start = next(i for i, node in enumerate(routing_parent.body) if assigns(node, "web_search_requested_turn"))
+    routing_end = next(i for i, node in enumerate(routing_parent.body) if assigns(node, "attachments_effective_turn"))
+    routing = routing_parent.body[routing_start:routing_end + 1]
     code = """def build(client, pending, effort):
     current_provider, current_model, current_thread_id = 'openrouter', MODEL, None
     current_model_capabilities, current_reasoning_efforts = None, ()
@@ -103,6 +110,8 @@ def chat_shell(client, pending=(), effort=None):
     startup_bootstrap_task, show_stream_status = None, False
     pending_attachments, uploaded_attachment_cache = list(pending), {}
     attachment_preview_max_chars = 1000
+    native_generation_session = NativeGenerationSession()
+    native_history_mode = False
 """
     code += "\n".join("    " + line for node in helpers for line in ast.unparse(node).splitlines())
     code += """
@@ -124,6 +133,7 @@ def chat_shell(client, pending=(), effort=None):
     output = []
     namespace = vars(cli).copy()
     namespace.update({"MODEL": MODEL, "APIError": APIError, "SimpleNamespace": SimpleNamespace,
+                      "NativeGenerationSession": NativeGenerationSession,
                       "validate_selection": validate_selection, "ModelSelectionError": ModelSelectionError,
                       "reviewed_capabilities": reviewed_capabilities,
                       "console": SimpleNamespace(print=lambda *a, **k: output.append(str(a))),

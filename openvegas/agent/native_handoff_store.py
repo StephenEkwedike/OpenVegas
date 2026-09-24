@@ -292,14 +292,79 @@ async def _runs(tx, user_id, *scopes):
         if scope.run_id in scopes_by_id and scopes_by_id[scope.run_id] != scope:
             _fail("conflict")
         scopes_by_id[scope.run_id] = scope
+    # Discover immutable incoming links before taking any row lock. A source
+    # can itself be a destination; locking just the newest pair inverts order
+    # when its earlier context is later verified inside the same transaction.
+    from openvegas.agent.native_handoff_document import MAX_TASKS
+    snapshots, records, edges = {}, {}, {}
+    pending = list(scopes_by_id)
+    while pending:
+        run_id = pending.pop()
+        scope = scopes_by_id[run_id]
+        run = await tx.fetchrow("SELECT * FROM agent_runs WHERE id=$1::uuid AND user_id=$2::uuid",
+                                run_id, user_id)
+        if not run or str(run["runtime_session_id"]) != scope.runtime_session_id:
+            _fail("ownership")
+        incoming = str(run["native_handoff_id"]) if run.get("native_handoff_id") else None
+        snapshots[run_id] = (incoming, _workspace(run))
+        if incoming is None:
+            continue
+        record = await _owned(tx, user_id, incoming)
+        if (record.destination_scope is None or record.destination_scope.run_id != run_id
+                or record.destination_scope.runtime_session_id != scope.runtime_session_id):
+            _fail("ownership")
+        records[incoming] = record
+        parent = record.source_scope
+        edges[run_id] = parent.run_id
+        if parent.run_id in scopes_by_id:
+            if scopes_by_id[parent.run_id].runtime_session_id != parent.runtime_session_id:
+                _fail("conflict")
+        else:
+            if len(scopes_by_id) >= MAX_TASKS + 2:
+                _fail("integrity")
+            scopes_by_id[parent.run_id] = parent
+            pending.append(parent.run_id)
     runs = {}
     for run_id, scope in sorted(scopes_by_id.items()):
         run = await tx.fetchrow("SELECT * FROM agent_runs WHERE id=$1::uuid AND user_id=$2::uuid FOR UPDATE",
                                 run_id, user_id)
         if not run or str(run["runtime_session_id"]) != scope.runtime_session_id:
             _fail("ownership")
-        _workspace(run)
+        incoming = str(run["native_handoff_id"]) if run.get("native_handoff_id") else None
+        old_incoming, workspace = snapshots[run_id]
+        if _workspace(run) != workspace:
+            _fail("ownership")
+        if incoming != old_incoming:
+            # A concurrent confirmation may bind a previously fresh destination
+            # while this waiter acquires the already known source/destination
+            # locks. Accept only a parent graph already included in that order.
+            # Never acquire an undiscovered ancestor after taking a row lock.
+            if old_incoming is not None or incoming is None:
+                _fail("ownership")
+            current = await _owned(tx, user_id, incoming)
+            if (current.destination_scope is None or current.destination_scope.run_id != run_id
+                    or current.destination_scope.runtime_session_id != scope.runtime_session_id
+                    or current.source_scope.run_id not in scopes_by_id
+                    or scopes_by_id[current.source_scope.run_id].runtime_session_id
+                        != current.source_scope.runtime_session_id):
+                _fail("ownership")
+            records[incoming] = current
+            edges[run_id] = current.source_scope.run_id
         runs[run_id] = run
+    for start in edges:
+        seen, current = set(), start
+        while current in edges:
+            if current in seen:
+                _fail("integrity")
+            seen.add(current)
+            current = edges[current]
+    for record in records.values():
+        current = await _owned(tx, user_id, record.handoff_id)
+        if (current.handoff_sha256 != record.handoff_sha256
+                or current.destination_scope != record.destination_scope
+                or current.source_scope != record.source_scope):
+            _fail("conflict")
+        _registration(current, runs)
     return runs
 
 

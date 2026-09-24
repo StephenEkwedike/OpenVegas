@@ -55,6 +55,7 @@ class InferenceRequest:
     _native_history_required: bool = field(default=False, init=False, repr=False)
     _native_envelope_capture: Any = field(default=None, init=False, repr=False)
     _native_handoff_binding: Any = field(default=None, init=False, repr=False)
+    _native_handoff_continuation_binding: Any = field(default=None, init=False, repr=False)
 
 
 @dataclass
@@ -147,6 +148,9 @@ class AIGateway:
         result: InferenceResult | None = None
         buffered = False
         try:
+            if getattr(ctx, "handoff_binding", None) is not None:
+                from server.services.native_handoff_guard import validate_bound_request
+                validate_bound_request(req, expected=ctx.handoff_binding)
             if (
                 req.provider == "openai"
                 and (
@@ -191,7 +195,8 @@ class AIGateway:
         req: InferenceRequest,
     ) -> tuple[_InferenceExecutionContext | None, InferenceResult | None]:
         native_claim = req._native_generation_claim
-        handoff_binding = getattr(req, "_native_handoff_binding", None)
+        from server.services.native_handoff_guard import binding_for
+        handoff_binding = binding_for(req)
         from openvegas.agent.native_envelope import prepare_history_request
         native_history_required = prepare_history_request(req)
         if native_claim is not None:
@@ -286,8 +291,8 @@ class AIGateway:
         try:
             async with self.db.transaction() as tx:
                 if handoff_binding is not None:
-                    from server.services.native_handoff_dispatch import verify_first_dispatch_tx
-                    await verify_first_dispatch_tx(tx, req, expected=handoff_binding)
+                    from server.services.native_handoff_guard import verify_dispatch_tx
+                    await verify_dispatch_tx(tx, req, expected=handoff_binding)
                 if native_claim is not None:
                     from openvegas.agent.native_generation import (
                         link_gateway_tx,
@@ -308,10 +313,10 @@ class AIGateway:
                         raise ContractError(APIErrorCode.HOLD_CONFLICT, "Native gateway replay requires route reconciliation.")
                     await link_gateway_tx(tx, native_claim, request_id)
                     if handoff_binding is not None:
-                        from server.services.native_handoff_dispatch import (
-                            consume_first_dispatch_tx,
+                        from server.services.native_handoff_guard import (
+                            consume_dispatch_tx,
                         )
-                        await consume_first_dispatch_tx(tx, req, request_id, expected=handoff_binding)
+                        await consume_dispatch_tx(tx, req, request_id, expected=handoff_binding)
                 ctx = _InferenceExecutionContext(
                     account_id=req.account_id, model_config=model_config, user_id=user_id,
                     provider_api_key=provider_api_key, reserve_v=reserve_v, request_id=request_id,
@@ -382,7 +387,7 @@ class AIGateway:
                         )}, separators=(",", ":")),
                     )
                 if handoff_binding is not None:
-                    from server.services.native_handoff_dispatch import validate_dispatch_deadline
+                    from server.services.native_handoff_guard import validate_dispatch_deadline
                     validate_dispatch_deadline(req, expected=handoff_binding)
         except (Exception, asyncio.CancelledError):
             if ctx is not None:
@@ -397,7 +402,7 @@ class AIGateway:
         result: InferenceResult,
     ) -> InferenceResult:
         if getattr(ctx, "handoff_binding", None) is not None:
-            from server.services.native_handoff_dispatch import validate_bound_request
+            from server.services.native_handoff_guard import validate_bound_request
             validate_bound_request(req, expected=ctx.handoff_binding)
         model_config = ctx.model_config
         user_id = ctx.user_id
@@ -450,6 +455,9 @@ class AIGateway:
             native_envelope = validate_capture(req, result, request_hash=ctx.payload_hash)
 
         async with self.db.transaction() as tx:
+            if getattr(ctx, "handoff_binding", None) is not None:
+                from server.services.native_handoff_guard import validate_bound_request
+                validate_bound_request(req, expected=ctx.handoff_binding)
             if native_envelope is not None:
                 from openvegas.agent.native_envelope import lock_envelope_owner_tx
                 await lock_envelope_owner_tx(tx, req=req, request_id=request_id)
@@ -457,6 +465,8 @@ class AIGateway:
                 "SELECT * FROM inference_requests WHERE id = $1 FOR UPDATE", request_id,
             )
             if request_row and str(request_row["status"]) == "succeeded":
+                if getattr(ctx, "handoff_binding", None) is not None:
+                    validate_bound_request(req, expected=ctx.handoff_binding)
                 return self._deserialize_result(request_row)
             preauth = await tx.fetchrow(
                 "SELECT status FROM inference_preauthorizations WHERE id = $1 FOR UPDATE", preauth_id,
@@ -629,6 +639,11 @@ class AIGateway:
             if native_envelope is not None:
                 from openvegas.agent.native_envelope import persist_native_envelope_tx
                 await persist_native_envelope_tx(tx, req=req, request_id=request_id, envelope=native_envelope)
+
+            if getattr(ctx, "handoff_binding", None) is not None:
+                # A legitimate response can arrive after dispatch expiry. Bind
+                # identity/content through settlement, not the old deadline.
+                validate_bound_request(req, expected=ctx.handoff_binding)
 
         result.inference_request_id = request_id
         return result
@@ -1045,7 +1060,8 @@ class AIGateway:
 
     @staticmethod
     def _snapshot_handoff_request(req):
-        if getattr(req, "_native_handoff_binding", None) is None:
+        if (getattr(req, "_native_handoff_binding", None) is None
+                and getattr(req, "_native_handoff_continuation_binding", None) is None):
             return req
         import copy
         # Do not share mutable messages, model snapshots, or nested private
@@ -1062,7 +1078,7 @@ class AIGateway:
                 "Tool-calling mode is unavailable in this provider adapter.",
             )
         if handoff_binding is not None:
-            from server.services.native_handoff_dispatch import validate_dispatch_deadline
+            from server.services.native_handoff_guard import validate_dispatch_deadline
             validate_dispatch_deadline(req, expected=handoff_binding)
             if req.provider != "openrouter":
                 raise ContractError(APIErrorCode.HANDOFF_BLOCKED, "Unsupported handoff transport.")

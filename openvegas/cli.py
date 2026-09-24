@@ -5368,6 +5368,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
     from openvegas.agent.native_scope_client import NativeGenerationSession
 
     native_generation_session = NativeGenerationSession()
+    pending_native_handoff = None
+    pending_handoff_capabilities = None
     from openvegas.emotes.bridge import ChatEmoteBridge
     from openvegas.emotes.compositor import TurnCancelled, create_owned_chat
     from openvegas.tui.voice_refresh import voice_refresh_during_prompt
@@ -5571,6 +5573,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             console.print("/models [search] - list available models")
             console.print("/provider <provider> [model] - list provider models or switch")
             console.print("/model <model_id> - switch model")
+            if _env_flag("OPENVEGAS_CHAT_NATIVE_TASK_HANDOFF", "0"):
+                console.print("/handoff retry|cancel - resolve a pending native model switch")
             console.print("/continuity <on|off> - opt-in complete text-only history; no tools/attachments")
         console.print("/plan [on|off] - toggle plan mode (read-only intent)")
         console.print("/approve <ask|allow|exclude> - mutating tool approval mode")
@@ -6393,13 +6397,15 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
         from openvegas.client import APIError
         from openvegas.contracts.errors import ContractError
 
+        if pending_native_handoff is not None and pending_native_handoff.blocks_other_actions:
+            raise APIError(409, "Resolve the pending model switch with /handoff retry or /handoff cancel first.")
         emote_turn = emote_bridge.current_turn
         native_history_mode = bool(
             current_provider == "openrouter"
             and _env_flag("OPENVEGAS_CHAT_NATIVE_GENERATION_SCOPE", "0")
             and _env_flag("OPENVEGAS_CHAT_NATIVE_GENERATION_HISTORY", "0")
         )
-        if native_generation_session.history_active and (
+        if (native_generation_session.history_active or native_generation_session.prepared_handoff) and (
             not native_history_mode or isinstance(getattr(client, "_canonical_chat", None), dict)
         ):
             raise APIError(409, "Native history cannot switch to a different provider or text-only history path. Start a fresh session explicitly.")
@@ -6489,6 +6495,23 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             attachments: list[str],
             reasoning_effort: str | None = None,
         ) -> dict[str, Any]:
+            bound_session = native_generation_session if (
+                native_generation_session.history_active or native_generation_session.prepared_handoff) else None
+
+            def require_native_mode():
+                if bound_session is not None and (
+                        native_generation_session is not bound_session or current_provider != "openrouter"
+                        or not _env_flag("OPENVEGAS_CHAT_NATIVE_GENERATION_SCOPE", "0")
+                        or not _env_flag("OPENVEGAS_CHAT_NATIVE_GENERATION_HISTORY", "0")
+                        or isinstance(getattr(client, "_canonical_chat", None), dict)):
+                    raise APIError(409, "Retained native history cannot fall back to an unowned request. No request was sent.")
+
+            require_native_mode()
+            await _validate_openrouter_request(
+                enable_tools=enable_tools, enable_web_search=enable_web_search,
+                attachments=attachments, reasoning_effort=reasoning_effort,
+            )
+            require_native_mode()
             request_context = {
                 "thread_id": current_thread_id,
                 "conversation_mode": conversation_mode,
@@ -6499,6 +6522,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     raise APIError(409, "Native continuation is not available in this verification mode; no request was sent.")
                 if not await _ensure_runtime_run(wait=True):
                     raise APIError(409, "Native generation requires a registered workspace; no request was sent.")
+                require_native_mode()
                 try:
                     native_context = native_generation_session.prepare(key=idempotency_key, scope={
                         "run_id": current_run_id, "runtime_session_id": runtime_session_id,
@@ -6506,7 +6530,9 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         "expected_valid_actions_signature": current_signature,
                     }, options={"provider": current_provider, "model": current_model,
                                 "enable_tools": enable_tools, "enable_web_search": enable_web_search,
-                                "attachments": list(attachments), "reasoning_effort": reasoning_effort},
+                                "attachments": list(attachments), "reasoning_effort": reasoning_effort,
+                                **({"max_tokens": native_generation_session.max_tokens}
+                                   if native_generation_session.max_tokens is not None else {})},
                         history=_env_flag("OPENVEGAS_CHAT_NATIVE_GENERATION_HISTORY", "0"),
                         user_text=user_message if native_history_mode else None)
                 except ValueError as exc:
@@ -6519,13 +6545,10 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     try:
                         native_generation_session.validate_result(result)
                     except ValueError as exc:
-                        raise APIError(502, str(exc), data=result if isinstance(result, dict) else None) from exc
+                        raise APIError(502, str(exc)) from None
                 return result
 
-            await _validate_openrouter_request(
-                enable_tools=enable_tools, enable_web_search=enable_web_search,
-                attachments=attachments, reasoning_effort=reasoning_effort,
-            )
+            require_native_mode()
             stream_enabled = bool(
                 _env_flag("OPENVEGAS_CHAT_STREAM_EVENTS", "1")
                 and _chat_capability("stream_events")
@@ -6643,7 +6666,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         continue
             except APIError as e:
                 # Backward compatibility: if stream endpoint is unavailable, retry once with non-stream ask.
-                if e.status in {404, 405, 501}:
+                if e.status in {404, 405, 501} and "native_handoff" not in request_context:
                     return checked_result(await client.ask(
                         prompt,
                         current_provider,
@@ -7317,10 +7340,14 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         has_uploaded_attachments=bool(attachment_file_ids_for_turn),
                     )
                 )
+                if native_generation_session.prepared_handoff:
+                    web_search_requested_turn = native_generation_session.confirmed_selection.enable_web_search
                 web_search_effective_turn = bool(
                     web_search_requested_turn
                     and _chat_capability("web_search")
                 )
+                if native_generation_session.prepared_handoff and web_search_requested_turn != web_search_effective_turn:
+                    raise APIError(409, "The confirmed web capability is unavailable; nothing was silently disabled.")
                 web_search_activity_turn = bool(web_search_effective_turn)
                 attachments_effective_turn = bool(
                     attachment_file_ids_for_turn
@@ -8749,11 +8776,95 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
 
     async def _reset_native_task() -> None:
         nonlocal native_generation_session, current_run_id, current_run_version, current_signature
-        previous = current_run_id, current_run_version, current_signature
-        if not await _create_and_register_runtime_run() or current_run_id == previous[0]:
-            current_run_id, current_run_version, current_signature = previous
-            raise APIError(409, "Could not register a fresh native task. No model request was sent.")
+        try:
+            scope = await _stage_handoff_destination()
+        except Exception:
+            raise APIError(409, "Could not register a fresh native task. No model request was sent.") from None
+        # Registration and cancellation leave the active task untouched until
+        # the complete replacement is ready; adoption has no suspension point.
+        current_run_id, current_run_version, current_signature = (
+            scope.run_id, scope.expected_run_version, scope.expected_valid_actions_signature)
         native_generation_session = NativeGenerationSession()
+
+    async def _stage_handoff_destination():
+        from openvegas.contracts.native_scope import NativeInferenceScope
+
+        # Do not reuse the bootstrap helper: it changes the active run before
+        # registration succeeds. This candidate stays private until commit ACK.
+        created = await client.agent_run_create(state="running", is_resumable=True)
+        run_id = NativeInferenceScope.canonical_uuid(created.get("run_id"))
+        if run_id == current_run_id:
+            raise ValueError("A different destination task is required.")
+        registered = await client.agent_register_workspace(
+            run_id=run_id, runtime_session_id=runtime_session_id,
+            workspace_root=workspace_root, workspace_fingerprint=workspace_fp, git_root=workspace_git_root,
+        )
+        return NativeInferenceScope(run_id=run_id, runtime_session_id=runtime_session_id,
+            expected_run_version=registered.get("run_version"),
+            expected_valid_actions_signature=registered.get("valid_actions_signature"))
+
+    async def _switch_native_model(next_provider, next_model, target=None) -> bool:
+        nonlocal pending_native_handoff, pending_handoff_capabilities, native_generation_session
+        nonlocal current_provider, current_model, current_thread_id
+        nonlocal current_run_id, current_run_version, current_signature
+        nonlocal current_reasoning_effort, web_search_requested
+        nonlocal current_model_capabilities, current_reasoning_efforts
+        from openvegas.agent.native_handoff_client import PendingNativeHandoff
+        from openvegas.contracts.native_handoff import NativeHandoffSelection
+
+        try:
+            pending = pending_native_handoff
+            if pending is None:
+                if (next_provider != "openrouter" or current_provider != "openrouter"
+                        or not native_generation_session.finalized
+                        or any(job.process.returncode is None for job in model_switch_local_tools._BACKGROUND_JOBS.values())):
+                    raise ValueError("Finish the native task and its tools before transferring to a reviewed OpenRouter model.")
+                snapshot = await client.agent_run_get(current_run_id)
+                selection = NativeHandoffSelection(model=next_model, enable_web_search=web_search_requested,
+                    reasoning_effort=current_reasoning_effort, max_tokens=min(1024, target["max_tokens"]))
+                old_selection = NativeHandoffSelection(model=current_model, enable_web_search=web_search_requested,
+                    reasoning_effort=current_reasoning_effort, max_tokens=native_generation_session.max_tokens or 1024)
+                pending = PendingNativeHandoff(source_session=native_generation_session, source_scope={
+                    "run_id": current_run_id, "runtime_session_id": runtime_session_id,
+                    "expected_run_version": snapshot.get("run_version"),
+                    "expected_valid_actions_signature": snapshot.get("valid_actions_signature")},
+                    selection=selection, old_selection=old_selection,
+                    prepare_key=str(uuid.uuid4()), confirm_key=str(uuid.uuid4()))
+                pending_native_handoff, pending_handoff_capabilities = pending, dict(target)
+            selected = pending.prepare_request.selection
+            if (next_provider, next_model) != (selected.provider, selected.model):
+                raise ValueError("A different model switch is pending; resolve it with /handoff retry or /handoff cancel.")
+            if pending.state in {"new", "prepare_uncertain", "prepared"}:
+                preview = await pending.prepare(client)
+                if not await _chat_modal(lambda: Confirm.ask(
+                    f"Switch to {selected.model}, retaining {preview.task_count} task(s), "
+                    f"{preview.unique_file_count} file(s) and {preview.observation_count} accepted observation(s)? "
+                    "Private model reasoning is not transferred. No inference is sent by switching.", default=False)):
+                    pending.cancel()
+                    pending_native_handoff = pending_handoff_capabilities = None
+                    console.print("Model unchanged.", markup=False)
+                    return False
+                await pending.stage_destination(_stage_handoff_destination)
+            if pending.state in {"staged", "confirm_uncertain", "confirmed"}:
+                await pending.confirm(client)
+            capabilities = reviewed_capabilities(pending_handoff_capabilities, selected.provider, selected.model)
+            adopted = pending.adopt()
+            confirmed = pending.confirmed
+            scope = confirmed.destination_scope
+            # No suspension between verified acknowledgement and local adoption.
+            current_provider, current_model, current_thread_id = selected.provider, selected.model, None
+            current_run_id, current_run_version, current_signature = (
+                scope.run_id, scope.expected_run_version, scope.expected_valid_actions_signature)
+            current_reasoning_effort, web_search_requested = selected.reasoning_effort, selected.enable_web_search
+            native_generation_session = adopted
+            current_model_capabilities, current_reasoning_efforts = capabilities, capabilities.reasoning_efforts
+            pending_native_handoff = pending_handoff_capabilities = None
+            console.print(f"Selected {selected.model}; confirmed task context retained. Enter your next request.", markup=False)
+            return True
+        except (APIError, ValueError, TypeError, KeyError):
+            console.print("Model switch was not verified; the prior selection is retained. "
+                          "Use /handoff retry for the same operation or /handoff cancel before confirmation.", markup=False)
+            return False
 
     async def _bootstrap_chat_session() -> None:
         await asyncio.gather(
@@ -8785,6 +8896,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
         nonlocal voice_transcript_context_for_turn
         nonlocal attachment_markers_for_turn
         nonlocal attachment_file_ids_for_turn
+        nonlocal pending_native_handoff, pending_handoff_capabilities
         low_floor_usd = Decimal(os.getenv("TOPUP_LOW_BALANCE_FLOOR_USD", "5.00"))
         v_per_usd = Decimal(os.getenv("V_PER_USD", "100"))
         suggest_cooldown_sec = max(30, int(os.getenv("TOPUP_SUGGEST_COOLDOWN_SEC", "300")))
@@ -9183,10 +9295,31 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             if not message:
                 continue
 
+            if (pending_native_handoff is not None and pending_native_handoff.blocks_other_actions
+                    and message.split()[0].lower() not in {"/handoff", "/model", "/provider", "/help", "/status", "/exit"}):
+                console.print("A model switch is pending. Use /handoff retry or /handoff cancel before sending another task.", markup=False)
+                continue
+
             if message.startswith("/"):
                 parts = message.split()
                 cmd = parts[0].lower()
 
+                if cmd == "/handoff":
+                    if pending_native_handoff is None:
+                        console.print("No model switch is pending.", markup=False)
+                    elif parts == ["/handoff", "retry"]:
+                        selection = pending_native_handoff.prepare_request.selection
+                        await _switch_native_model(selection.provider, selection.model)
+                    elif parts == ["/handoff", "cancel"]:
+                        try:
+                            pending_native_handoff.cancel()
+                            pending_native_handoff = pending_handoff_capabilities = None
+                            console.print("Model unchanged; pending preview cancelled.", markup=False)
+                        except ValueError:
+                            console.print("Confirmation may already be committed. Use /handoff retry to resolve the same operation.", markup=False)
+                    else:
+                        console.print("Use /handoff retry or /handoff cancel.", markup=False)
+                    continue
                 if cmd == "/exit":
                     voice_button.stop_if_recording()
                     await _cleanup_chat_background_tasks()
@@ -9559,6 +9692,9 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     console.print(f"[green]Approval mode set to {approval_mode}.[/green]")
                     continue
                 if cmd == "/reasoning":
+                    if native_generation_session.awaiting_first_dispatch and len(parts) > 1:
+                        console.print("Reasoning is fixed by the confirmed model switch. Send its first task or explicitly start fresh with /continuity off.", markup=False)
+                        continue
                     if startup_bootstrap_task is not None:
                         await asyncio.shield(startup_bootstrap_task)
                     if len(parts) > 2:
@@ -9605,7 +9741,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                             })
                             if not created.get("thread_id") or not created.get("revision"):
                                 raise ModelSelectionError("Backend did not create canonical context; model unchanged.")
-                        if native_generation_session.history_active:
+                        if native_generation_session.history_active or native_generation_session.prepared_handoff:
                             await _reset_native_task()
                         current_thread_id = created["thread_id"] if created else None
                         client._canonical_chat = {"revision": created["revision"]} if created else None
@@ -9633,7 +9769,18 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                             continue
                         next_provider = parts[1].lower() if cmd == "/provider" else current_provider
                         next_model = parts[2] if cmd == "/provider" else parts[1]
+                        if pending_native_handoff is not None:
+                            await _switch_native_model(next_provider, next_model)
+                            continue
                         target = await validate_selection(client, next_provider, next_model)
+                        if (_env_flag("OPENVEGAS_CHAT_NATIVE_TASK_HANDOFF", "0")
+                                and native_generation_session.history_active
+                                and (next_provider, next_model) != (current_provider, current_model)):
+                            await _switch_native_model(next_provider, next_model, target)
+                            continue
+                        if native_generation_session.awaiting_first_dispatch:
+                            console.print("The confirmed destination is awaiting its first task; use /continuity off to explicitly start fresh.", markup=False)
+                            continue
                         plan_args = dict(
                             current_provider=current_provider, current_model=current_model,
                             thread_id=current_thread_id, pending_attachments=bool(pending_attachments),

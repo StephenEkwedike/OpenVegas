@@ -47,7 +47,9 @@ def consumer():
                      and node.name in {"_model_capability", "_chat_capability", "_validate_openrouter_request"})
     requests = []
     client = SimpleNamespace(ask=AsyncMock(return_value={"text": "non-stream"}))
+    from openvegas.agent.native_scope_client import NativeGenerationSession
     namespace = {
+        "native_generation_session": NativeGenerationSession(),
         "Any": Any,
         "ReviewedModelCapabilities": __import__("openvegas.tui.model_picker", fromlist=["ReviewedModelCapabilities"]).ReviewedModelCapabilities,
         "current_model_capabilities": None,

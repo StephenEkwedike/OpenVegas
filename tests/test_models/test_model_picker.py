@@ -178,7 +178,8 @@ async def test_actual_cli_switch_branch(scenario):
     wrapper += "    allow_model_switch, startup_bootstrap_task = True, None\n"
     wrapper += "    current_reasoning_effort, current_reasoning_efforts = None, ()\n"
     wrapper += "    current_model_capabilities = None\n"
-    wrapper += f"    native_generation_session = SimpleNamespace(history_active={scenario == 'native'})\n"
+    wrapper += f"    native_generation_session = SimpleNamespace(history_active={scenario == 'native'}, awaiting_first_dispatch=False)\n"
+    wrapper += "    pending_native_handoff = None\n"
     wrapper += "\n".join(
         "    " + line for helper in reasoning_helpers for line in ast.unparse(helper).splitlines()
     ) + "\n"
