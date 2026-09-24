@@ -20,7 +20,9 @@ import io
 import queue
 import time
 import weakref
+from bisect import bisect_right
 from collections.abc import Awaitable, Callable
+from functools import lru_cache
 from typing import TypeVar
 
 from prompt_toolkit.application import Application, in_terminal
@@ -34,6 +36,7 @@ from prompt_toolkit.layout import HSplit, Layout, VSplit, Window
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.layout.dimension import Dimension
 from prompt_toolkit.layout.processors import BeforeInput
+from prompt_toolkit.layout.screen import Char
 from prompt_toolkit.lexers import Lexer
 from prompt_toolkit.mouse_events import MouseButton, MouseEventType
 from prompt_toolkit.styles import DynamicStyle, Style, merge_styles
@@ -44,6 +47,26 @@ from .manifest import LoadedPack
 from .render import fit_frame, motion_allowed, prompt_toolkit_fragments
 
 T = TypeVar("T")
+
+
+@lru_cache(maxsize=2048)
+def _cell_width(char: str) -> int:
+    return Char(char).width
+
+
+def _wrapped_height(fragments, width: int) -> int:
+    # Sum-of-widths / columns undercounts rows when a wide glyph cannot fit in
+    # the final cell. Mirror Window's character-boundary wrapping instead.
+    row, column = 1, 0
+    for style, text, *_ in fragments:
+        if "[ZeroWidthEscape]" in style:
+            continue
+        for char in text:
+            size = _cell_width(char)
+            if column + size > width:
+                row, column = row + 1, 0
+            column += size
+    return row
 
 
 class TurnCancelled(Exception):
@@ -120,13 +143,17 @@ class _HistoryWindow(Window):
         super().__init__(**kwargs)
 
     def _scroll(self, ui_content, width, height):
-        # Window normally follows its cursor on every redraw. A selected or old
-        # transcript cursor must not pull a deliberately scrolled viewport back.
-        anchor = (self.vertical_scroll, self.vertical_scroll_2, self.horizontal_scroll)
-        super()._scroll(ui_content, width, height)
-        if not self.owner.follow_tail:
-            self.vertical_scroll = min(anchor[0], max(0, ui_content.line_count - 1))
-            self.vertical_scroll_2, self.horizontal_scroll = anchor[1:]
+        offsets = self.owner._history_line_offsets(ui_content, max(1, width))
+        maximum = max(0, offsets[-1] - max(1, height))
+        if self.owner.follow_tail:
+            row = maximum
+        else:
+            line = min(self.vertical_scroll, len(offsets) - 2)
+            subrow = min(self.vertical_scroll_2, offsets[line + 1] - offsets[line] - 1)
+            row = min(maximum, offsets[line] + subrow)
+        self.vertical_scroll = bisect_right(offsets, row) - 1
+        self.vertical_scroll_2 = row - offsets[self.vertical_scroll]
+        self.horizontal_scroll = 0
 
     def _mouse_handler(self, event):
         if event.event_type in {MouseEventType.SCROLL_UP, MouseEventType.SCROLL_DOWN}:
@@ -205,6 +232,10 @@ class OwnedChatCompositor:
         self._sanitizer = _SafeAnsi()
         self._raw: list[str] = []
         self._rows: list[list[tuple[str, str]]] = [[]]
+        self._history_metrics_width = None
+        self._history_selection_key = None
+        self._history_dirty_from = 0
+        self._history_offsets = [0, 1]
         # Keep the SGR parser alive between chunks/lines. Its decoded buffer is
         # drained after each write; it never receives terminal control sequences.
         self._ansi = ANSI("")
@@ -615,6 +646,7 @@ class OwnedChatCompositor:
             self._ansi_parser.send(char)
         fragments = list(to_formatted_text(self._ansi))
         self._ansi._formatted_text.clear()
+        self._history_dirty_from = min(self._history_dirty_from, len(self._rows) - 1)
         for style, char in fragments:
             if char == "\n":
                 self._rows.append([])
@@ -632,14 +664,56 @@ class OwnedChatCompositor:
         info = self.history_window.render_info
         return info.window_height if info is not None else max(1, self.app.output.get_size().rows - 10)
 
-    def scroll(self, lines: int):
+    def _selection_key(self):
+        selection = self.history_buffer.selection_state
+        return None if selection is None else (
+            selection.original_cursor_position, self.history_buffer.cursor_position, selection.type,
+        )
+
+    def _history_line_offsets(self, content, width):
+        selection = self._selection_key()
+        # The selection processor can add a highlighted cell to empty lines.
+        if width != self._history_metrics_width or selection != self._history_selection_key:
+            self._history_offsets = [0]
+            self._history_dirty_from = 0
+            self._history_metrics_width = width
+            self._history_selection_key = selection
+        start = self._history_dirty_from
+        if start < content.line_count:
+            del self._history_offsets[start + 1:]
+            for line in range(start, content.line_count):
+                self._history_offsets.append(
+                    self._history_offsets[-1] + _wrapped_height(content.get_line(line), width)
+                )
+            self._history_dirty_from = content.line_count
+        return self._history_offsets
+
+    def _history_scroll_metrics(self):
+        """Recount only the appended tail; completed lines change only on resize."""
+        info = self.history_window.render_info
+        width = max(1, info.window_width if info else self.app.output.get_size().columns - 1)
+        if (self._history_metrics_width != width or self._history_dirty_from < len(self._rows)
+                or self._selection_key() != self._history_selection_key):
+            content = self.history_control.create_content(width, self._history_height())
+            self._history_line_offsets(content, width)
+        offsets = self._history_offsets
+        line = min(self.history_window.vertical_scroll, len(offsets) - 2)
+        subrow = min(self.history_window.vertical_scroll_2, offsets[line + 1] - offsets[line] - 1)
+        maximum = max(0, offsets[-1] - self._history_height())
+        return offsets, min(maximum, offsets[line] + subrow), maximum
+
+    def _set_history_scroll_row(self, row: int):
+        offsets, _, maximum = self._history_scroll_metrics()
+        row = max(0, min(maximum, row))
+        line = bisect_right(offsets, row) - 1
         self.follow_tail = False
-        self.history_window.vertical_scroll = max(0, min(
-            self.history_buffer.document.line_count - 1,
-            self.history_window.vertical_scroll + lines,
-        ))
-        self.history_window.vertical_scroll_2 = 0
+        self.history_window.vertical_scroll = line
+        self.history_window.vertical_scroll_2 = row - offsets[line]
         self.app.invalidate()
+
+    def scroll(self, lines: int):
+        _, current, _ = self._history_scroll_metrics()
+        self._set_history_scroll_row(current + lines)
 
     def jump_to_latest(self):
         self.history_buffer.exit_selection()
@@ -659,8 +733,8 @@ class OwnedChatCompositor:
 
     def _scrollbar(self):
         height = self._history_height()
-        total = max(1, self.history_buffer.document.line_count - 1)
-        thumb = min(height - 1, round(self.history_window.vertical_scroll / total * (height - 1)))
+        _, current, maximum = self._history_scroll_metrics()
+        thumb = min(height - 1, round(current / max(1, maximum) * (height - 1)))
         return [
             ("reverse" if row == thumb else "", " " + ("\n" if row < height - 1 else ""), self._scrollbar_mouse)
             for row in range(height)
@@ -672,13 +746,11 @@ class OwnedChatCompositor:
         if event.event_type in {MouseEventType.SCROLL_UP, MouseEventType.SCROLL_DOWN}:
             self.scroll(-3 if event.event_type == MouseEventType.SCROLL_UP else 3)
         elif event.event_type in {MouseEventType.MOUSE_DOWN, MouseEventType.MOUSE_MOVE, MouseEventType.MOUSE_UP}:
-            self.follow_tail = False
-            self.history_window.vertical_scroll = round(
+            _, _, maximum = self._history_scroll_metrics()
+            self._set_history_scroll_row(round(
                 max(0, min(1, event.position.y / max(1, self._history_height() - 1)))
-                * (self.history_buffer.document.line_count - 1)
-            )
-            self.history_window.vertical_scroll_2 = 0
-            self.app.invalidate()
+                * maximum
+            ))
 
     async def close(self):
         if self._closed:

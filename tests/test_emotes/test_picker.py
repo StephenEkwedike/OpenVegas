@@ -147,6 +147,38 @@ def test_preview_is_explicit_and_not_an_equip(monkeypatch, picker_services):
     assert services.selection.read() is None
 
 
+@pytest.mark.parametrize("offline", [False, True])
+def test_setup_guide_is_informational_and_never_installs_or_launches(
+    monkeypatch, picker_services, offline
+):
+    import subprocess
+
+    from openvegas.emotes import hooks
+
+    services, library = picker_services
+    services.selection.write("fixture.saved")
+    before = services.selection.revision()
+    if offline:
+        async def unavailable():
+            library.calls.append("refresh")
+            raise OSError("synthetic offline")
+        monkeypatch.setattr(library, "refresh", unavailable)
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: pytest.fail("process launched"))
+    monkeypatch.setattr(hooks, "setup", lambda *a, **k: pytest.fail("hook settings touched"))
+    monkeypatch.setattr(commands, "Live", lambda *a, **k: pytest.fail("renderer started"))
+    result = invoke(monkeypatch, services, "s\n")
+    assert result.exit_code == 0, result.output
+    assert "s. Setup guide (read-only)" in result.output
+    assert "nothing installed, equipped, or launched" in result.output
+    assert "session discovery only (no task animation)" in result.output
+    assert "Codex native hook installation is unsupported" in result.output
+    assert "not each answer" in result.output
+    assert "certification are still pending" in result.output
+    assert "--apply" not in result.output
+    assert library.calls == ["refresh"] and library.closed == 1
+    assert services.selection.revision() == before
+
+
 def test_stale_menu_cannot_override_concurrent_off(monkeypatch, picker_services):
     services, library = picker_services
 

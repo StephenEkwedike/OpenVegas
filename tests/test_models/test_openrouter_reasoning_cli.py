@@ -34,6 +34,7 @@ def reasoning_shell(overrides=None):
     client._request = AsyncMock(side_effect=request)
     allow_model_switch, startup_bootstrap_task = True, None
     pending_attachments, chat_transcript = [], []
+    native_generation_session = type('Session', (), {'history_active': False})()
 """
     source += "\n".join("    " + line for node in helpers for line in ast.unparse(node).splitlines())
     source += "\n    for parts in commands:\n        cmd = parts[0]\n"

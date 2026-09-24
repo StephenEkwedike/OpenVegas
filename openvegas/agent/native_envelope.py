@@ -117,14 +117,26 @@ class NativeHistoryInputs:
         return json.loads(self._json)
 
 
-def history_inputs(*, attachment_refs: list[dict], settings: dict) -> NativeHistoryInputs:
+def history_inputs(*, attachment_refs: list[dict], settings: dict,
+                   incoming_handoff: dict | None = None) -> NativeHistoryInputs:
     # Reuse the owned upload contract, including order and duplicate validation.
     from server.services.attachment_history import validate_refs
 
     if type(attachment_refs) is not list or type(settings) is not dict:
         _fail()
     refs = validate_refs(attachment_refs) if attachment_refs else []
-    return NativeHistoryInputs(_encode({"attachment_refs": refs, "settings": settings}, MAX_INPUTS_BYTES))
+    values = {"attachment_refs": refs, "settings": settings}
+    if incoming_handoff is not None:
+        if (type(incoming_handoff) is not dict or set(incoming_handoff) != {
+                "handoff_id", "handoff_sha256", "document_sha256"}):
+            _fail()
+        _uuid(incoming_handoff["handoff_id"])
+        from re import fullmatch
+        if any(type(incoming_handoff[key]) is not str or not fullmatch(r"[0-9a-f]{64}", incoming_handoff[key])
+               for key in ("handoff_sha256", "document_sha256")):
+            _fail()
+        values["incoming_handoff"] = incoming_handoff
+    return NativeHistoryInputs(_encode(values, MAX_INPUTS_BYTES))
 
 
 def prepare_history_request(req: Any) -> bool:
@@ -145,10 +157,14 @@ def prepare_history_request(req: Any) -> bool:
     if validated._json != req._native_history_inputs._json:
         _fail()
     attachment = req._managed_attachment_context
+    inherited = ()
+    if inputs.get("incoming_handoff") is not None or getattr(req, "_native_handoff_binding", None) is not None:
+        from server.services.native_handoff_dispatch import validate_bound_request
+        inherited = validate_bound_request(req).inherited_file_ids
     if attachment is not None:
-        if tuple(ref["file_id"] for ref in inputs["attachment_refs"]) != attachment.prepared.file_ids:
+        if inherited + tuple(ref["file_id"] for ref in inputs["attachment_refs"]) != attachment.prepared.file_ids:
             _fail()
-    elif inputs["attachment_refs"]:
+    elif inherited or inputs["attachment_refs"]:
         _fail()
     return True
 
@@ -164,6 +180,17 @@ class NativeDispatch:
 
 
 def capture_dispatch(req: Any, payload: dict) -> NativeDispatch | None:
+    if (getattr(req, "_native_handoff_binding", None) is not None
+            or (type(getattr(req, "_native_history_inputs", None)) is NativeHistoryInputs
+                and req._native_history_inputs.values().get("incoming_handoff") is not None)):
+        from server.services.native_handoff_dispatch import (
+            validate_bound_request,
+            validate_dispatch_deadline,
+        )
+        validate_bound_request(req, payload=payload)
+        validate_dispatch_deadline(req)
+        if not getattr(req, "_native_history_required", False):
+            _fail()
     if not getattr(req, "_native_history_required", False):
         return None
     if type(req._native_history_inputs) is not NativeHistoryInputs:
@@ -369,6 +396,15 @@ async def _settled_source_tx(tx, *, source, user_id, provider, model):
 
 
 def validate_capture(req, result, *, request_hash: str) -> NativeEnvelope:
+    if (getattr(req, "_native_handoff_binding", None) is not None
+            or (type(getattr(req, "_native_history_inputs", None)) is NativeHistoryInputs
+                and req._native_history_inputs.values().get("incoming_handoff") is not None)):
+        from server.services.native_handoff_dispatch import validate_bound_request
+        binding = validate_bound_request(req)
+        from server.services.native_handoff_attachments import _hash
+        if (type(req._native_envelope_capture) is not NativeEnvelope
+                or _hash(req._native_envelope_capture.request_payload()) != binding.payload_sha256):
+            _fail()
     envelope = req._native_envelope_capture
     from openvegas.gateway.inference import AIGateway
 

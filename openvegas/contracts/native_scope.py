@@ -1,9 +1,25 @@
 """Public scope identifies a native generation; it never authorizes dispatch."""
 from __future__ import annotations
 
+import unicodedata
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+def validate_native_user_text(value: object) -> str:
+    """Original current input only, not a client-supplied history document."""
+    from openvegas.gateway.conversation import _SECRET
+
+    try:
+        if (type(value) is not str or not value.strip() or len(value) > 64_000
+                or len(value.encode("utf-8")) > 64_000 or _SECRET.search(value)
+                or any(unicodedata.category(c) in {"Cc", "Cf", "Cs"} and c not in "\n\r\t"
+                       for c in value)):
+            raise ValueError
+    except (ValueError, UnicodeError):
+        raise ValueError("Native user input must be bounded public text without secrets or controls.") from None
+    return value
 
 
 class NativeInferenceScope(BaseModel):

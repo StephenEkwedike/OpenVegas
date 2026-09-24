@@ -125,6 +125,7 @@ def test_apply_backend_layout_readonly_hashes_and_exact_idempotency(candidate, m
     assert result["status"] == "provisioned"
     assert digest((destination / p.RELEASE_FILE).read_bytes()) == result["manifest_sha256"]
     monkeypatch.setenv("OPENVEGAS_EMOTE_PACK_ROOT", str(destination))
+    monkeypatch.setenv("OPENVEGAS_EMOTE_RELEASE_SHA256", result["manifest_sha256"])
     for entry in result["release"]["packs"]:
         bundle = load_delivery_pack(entry["pack_id"], entry)
         assert bundle["pack_id"] == entry["pack_id"]

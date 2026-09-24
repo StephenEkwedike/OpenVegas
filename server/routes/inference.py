@@ -30,6 +30,7 @@ from openvegas.security.policy import (
 )
 from openvegas.telemetry import emit_metric, emit_run_metrics
 from server.middleware.auth import get_current_user
+from server.middleware.private_validation import PrivateInferenceRoute
 from server.services.dependencies import (
     get_catalog,
     get_file_upload_service,
@@ -44,7 +45,7 @@ from openvegas.gateway.catalog import ModelDisabled
 from openvegas.gateway.inference import InferenceRequest
 from openvegas.wallet.ledger import InsufficientBalance
 
-router = APIRouter()
+router = APIRouter(route_class=PrivateInferenceRoute)
 
 
 @dataclass
@@ -272,9 +273,16 @@ class AskRequest(BaseModel):
     native_scope: NativeInferenceScope | None = None
     native_history: bool = Field(default=False, strict=True)
     native_continuation: NativeContinuationRef | None = None
+    native_user_text: str | None = Field(default=None, strict=True, repr=False)
 
     @model_validator(mode="after")
     def validate_native_generation(self):
+        if self.native_user_text is not None:
+            from openvegas.contracts.native_scope import validate_native_user_text
+
+            validate_native_user_text(self.native_user_text)
+            if not self.native_history or self.native_continuation is not None:
+                raise ValueError("Original user input is accepted only on the first native history generation.")
         if self.native_history and self.native_scope is None:
             raise ValueError("Native history requires an owned scope.")
         if self.native_continuation is not None and not self.native_history:

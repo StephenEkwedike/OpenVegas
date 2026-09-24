@@ -171,6 +171,11 @@ def cosmetic_purchasable(item: dict) -> bool:
         and cosmetic_asset(item) is not None
     ):
         return False
+    if item.get("slot") in {"companion", "completion"}:
+        release_flags = ("artwork_approved", "native_compatibility_verified")
+        # Aggregate approval never substitutes for explicit native release checks.
+        if any(item.get(name) is not True for name in release_flags):
+            return False
     return cosmetic_price_v(item) is not None
 
 

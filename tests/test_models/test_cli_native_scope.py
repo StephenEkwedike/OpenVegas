@@ -24,6 +24,7 @@ def native_consumer(consumer):
         "runtime_session_id": str(uuid4()), "current_run_version": 1,
         "current_signature": "sha256:" + "a" * 64,
         "native_generation_session": NativeGenerationSession(),
+        "native_history_mode": False, "user_message": "Original current input",
         "current_model_capabilities": ReviewedModelCapabilities(
             "openrouter", "offline-test-model", frozenset({"stream_events", "tools"}), (), "buffered",
         ),

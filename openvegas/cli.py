@@ -6507,7 +6507,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     }, options={"provider": current_provider, "model": current_model,
                                 "enable_tools": enable_tools, "enable_web_search": enable_web_search,
                                 "attachments": list(attachments), "reasoning_effort": reasoning_effort},
-                        history=_env_flag("OPENVEGAS_CHAT_NATIVE_GENERATION_HISTORY", "0"))
+                        history=_env_flag("OPENVEGAS_CHAT_NATIVE_GENERATION_HISTORY", "0"),
+                        user_text=user_message if native_history_mode else None)
                 except ValueError as exc:
                     raise APIError(409, str(exc)) from exc
                 request_context = {**native_context, "thread_id": None,
@@ -9637,6 +9638,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                             current_provider=current_provider, current_model=current_model,
                             thread_id=current_thread_id, pending_attachments=bool(pending_attachments),
                             has_history=bool(chat_transcript),
+                            native_task_active=native_generation_session.history_active,
                             tools_pending=any(
                                 job.process.returncode is None
                                 for job in model_switch_local_tools._BACKGROUND_JOBS.values()

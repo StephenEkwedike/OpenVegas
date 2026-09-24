@@ -440,3 +440,50 @@ async def test_retained_file_digest_change_blocks_followup_without_advancing_rev
     assert response.status_code == 400, response.text
     assert len(c.calls) == 1
     assert await c.db.fetchval("SELECT native_history_revision FROM agent_runs") == 0
+
+
+@pytest.mark.parametrize("endpoint", ["ask", "stream"])
+async def test_original_user_text_survives_private_history_and_changed_replay_is_rejected(continuation_db, endpoint):
+    from openvegas.agent.native_continuation import original_user_text
+
+    c = continuation_db
+    original = "Read the notes.\r\nKeep my exact request."
+    first_command = {**c.command, "idempotency_key": c.key, "native_user_text": original}
+    first = payload(await c.client.post("/inference/" + endpoint, json=first_command), endpoint)
+    request_id = first["native_generation"]["inference_request_id"]
+    stored = json.loads(await c.db.fetchval(
+        "SELECT history_inputs_json FROM native_generation_envelopes WHERE request_id=$1::uuid", request_id))
+    assert original_user_text(stored) == original
+    assert stored["settings"]["prompt"] == c.command["prompt"] != original
+    assert "native_user_text" not in json.dumps(c.calls[0])
+    replay = payload(await c.client.post("/inference/ask", json=first_command))
+    assert replay["native_generation"] == first["native_generation"]
+    for changed in (original + " changed", None):
+        response = await c.client.post("/inference/ask", json={**first_command, "native_user_text": changed})
+        assert response.status_code == 409, response.text
+    assert len(c.calls) == 1
+    await complete_tools(c, first)
+    command = await followup(c, first)
+    forged = await c.client.post("/inference/ask", json={**command, "native_user_text": "New historical request"})
+    assert forged.status_code == 422 and len(c.calls) == 1
+    c.emit_calls = False
+    second = payload(await c.client.post("/inference/ask", json=command))
+    next_inputs = json.loads(await c.db.fetchval(
+        "SELECT history_inputs_json FROM native_generation_envelopes WHERE request_id=$1::uuid",
+        second["native_generation"]["inference_request_id"]))
+    assert next_inputs == stored and original_user_text(next_inputs) == original
+    assert len(c.calls) == 2
+    assert await c.db.fetchval("SELECT count(*) FROM inference_usage") == 2
+
+
+async def test_old_native_generation_cannot_claim_original_user_provenance(continuation_db):
+    from openvegas.agent.native_continuation import original_user_text
+
+    c = continuation_db
+    result = payload(await post(c))
+    stored = json.loads(await c.db.fetchval(
+        "SELECT history_inputs_json FROM native_generation_envelopes WHERE request_id=$1::uuid",
+        result["native_generation"]["inference_request_id"]))
+    with pytest.raises(ContractError, match="no verified original user input"):
+        original_user_text(stored)
+    assert len(c.calls) == 1

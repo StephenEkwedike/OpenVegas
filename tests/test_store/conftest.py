@@ -10,6 +10,7 @@ import pytest
 from openvegas.emotes import manifest
 from openvegas.store.catalog import STORE_CATALOG
 from openvegas.store.service import StoreService
+from tests.emote_release_fixture import pin_delivery_release
 from tests.test_store.fakes import StoreFakeDB, StoreFakeTx, StoreFakeWallet
 
 
@@ -56,6 +57,8 @@ def approved(monkeypatch, tmp_path):
         "cost_v": Decimal("2.5"),
         "approval_status": "approved",
         "sale_enabled": True,
+        "artwork_approved": True,
+        "native_compatibility_verified": True,
         "asset": {
             "pack_id": "openvegas.test-pack",
             "version": "1.0.0",
@@ -78,10 +81,12 @@ def approved(monkeypatch, tmp_path):
         target = root / sku
         target.mkdir(parents=True)
         raw = json.loads((public / "manifest.json").read_bytes())
-        raw.update(pack_id=fixture["asset"]["pack_id"], version=fixture["asset"]["version"])
+        raw.update(pack_id=fixture["asset"]["pack_id"], version=fixture["asset"]["version"],
+                   tags=[fixture["slot"]])
         (target / "manifest.json").write_text(json.dumps(raw), encoding="utf-8")
         (target / "sheet.png").write_bytes((public / "sheet.png").read_bytes())
     monkeypatch.setenv("OPENVEGAS_EMOTE_PACK_ROOT", str(root))
+    pin_delivery_release(root, monkeypatch)
     return item
 
 

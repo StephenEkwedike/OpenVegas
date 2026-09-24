@@ -16,6 +16,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -34,6 +35,21 @@ PRIVATE_TABLES = [
     "agent_run_holds", "agent_run_mutation_leases", "agent_mutation_replays",
     "run_status_projection", "agent_chat_turns", "chat_file_uploads", "schema_migrations",
 ]
+
+
+def _latest_migration():
+    return max(int(path.name.split("_", 1)[0]) for path in MIGRATIONS.glob("[0-9]*_*.sql"))
+
+
+async def test_offline_latest_migration_tracks_new_source_files(monkeypatch):
+    sources = [Path("048_previous.sql"), Path("049_current.sql")]
+    monkeypatch.setattr(
+        "tests.integration.test_restoration_db.MIGRATIONS",
+        SimpleNamespace(glob=lambda _pattern: sources),
+    )
+    assert _latest_migration() == 49
+    sources.append(Path("050_next.sql"))
+    assert _latest_migration() == 50
 
 
 async def _user(db):
@@ -113,7 +129,7 @@ async def _credit_count(db, topup_id):
 async def test_fresh_all_migrations_satisfy_runtime_schema(database_factory):
     from server.services.dependencies import FeatureFlags, assert_schema_compatible
 
-    async with database_factory(through=48) as sandbox:
+    async with database_factory(through=_latest_migration()) as sandbox:
         flags = FeatureFlags(
             store_enabled=True, inference_enabled=True, agent_runtime_enabled=True,
             human_casino_enabled=True, mint_audit_enabled=True, context_enabled=True,
@@ -124,7 +140,7 @@ async def test_fresh_all_migrations_satisfy_runtime_schema(database_factory):
 
 
 async def test_every_migration_is_present_in_application_journal(database_factory):
-    async with database_factory(through=48) as sandbox:
+    async with database_factory(through=_latest_migration()) as sandbox:
         actual = {row["version"] for row in await sandbox.db.fetch("SELECT version FROM schema_migrations")}
         expected = {path.stem for path in MIGRATIONS.glob("[0-9]*.sql")}
         assert expected, "Migration source directory must not be empty"
@@ -193,7 +209,7 @@ async def test_private_payload_tables_are_rls_protected(database_factory):
 async def test_fresh_schema_rejects_new_tool_rows_without_runtime_evidence(database_factory, status, constraint):
     import asyncpg
 
-    async with database_factory() as sandbox:
+    async with database_factory(through=_latest_migration()) as sandbox:
         db = sandbox.db
         run_id = uuid.uuid4()
         await db.execute(

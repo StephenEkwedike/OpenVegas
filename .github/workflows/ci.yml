@@ -35,8 +35,11 @@ jobs:
           OPENVEGAS_DOTENV_OVERRIDE: "0"
           OPENVEGAS_ENABLE_TOUCHID: "0"
           PYTHON_KEYRING_BACKEND: keyring.backends.null.Keyring
+          OPENVEGAS_TEST_DEMO_OUTPUT: creatives/emotes/terminal-demo/ci-current
         run: |
           set -o pipefail
+          # Generate from this checkout, never publish or reuse private desktop evidence.
+          python scripts/record_emote_demo.py capture --output "$OPENVEGAS_TEST_DEMO_OUTPUT"
           pytest -vv -o faulthandler_timeout=60 2>&1 | tee pytest-results.txt
 
       - name: Preserve test failure diagnostics
@@ -78,7 +81,11 @@ jobs:
           python-version: "3.11"
       - run: pip install -c requirements.lock -e ".[server,dev]"
       - name: Auth role scaffold for SQL tests (not Supabase Auth)
-        run: psql "$OPENVEGAS_INTEGRATION_DATABASE_URL" -v ON_ERROR_STOP=1 -c 'CREATE ROLE anon NOLOGIN; CREATE ROLE authenticated NOLOGIN;'
+        run: >-
+          psql "$OPENVEGAS_INTEGRATION_DATABASE_URL" -v ON_ERROR_STOP=1 -c
+          'CREATE ROLE anon NOLOGIN;
+          CREATE ROLE authenticated NOLOGIN;
+          CREATE ROLE service_role NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION BYPASSRLS;'
       - name: Real disposable database tests
         run: pytest -q tests/integration
 

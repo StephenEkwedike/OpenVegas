@@ -20,6 +20,7 @@ from openvegas.store.service import StoreService
 from openvegas.wallet.ledger import WalletService
 from server.middleware import auth
 from server.routes import store
+from tests.emote_release_fixture import pin_delivery_release
 from tests.integration.test_restoration_db import _billing, _checkout_event, _signed, _topup, _user
 
 
@@ -37,6 +38,7 @@ async def test_real_db_topup_private_delivery_restore_and_revocation(
     (target / "manifest.json").write_text(json.dumps(raw))
     (target / "sheet.png").write_bytes((public / "sheet.png").read_bytes())
     monkeypatch.setenv("OPENVEGAS_EMOTE_PACK_ROOT", str(root))
+    pin_delivery_release(root, monkeypatch)
     monkeypatch.setitem(
         STORE_CATALOG,
         sku,
@@ -46,6 +48,8 @@ async def test_real_db_topup_private_delivery_restore_and_revocation(
             "slot": "companion",
             "cost_v": Decimal("2.50"),
             "approval_status": "approved",
+            "artwork_approved": True,
+            "native_compatibility_verified": True,
             "sale_enabled": True,
             "asset": {"pack_id": sku, "version": "0.0.1", "delivery_resource": "delivery-fixture"},
         },

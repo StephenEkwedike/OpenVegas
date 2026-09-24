@@ -50,12 +50,19 @@ def _native_scope_payload(scope: dict | None, *, provider: str, key: str | None)
     return NativeInferenceScope.model_validate(scope).model_dump(mode="json")
 
 
-def _native_history_payload(*, scope: dict | None, history: bool, continuation: dict | None) -> dict:
+def _native_history_payload(*, scope: dict | None, history: bool, continuation: dict | None,
+                            user_text: str | None = None) -> dict:
     if type(history) is not bool or ((history or continuation is not None) and scope is None):
         raise ValueError("Native history requires an explicit native scope.")
     if continuation is not None and not history:
         raise ValueError("Native continuation requires native history.")
     payload = {"native_history": True} if history else {}
+    if user_text is not None:
+        from openvegas.contracts.native_scope import validate_native_user_text
+
+        if not history or continuation is not None:
+            raise ValueError("Original user input is accepted only on the first native history generation.")
+        payload["native_user_text"] = validate_native_user_text(user_text)
     if continuation is not None:
         from openvegas.contracts.native_scope import NativeContinuationRef
 
@@ -395,12 +402,14 @@ class OpenVegasClient:
         native_scope: dict | None = None,
         native_history: bool = False,
         native_continuation: dict | None = None,
+        native_user_text: str | None = None,
     ) -> dict:
         payload = {"prompt": prompt, "provider": provider, "model": model}
         scope = _native_scope_payload(native_scope, provider=provider, key=idempotency_key)
         if scope is not None:
             payload["native_scope"] = scope
-        payload.update(_native_history_payload(scope=scope, history=native_history, continuation=native_continuation))
+        payload.update(_native_history_payload(scope=scope, history=native_history,
+                       continuation=native_continuation, user_text=native_user_text))
         if reasoning_effort is not None:
             payload["reasoning_effort"] = reasoning_effort
         if idempotency_key or provider == "openrouter":
@@ -450,12 +459,14 @@ class OpenVegasClient:
         native_scope: dict | None = None,
         native_history: bool = False,
         native_continuation: dict | None = None,
+        native_user_text: str | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         payload = {"prompt": prompt, "provider": provider, "model": model}
         scope = _native_scope_payload(native_scope, provider=provider, key=idempotency_key)
         if scope is not None:
             payload["native_scope"] = scope
-        payload.update(_native_history_payload(scope=scope, history=native_history, continuation=native_continuation))
+        payload.update(_native_history_payload(scope=scope, history=native_history,
+                       continuation=native_continuation, user_text=native_user_text))
         if reasoning_effort is not None:
             payload["reasoning_effort"] = reasoning_effort
         if idempotency_key or provider == "openrouter":

@@ -21,6 +21,19 @@ demo = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(demo)
 
 
+@pytest.fixture(scope="module")
+def evidence_output():
+    # CI records a fresh matrix in an untracked directory. Every hash, frame and
+    # timing assertion below still applies to that exact checkout's recordings.
+    path = Path(os.environ.get("OPENVEGAS_TEST_DEMO_OUTPUT", str(demo.OUTPUT)))
+    if not path.is_absolute():
+        path = ROOT / path
+    path = path.resolve()
+    assert path.is_relative_to(demo.OUTPUT.resolve())
+    assert path.is_dir(), "Capture the complete current-source PTY matrix first"
+    return path
+
+
 @pytest.mark.parametrize("name", demo.PACKS)
 def test_original_pack_timeline_and_native_geometry(name):
     _, _, _, load_pack, fit_frame, _ = demo.runtime()
@@ -186,18 +199,18 @@ def test_pty_timeout_and_failure_cleanup(tmp_path):
         )
 
 
-def test_checked_in_evidence_matrix_and_hashes():
-    report_path = demo.OUTPUT / "evidence.json"
+def test_checked_in_evidence_matrix_and_hashes(evidence_output):
+    report_path = evidence_output / "evidence.json"
     assert report_path.is_file(), "Generate the evidence matrix with the documented capture command"
     report = json.loads(report_path.read_bytes())
     assert report["full_matrix"] is True
     assert len(report["sessions"]) == 24
     for relative, digest in report["files"].items():
-        assert demo.sha((demo.OUTPUT / relative).read_bytes()) == digest, relative
+        assert demo.sha((evidence_output / relative).read_bytes()) == digest, relative
     for relative, digest in report["sources"].items():
         assert demo.sha((ROOT / relative).read_bytes()) == digest, relative
     for name in report["sessions"]:
-        session = json.loads((demo.OUTPUT / f"{name}.json").read_bytes())
+        session = json.loads((evidence_output / f"{name}.json").read_bytes())
         assert session["timing"] == "wall-paced"
         assert session["completion_plays"] == 1
         assert session["waiting_cycles"] == (10 if session["native_pixels"] == [64, 80] else 0)
@@ -206,8 +219,8 @@ def test_checked_in_evidence_matrix_and_hashes():
             assert session["native_pixels"] == session["rendered_pixels"]
 
 
-def test_embedded_replay_assets_match_recordings():
-    page = (demo.OUTPUT / "index.html").read_text()
+def test_embedded_replay_assets_match_recordings(evidence_output):
+    page = (evidence_output / "index.html").read_text()
     payload = json.loads(
         re.search(
             r'<script id="evidence" type="application/json">(.*?)</script>', page, re.DOTALL
@@ -215,9 +228,9 @@ def test_embedded_replay_assets_match_recordings():
     )
     assert len(payload["sessions"]) == 24
     for name, uri in {**payload["images"], **payload["downloads"]}.items():
-        assert base64.b64decode(uri.split(",", 1)[1]) == (demo.OUTPUT / name).read_bytes()
+        assert base64.b64decode(uri.split(",", 1)[1]) == (evidence_output / name).read_bytes()
     for session in payload["sessions"]:
-        assert session == json.loads((demo.OUTPUT / (session["id"] + ".json")).read_bytes())
+        assert session == json.loads((evidence_output / (session["id"] + ".json")).read_bytes())
 
 
 def test_verifier_rejects_corrupt_artifact(tmp_path):
@@ -229,12 +242,12 @@ def test_verifier_rejects_corrupt_artifact(tmp_path):
         demo.verify(tmp_path)
 
 
-def test_replay_controls_without_browser_automation():
+def test_replay_controls_without_browser_automation(evidence_output):
     """Run the replay's JS against tiny DOM test doubles, not a browser or UI."""
     node = shutil.which("node")
     if node is None:
         pytest.skip("Optional Node-based replay control unit test requires Node")
-    page = (demo.OUTPUT / "index.html").read_text()
+    page = (evidence_output / "index.html").read_text()
     data = re.search(
         r'<script id="evidence" type="application/json">(.*?)</script>', page, re.DOTALL
     ).group(1)

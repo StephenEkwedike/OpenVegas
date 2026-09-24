@@ -19,6 +19,7 @@ class NativeGenerationSession:
     _history_options: dict | None = field(default=None, init=False, repr=False)
     _receipt: dict | None = field(default=None, init=False, repr=False)
     _history_mode: bool = field(default=False, init=False, repr=False)
+    _user_text: str | None = field(default=None, init=False, repr=False)
 
     @property
     def history_active(self) -> bool:
@@ -28,9 +29,17 @@ class NativeGenerationSession:
     def finalized(self) -> bool:
         return bool(self._receipt and self._receipt.get("continuation_supported") is False)
 
-    def prepare(self, *, key: str, scope: dict, options: dict, history: bool = False) -> dict:
+    def prepare(self, *, key: str, scope: dict, options: dict, history: bool = False,
+                user_text: str | None = None) -> dict:
         """Freeze one command; only an acknowledged native result opens the next."""
-        from openvegas.contracts.native_scope import NativeInferenceScope
+        from openvegas.contracts.native_scope import NativeInferenceScope, validate_native_user_text
+
+        if user_text is not None:
+            validate_native_user_text(user_text)
+            if not history:
+                raise ValueError("Original input requires native history.")
+        if self._key is not None and self._user_text != user_text:
+            raise ValueError("Native continuation cannot change its original user input.")
 
         if not history:
             if self._history_mode:
@@ -51,6 +60,8 @@ class NativeGenerationSession:
                 raise ValueError("An older native command cannot replace the current generation.")
             return deepcopy(self._history_requests[key])
         context = {"native_scope": validated, "native_history": True}
+        if self._key is None and user_text is not None:
+            context["native_user_text"] = user_text
         if self._key is not None:
             if not self._receipt or self._receipt.get("continuation_supported") is not True:
                 raise ValueError("Native result is final, incomplete or unconfirmed; no further inference was sent.")
@@ -62,6 +73,7 @@ class NativeGenerationSession:
             raise ValueError("Native conversation reached its command bound; no request was sent.")
         self._history_requests[key] = deepcopy(context)
         self._history_options = deepcopy(options)
+        self._user_text = user_text
         self._key, self._scope, self._receipt, self._history_mode = key, validated, None, True
         return deepcopy(context)
 

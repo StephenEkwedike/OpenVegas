@@ -8,6 +8,11 @@ consumer = native.consumer
 native_consumer = native.native_consumer
 
 
+@pytest.fixture(autouse=True)
+def original_user_input(native_consumer):
+    native_consumer.namespace["native_history_mode"] = True
+
+
 def history_payload(c, revision=0, calls=True):
     value = native.native_payload(c, status="incomplete" if calls else "complete")
     receipt = value["native_generation"]
@@ -18,8 +23,10 @@ def history_payload(c, revision=0, calls=True):
 
 
 @pytest.mark.parametrize("stream", [True, False])
-def test_actual_cli_uses_revision_reference_not_flattened_observation_authority(native_consumer, stream):
+@pytest.mark.parametrize("original", ["Original current input", "Read notes.\r\nKeep exact input.\n"])
+def test_actual_cli_uses_revision_reference_not_flattened_observation_authority(native_consumer, stream, original):
     c = native_consumer
+    c.namespace["user_message"] = original
     c.namespace["_env_flag"] = lambda name, default: (
         True if name in {"OPENVEGAS_CHAT_NATIVE_GENERATION_SCOPE", "OPENVEGAS_CHAT_NATIVE_GENERATION_HISTORY"}
         else stream if name == "OPENVEGAS_CHAT_STREAM_EVENTS" else default == "1")
@@ -27,6 +34,9 @@ def test_actual_cli_uses_revision_reference_not_flattened_observation_authority(
     final = history_payload(c, revision=1, calls=False)
     c.client.ask = AsyncMock(side_effect=[first, final])
     result = c.run([native.event("response.completed", first)])
+    first_kwargs = c.requests[0][1] if stream else c.client.ask.call_args.kwargs
+    assert first_kwargs["native_user_text"] == original
+    assert first_kwargs["native_user_text"] != "prompt"
     assert result["native_generation"] == first["native_generation"]
     c.namespace["current_run_version"] = 7
     c.namespace["current_signature"] = "sha256:" + "b" * 64
@@ -43,6 +53,7 @@ def test_actual_cli_uses_revision_reference_not_flattened_observation_authority(
                                              "expected_history_revision": 0}
     assert kwargs["native_scope"]["expected_run_version"] == 7
     assert kwargs["native_history"] is True and kwargs["persist_context"] is False
+    assert "native_user_text" not in kwargs
     with pytest.raises(native.APIError, match="final"):
         native.invoke(c, key="third")
 

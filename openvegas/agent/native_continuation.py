@@ -19,10 +19,25 @@ from openvegas.contracts.native_scope import NativeContinuationRef, NativeInfere
 
 
 def frozen_settings(req: Any, *, max_tokens: int) -> dict:
-    return {"provider": req.provider, "model": req.model, "prompt": req.prompt,
+    settings = {"provider": req.provider, "model": req.model, "prompt": req.prompt,
             "enable_tools": req.enable_tools, "enable_web_search": req.enable_web_search,
             "reasoning_effort": req.reasoning_effort, "attachments": list(req.attachments),
             "max_tokens": max_tokens}
+    if getattr(req, "native_user_text", None) is not None:
+        from openvegas.contracts.native_scope import validate_native_user_text
+
+        settings["native_user_text"] = validate_native_user_text(req.native_user_text)
+    return settings
+
+
+def original_user_text(inputs: dict) -> str:
+    """Legacy augmented prompts are never guessed or promoted into user input."""
+    from openvegas.contracts.native_scope import validate_native_user_text
+
+    try:
+        return validate_native_user_text(inputs["settings"]["native_user_text"])
+    except (KeyError, TypeError, ValueError):
+        reject("This task has no verified original user input; it cannot be handed off.")
 
 
 def check_options(command: dict, inputs: dict) -> None:
@@ -134,7 +149,8 @@ def restore_request(req: Any, claim: NativeGenerationClaim) -> Any:
         return req
     inputs = json.loads(claim.history_inputs_json)
     check_options(req.model_dump(mode="json"), inputs)
-    return req.model_copy(update={"prompt": inputs["settings"]["prompt"]})
+    return req.model_copy(update={"prompt": inputs["settings"]["prompt"],
+                                  "native_user_text": inputs["settings"].get("native_user_text")})
 
 
 async def apply_request_history(prepared: Any, claim: NativeGenerationClaim) -> None:

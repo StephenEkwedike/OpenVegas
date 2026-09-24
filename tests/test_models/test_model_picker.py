@@ -124,6 +124,23 @@ def test_cross_provider_requires_explicit_fresh_context_and_never_replays():
     assert not hasattr(confirmed, "messages")
 
 
+@pytest.mark.parametrize("provider", ["openrouter", "anthropic"])
+@pytest.mark.parametrize("confirm", [False, True])
+def test_native_task_never_claims_same_router_means_retained_context(provider, confirm):
+    result = plan_switch(model(provider), current_provider="openrouter", current_model="source/model",
+                         thread_id=None, has_history=True, native_task_active=True, confirm_fresh=confirm)
+    assert result.status == "blocked" and result.provider == "openrouter" and result.model == "source/model"
+    assert not result.reset_context and "cannot yet transfer" in result.message
+    assert "thread retained" not in result.message
+
+
+def test_native_current_model_selection_is_a_noop_not_a_false_transfer():
+    result = plan_switch(model("openrouter"), current_provider="openrouter", current_model="catalog-model",
+                         thread_id=None, native_task_active=True)
+    assert result.status == "ready" and result.message == "Current model unchanged."
+    assert not result.reset_context
+
+
 def test_enabled_default_and_explicit_server_rollback(monkeypatch):
     monkeypatch.delenv("OPENVEGAS_MODEL_SWITCH_ENABLED", raising=False)
     assert model_switch_enabled()
@@ -134,7 +151,7 @@ def test_enabled_default_and_explicit_server_rollback(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("scenario", ["same", "fresh", "cancel", "unavailable", "background"])
+@pytest.mark.parametrize("scenario", ["same", "fresh", "cancel", "unavailable", "background", "native"])
 async def test_actual_cli_switch_branch(scenario):
     import ast
     import asyncio
@@ -156,12 +173,12 @@ async def test_actual_cli_switch_branch(scenario):
         and node.name in {"_reasoning_status", "_reasoning_for_model", "_use_model_capabilities", "_chat_capability"}
     ]
     wrapper = "async def run(client, Confirm, jobs):\n"
-    wrapper += (
-        "    current_provider, current_model, current_thread_id = 'openai', 'old', 'thread'\n"
-    )
+    provider = "openrouter" if scenario == "native" else "openai"
+    wrapper += f"    current_provider, current_model, current_thread_id = '{provider}', 'old', 'thread'\n"
     wrapper += "    allow_model_switch, startup_bootstrap_task = True, None\n"
     wrapper += "    current_reasoning_effort, current_reasoning_efforts = None, ()\n"
     wrapper += "    current_model_capabilities = None\n"
+    wrapper += f"    native_generation_session = SimpleNamespace(history_active={scenario == 'native'})\n"
     wrapper += "\n".join(
         "    " + line for helper in reasoning_helpers for line in ast.unparse(helper).splitlines()
     ) + "\n"
@@ -172,6 +189,8 @@ async def test_actual_cli_switch_branch(scenario):
     wrapper += "\n    return current_provider, current_model, current_thread_id\n"
     command = ("/model", ["/model", "catalog-model"])
     target = model()
+    if scenario == "native":
+        target = model("openrouter", capabilities={"reviewed": True, "text": True})
     if scenario in {"fresh", "cancel"}:
         command = ("/provider", ["/provider", "mistral", "catalog-model"])
         target = model("mistral")
@@ -214,5 +233,8 @@ async def test_actual_cli_switch_branch(scenario):
     elif scenario == "fresh":
         assert result == ("mistral", "catalog-model", None)
         assert client._request.await_count == 2
+    elif scenario == "native":
+        assert result == ("openrouter", "old", "thread")
+        assert namespace["_chat_modal"].await_count == 0
     else:
         assert result == ("openai", "old", "thread")

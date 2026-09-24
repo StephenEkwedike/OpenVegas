@@ -595,7 +595,8 @@ class AgentOrchestrationService:
             existing_fp = str(existing_fp_raw) if existing_fp_raw else None
             existing_git = str(existing_git_raw) if existing_git_raw else None
 
-            if _row_optional(run, "native_generation_claim_id") is not None and (
+            if (_row_optional(run, "native_generation_claim_id") is not None
+                    or _row_optional(run, "native_handoff_id") is not None) and (
                 existing_session, existing_root_raw, existing_fp_raw, existing_git_raw
             ) != (runtime_session_id, workspace_root, workspace_fingerprint, git_root):
                 raise ContractError(APIErrorCode.INVALID_TRANSITION,

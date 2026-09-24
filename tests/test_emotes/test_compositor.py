@@ -181,6 +181,154 @@ async def test_scrollbar_drag_and_text_selection_are_stable(pack, clock):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["0123456789" * 300, "\u754c" * 1600])
+async def test_wheel_scrolls_display_rows_inside_one_long_paragraph(pack, clock, text):
+    async with running(pack, clock) as (owner, _, _, _, _):
+        owner.append_output(text)
+        await asyncio.sleep(0.05)
+        window = owner.history_window
+        before = window.vertical_scroll_2
+        assert before > 6
+        owner.default_buffer.document = Document("keep this draft", 5)
+        window._mouse_handler(mouse(MouseEventType.SCROLL_UP))
+        await asyncio.sleep(0.05)
+        assert window.vertical_scroll == 0
+        assert window.vertical_scroll_2 == before - 3
+        window._mouse_handler(mouse(MouseEventType.SCROLL_DOWN))
+        await asyncio.sleep(0.05)
+        assert window.vertical_scroll_2 == before
+        assert owner.default_buffer.document == Document("keep this draft", 5)
+        assert not owner.follow_tail
+
+
+@pytest.mark.asyncio
+async def test_wrapped_page_and_scrollbar_keep_selection_when_streaming(pack, clock):
+    async with running(pack, clock) as (owner, pipe, _, _, _):
+        owner.append_output("0123456789" * 900)
+        await asyncio.sleep(0.05)
+        before = owner.history_window.vertical_scroll_2
+        pipe.send_text("\x1b[5~")
+        await until(lambda: not owner.follow_tail)
+        assert owner.history_window.vertical_scroll_2 == before - owner._history_height() + 1
+        pipe.send_text("\x1b[6~")
+        await until(lambda: owner.history_window.vertical_scroll_2 == before)
+        height = owner._history_height()
+        owner._scrollbar_mouse(mouse(MouseEventType.MOUSE_DOWN, height // 2))
+        anchor = owner.history_window.vertical_scroll_2
+        assert 0 < anchor < before
+        owner.history_buffer.cursor_position = 5
+        owner.history_buffer.start_selection()
+        owner.history_buffer.cursor_position = 12
+        selection = owner.history_buffer.selection_state
+        owner.append_output(" plus streaming output" * 100)
+        await asyncio.sleep(0.05)
+        assert owner.history_window.vertical_scroll_2 == anchor
+        assert owner.history_buffer.selection_state is selection
+        assert owner.history_buffer.cursor_position == 12
+        owner._scrollbar_mouse(mouse(MouseEventType.MOUSE_UP, height - 1))
+        await asyncio.sleep(0.05)
+        _, position, maximum = owner._history_scroll_metrics()
+        assert position == maximum
+        assert owner.history_window.vertical_scroll_2 > before
+
+
+@pytest.mark.asyncio
+async def test_scroll_crosses_wrapped_line_boundaries_and_clamps_after_resize(pack, clock):
+    async with running(pack, clock) as (owner, _, _, _, size):
+        owner.append_output("first\n" + "x" * 4000 + "\nlast")
+        await asyncio.sleep(0.05)
+        owner._scrollbar_mouse(mouse(MouseEventType.MOUSE_DOWN, 0))
+        owner.scroll(4)
+        await asyncio.sleep(0.05)
+        assert (owner.history_window.vertical_scroll, owner.history_window.vertical_scroll_2) == (1, 3)
+        owner.scroll(-4)
+        await asyncio.sleep(0.05)
+        assert (owner.history_window.vertical_scroll, owner.history_window.vertical_scroll_2) == (0, 0)
+        owner.scroll(20)
+        size[0] = Size(rows=30, columns=1200)
+        owner.app.invalidate()
+        await asyncio.sleep(0.05)
+        # Once all history fits, clamp to the top instead of clipping the start.
+        assert owner.history_window.vertical_scroll == 0
+        assert owner.history_window.vertical_scroll_2 == 0
+        assert not owner.follow_tail
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["\u754c" * 133, "a\u0301" * 267, "\t" * 133])
+async def test_wrapped_tail_is_actually_visible_and_scrollbar_reaches_it(pack, clock, text):
+    async with running(pack, clock) as (owner, _, _, _, _):
+        owner.append_output("\n".join([text] * 10 + ["END"]))
+        await asyncio.sleep(0.05)
+        assert 10 in owner.history_window.render_info.displayed_lines
+        owner._scrollbar_mouse(mouse(MouseEventType.MOUSE_DOWN, 0))
+        await asyncio.sleep(0.05)
+        assert 10 not in owner.history_window.render_info.displayed_lines
+        owner._scrollbar_mouse(mouse(MouseEventType.MOUSE_UP, owner._history_height() - 1))
+        await asyncio.sleep(0.05)
+        assert 10 in owner.history_window.render_info.displayed_lines
+
+
+@pytest.mark.asyncio
+async def test_streaming_recounts_only_tail_not_whole_history(pack, clock, monkeypatch):
+    from openvegas.emotes import compositor
+
+    async with running(pack, clock) as (owner, _, _, _, _):
+        owner.append_output("line\n" * 10000)
+        await asyncio.sleep(0.05)
+        calls = []
+        original = compositor._wrapped_height
+
+        def counted(fragments, width):
+            calls.append(True)
+            return original(fragments, width)
+
+        monkeypatch.setattr(compositor, "_wrapped_height", counted)
+        owner.append_output("new tail\nanother line")
+        await asyncio.sleep(0.05)
+        assert len(calls) == 2
+        owner.app.invalidate()
+        await asyncio.sleep(0.05)
+        assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("columns", [1, 2])
+async def test_tiny_width_scroll_is_bounded(pack, clock, columns):
+    async with running(pack, clock) as (owner, _, _, _, size):
+        owner.append_output("\u754c\nlast")
+        size[0] = Size(rows=8, columns=columns)
+        owner.app.invalidate()
+        await asyncio.sleep(0.05)
+        owner.scroll(-100)
+        owner.scroll(100)
+        await asyncio.sleep(0.05)
+        assert not owner._app_task.done()
+        assert owner.history_window.vertical_scroll >= 0
+        assert owner.history_window.vertical_scroll_2 >= 0
+
+
+@pytest.mark.asyncio
+async def test_selected_blank_lines_recount_wrapping_before_scroll(clock):
+    from prompt_toolkit.layout.dimension import Dimension
+
+    async with running(None, clock) as (owner, _, _, _, size):
+        size[0] = Size(rows=15, columns=2)
+        owner.history_window.height = Dimension.exact(6)
+        owner.append_output("\n\nEND")
+        await asyncio.sleep(0.05)
+        owner.history_buffer.cursor_position = 0
+        owner.history_buffer.start_selection()
+        owner.history_buffer.cursor_position = len(owner.history_buffer.text)
+        owner.app.invalidate()
+        await asyncio.sleep(0.05)
+        owner.scroll(100)
+        await asyncio.sleep(0.05)
+        assert owner.history_window.render_info.window_width == 1
+        assert (2, 2) in owner.history_window.render_info._rowcol_to_yx
+
+
+@pytest.mark.asyncio
 async def test_voice_while_history_selected_targets_input_only(pack, clock):
     async with running(pack, clock) as (owner, _, _, _, _):
         owner.append_output("select history")

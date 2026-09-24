@@ -45,7 +45,7 @@ from openvegas.agent.native_generation import (
     stored_scope,
 )
 from openvegas.contracts.errors import APIErrorCode, ContractError
-from openvegas.contracts.native_scope import NativeContinuationRef
+from openvegas.contracts.native_scope import NativeContinuationRef, validate_native_user_text
 
 MAX_COMMAND_BYTES = 512 * 1024
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
@@ -62,7 +62,8 @@ _DEFAULTS = {
     "attachments": [],
     "reasoning_effort": None,
 }
-_COMMAND_FIELDS = {"prompt", "provider", "model", "native_scope", "native_continuation", "native_history", *_DEFAULTS}
+_COMMAND_FIELDS = {"prompt", "provider", "model", "native_scope", "native_continuation",
+                   "native_history", "native_user_text", *_DEFAULTS}
 _ENVELOPE_FIELDS = {"kind", "state", "owner_token", "gateway_key"}
 
 
@@ -175,12 +176,20 @@ def command_fingerprint(command: dict[str, Any]) -> str:
     scope = value.pop("native_scope", None)
     continuation = value.pop("native_continuation", None)
     native_history = value.pop("native_history", False)
+    user_text = value.pop("native_user_text", None)
     if type(native_history) is not bool:
         raise _invalid()
     if native_history:
         if scope is None:
             raise _invalid()
         value["native_history"] = True
+    if user_text is not None:
+        if not native_history or continuation is not None:
+            raise _invalid()
+        try:
+            value["native_user_text"] = validate_native_user_text(user_text)
+        except ValueError:
+            raise _invalid() from None
     if continuation is not None:
         if not native_history:
             raise _invalid()
@@ -324,6 +333,12 @@ class InferenceReplayService:
             if scope is not None:
                 # Always authenticate before inspecting replay, including exact completion.
                 run = await lock_run_tx(tx, user_id=user_id, scope=scope)
+                if run.get("native_handoff_id") is not None:
+                    # Durable binding survives a disabled rollout flag. Until
+                    # first-request consumption is wired, never execute this run
+                    # without its confirmed portable context.
+                    raise ContractError(APIErrorCode.HANDOFF_BLOCKED,
+                        "This task requires its committed model handoff; destination dispatch is not enabled.")
                 prior = await tx.fetchrow(
                     "SELECT * FROM inference_route_commands WHERE user_id=$1::uuid AND idempotency_key=$2 FOR UPDATE",
                     user_id, key,

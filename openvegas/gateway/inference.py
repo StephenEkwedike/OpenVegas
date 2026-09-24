@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import json
 import asyncio
-import io
-import os
 import hashlib
+import io
+import json
+import os
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -21,8 +21,13 @@ from openvegas.contracts.errors import APIErrorCode, ContractError
 from openvegas.gateway.catalog import ModelDisabled as ModelDisabled
 from openvegas.gateway.catalog import ProviderCatalog, validate_catalog_entry
 from openvegas.gateway.providers import Provider as Provider
-from openvegas.gateway.providers import get_model_review, get_provider, model_capabilities, resolve_provider_api_key
-from openvegas.gateway.providers import validate_reasoning_effort
+from openvegas.gateway.providers import (
+    get_model_review,
+    get_provider,
+    model_capabilities,
+    resolve_provider_api_key,
+    validate_reasoning_effort,
+)
 from openvegas.wallet.ledger import InsufficientBalance, WalletService
 
 V_SCALE = Decimal("0.000001")
@@ -49,6 +54,7 @@ class InferenceRequest:
     _native_history_inputs: Any = field(default=None, init=False, repr=False)
     _native_history_required: bool = field(default=False, init=False, repr=False)
     _native_envelope_capture: Any = field(default=None, init=False, repr=False)
+    _native_handoff_binding: Any = field(default=None, init=False, repr=False)
 
 
 @dataclass
@@ -87,6 +93,7 @@ class _InferenceExecutionContext:
     provider_request_id: str | None = None
     web_enable_tools: bool = False
     native_history_required: bool = False
+    handoff_binding: Any = None
 
 
 class AIGateway:
@@ -113,12 +120,14 @@ class AIGateway:
                 yield conn
 
     async def infer(self, req: InferenceRequest) -> InferenceResult:
+        req = self._snapshot_handoff_request(req)
         ctx, replay = await self._prepare_inference_execution(req)
         if replay is not None:
             return replay
 
         try:
-            result = await self._route_to_provider(req, ctx.provider_api_key)
+            result = await self._route_to_provider(req, ctx.provider_api_key,
+                **({"handoff_binding": ctx.handoff_binding} if getattr(ctx, "handoff_binding", None) is not None else {}))
             ctx.provider_request_id = result.provider_request_id
             return await self._finalize_inference_execution(ctx, req, result)
         except (Exception, asyncio.CancelledError) as error:
@@ -127,6 +136,7 @@ class AIGateway:
             raise
 
     async def stream_infer(self, req: InferenceRequest) -> AsyncGenerator[dict[str, Any], None]:
+        req = self._snapshot_handoff_request(req)
         ctx, replay = await self._prepare_inference_execution(req)
         if replay is not None:
             if str(replay.text or "").strip():
@@ -158,7 +168,8 @@ class AIGateway:
                     )
             else:
                 buffered = True
-                result = await self._route_to_provider(req, ctx.provider_api_key)
+                result = await self._route_to_provider(req, ctx.provider_api_key,
+                    **({"handoff_binding": ctx.handoff_binding} if getattr(ctx, "handoff_binding", None) is not None else {}))
                 ctx.provider_request_id = result.provider_request_id
             ctx.provider_request_id = result.provider_request_id
             finalized = await self._finalize_inference_execution(ctx, req, result)
@@ -180,6 +191,7 @@ class AIGateway:
         req: InferenceRequest,
     ) -> tuple[_InferenceExecutionContext | None, InferenceResult | None]:
         native_claim = req._native_generation_claim
+        handoff_binding = getattr(req, "_native_handoff_binding", None)
         from openvegas.agent.native_envelope import prepare_history_request
         native_history_required = prepare_history_request(req)
         if native_claim is not None:
@@ -273,8 +285,14 @@ class AIGateway:
         ctx = None
         try:
             async with self.db.transaction() as tx:
+                if handoff_binding is not None:
+                    from server.services.native_handoff_dispatch import verify_first_dispatch_tx
+                    await verify_first_dispatch_tx(tx, req, expected=handoff_binding)
                 if native_claim is not None:
-                    from openvegas.agent.native_generation import lock_dispatch_claim_tx, link_gateway_tx
+                    from openvegas.agent.native_generation import (
+                        link_gateway_tx,
+                        lock_dispatch_claim_tx,
+                    )
                     await lock_dispatch_claim_tx(tx, native_claim, req)
                 if native_history_required:
                     # Detect an unmigrated server before any upstream dispatch.
@@ -289,6 +307,11 @@ class AIGateway:
                     if replay is not None:
                         raise ContractError(APIErrorCode.HOLD_CONFLICT, "Native gateway replay requires route reconciliation.")
                     await link_gateway_tx(tx, native_claim, request_id)
+                    if handoff_binding is not None:
+                        from server.services.native_handoff_dispatch import (
+                            consume_first_dispatch_tx,
+                        )
+                        await consume_first_dispatch_tx(tx, req, request_id, expected=handoff_binding)
                 ctx = _InferenceExecutionContext(
                     account_id=req.account_id, model_config=model_config, user_id=user_id,
                     provider_api_key=provider_api_key, reserve_v=reserve_v, request_id=request_id,
@@ -297,6 +320,7 @@ class AIGateway:
                     payload_hash=payload_hash,
                     web_enable_tools=bool(req.enable_tools) if managed_web else False,
                     native_history_required=native_history_required,
+                    handoff_binding=handoff_binding,
                 )
                 ctx.reservation_ref = f"infer-preauth:{ctx.preauth_id}"
                 if replay is not None:
@@ -357,6 +381,9 @@ class AIGateway:
                             enable_tools=ctx.web_enable_tools,
                         )}, separators=(",", ":")),
                     )
+                if handoff_binding is not None:
+                    from server.services.native_handoff_dispatch import validate_dispatch_deadline
+                    validate_dispatch_deadline(req, expected=handoff_binding)
         except (Exception, asyncio.CancelledError):
             if ctx is not None:
                 await self._cleanup_inference_after_failure(ctx)
@@ -369,6 +396,9 @@ class AIGateway:
         req: InferenceRequest,
         result: InferenceResult,
     ) -> InferenceResult:
+        if getattr(ctx, "handoff_binding", None) is not None:
+            from server.services.native_handoff_dispatch import validate_bound_request
+            validate_bound_request(req, expected=ctx.handoff_binding)
         model_config = ctx.model_config
         user_id = ctx.user_id
         request_id = ctx.request_id
@@ -447,7 +477,10 @@ class AIGateway:
                 charge_v = max((actual_v - grant_used_v), Decimal("0")).quantize(V_SCALE)
 
             if web_context is not None:
-                from openvegas.gateway.openrouter_web import settlement_evidence, validate_stored_web_result
+                from openvegas.gateway.openrouter_web import (
+                    settlement_evidence,
+                    validate_stored_web_result,
+                )
 
                 if charge_v > reserve_v or charge_v < web_fee:
                     raise ContractError(APIErrorCode.HOLD_CONFLICT, "Web charge exceeds its reservation.")
@@ -1010,7 +1043,16 @@ class AIGateway:
         cost = (Decimal(input_tokens) * c_in + Decimal(output_tokens) * c_out) / Decimal("1000000")
         return cost.quantize(Decimal("0.000001"))
 
-    async def _route_to_provider(self, req: InferenceRequest, api_key: str) -> InferenceResult:
+    @staticmethod
+    def _snapshot_handoff_request(req):
+        if getattr(req, "_native_handoff_binding", None) is None:
+            return req
+        import copy
+        # Do not share mutable messages, model snapshots, or nested private
+        # prepared contexts with a caller while catalog/wallet operations await.
+        return copy.deepcopy(req)
+
+    async def _route_to_provider(self, req: InferenceRequest, api_key: str, *, handoff_binding=None) -> InferenceResult:
         """Route to the appropriate provider SDK."""
         validate_reasoning_effort(req.provider, req.model, req.reasoning_effort)
         descriptor = get_provider(req.provider)
@@ -1019,6 +1061,12 @@ class AIGateway:
                 APIErrorCode.INVALID_TRANSITION,
                 "Tool-calling mode is unavailable in this provider adapter.",
             )
+        if handoff_binding is not None:
+            from server.services.native_handoff_dispatch import validate_dispatch_deadline
+            validate_dispatch_deadline(req, expected=handoff_binding)
+            if req.provider != "openrouter":
+                raise ContractError(APIErrorCode.HANDOFF_BLOCKED, "Unsupported handoff transport.")
+            return await self._call_openrouter(req, api_key, handoff_binding=handoff_binding)
         return await getattr(self, descriptor.adapter_method)(req, api_key)
 
     async def _call_mistral(self, req: InferenceRequest, api_key: str) -> InferenceResult:
@@ -1026,7 +1074,7 @@ class AIGateway:
 
         return InferenceResult(**await complete(req, api_key, self.http_client))
 
-    async def _call_openrouter(self, req: InferenceRequest, api_key: str) -> InferenceResult:
+    async def _call_openrouter(self, req: InferenceRequest, api_key: str, *, handoff_binding=None) -> InferenceResult:
         from openvegas.gateway.openrouter import complete
 
         if req._managed_model_config is None:
@@ -1035,6 +1083,7 @@ class AIGateway:
             req, api_key, model_config=req._managed_model_config,
             capabilities=model_capabilities(req.provider, req.model),
             parse_tool=self._parse_local_tool_call, client=self.http_client,
+            **({"handoff_binding": handoff_binding} if handoff_binding is not None else {}),
         )
         receipt = values.pop("_managed_web_receipt", None)
         result = InferenceResult(**values)
@@ -1843,7 +1892,10 @@ class AIGateway:
             )
         payload = json.loads(str(raw))
         if "managed_web_accounting" in payload:
-            from openvegas.gateway.openrouter_web import WebValidationError, validate_stored_web_result
+            from openvegas.gateway.openrouter_web import (
+                WebValidationError,
+                validate_stored_web_result,
+            )
 
             try:
                 validate_stored_web_result(payload, request_hash=row.get("payload_hash"))

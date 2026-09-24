@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import uuid
 from contextlib import asynccontextmanager
 from copy import deepcopy
@@ -27,6 +28,12 @@ from openvegas.store.catalog import (
     public_cosmetic,
 )
 from openvegas.wallet.ledger import WalletService
+
+
+def _emote_release_configuration() -> tuple[str | None, str | None]:
+    """Snapshot operator configuration for race checks, not authorization."""
+    return (os.environ.get("OPENVEGAS_EMOTE_PACK_ROOT"),
+            os.environ.get("OPENVEGAS_EMOTE_RELEASE_SHA256"))
 
 
 class StoreError(Exception):
@@ -320,6 +327,7 @@ class StoreService:
         if not isinstance(item_id, str) or not 1 <= len(item_id) <= 128:
             raise StoreError("INVALID_ITEM_ID")
         payload_hash = self.canonical_payload_hash({"item_id": item_id})
+        delivery_configuration = None
 
         async with self.db.transaction() as tx:
             # Cash adjustments must serialize before any request/SKU/wallet lock.
@@ -400,11 +408,14 @@ class StoreService:
                     # New purchases require deliverable bytes, even if the asset
                     # omits delivery_resource. Replays/legacy checks remain above.
                     checked_item = deepcopy(item)
+                    delivery_configuration = _emote_release_configuration()
                     try:
                         await asyncio.to_thread(load_delivery_pack, item_id, checked_item["asset"])
                     except EmoteDeliveryUnavailable:
                         raise CosmeticUnavailable("COSMETIC_DELIVERY_UNAVAILABLE") from None
-                    if STORE_CATALOG.get(item_id) != checked_item:
+                    if (STORE_CATALOG.get(item_id) != checked_item
+                            or not cosmetic_purchasable(STORE_CATALOG.get(item_id))
+                            or _emote_release_configuration() != delivery_configuration):
                         raise CosmeticUnavailable("COSMETIC_DELIVERY_UNAVAILABLE")
                     item = checked_item
             cost_v = cosmetic_price_v(item) if item.get("type") == "cosmetic" else Decimal(str(item["cost_v"]))
@@ -486,6 +497,15 @@ class StoreService:
                     # Raising here rolls back the order, debit and entitlement too.
                     raise StoreError(str(exc)) from None
             entitlement = await self._find_entitlement(tx, user_id, item_id)
+            # All preceding awaits (including wallet and payment-policy work)
+            # are still in this transaction. A rotation invalidates the whole
+            # new purchase, not a paid-but-undeliverable entitlement.
+            if delivery_configuration is not None and (
+                _emote_release_configuration() != delivery_configuration
+                or STORE_CATALOG.get(item_id) != item
+                or not cosmetic_purchasable(STORE_CATALOG.get(item_id))
+            ):
+                raise CosmeticUnavailable("COSMETIC_DELIVERY_UNAVAILABLE")
 
         return StoreOrderResult(
             order_id=order_id,

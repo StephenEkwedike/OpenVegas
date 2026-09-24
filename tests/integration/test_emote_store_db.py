@@ -11,6 +11,7 @@ from openvegas.emotes import manifest
 from openvegas.store.catalog import STORE_CATALOG
 from openvegas.store.service import EntitlementDenied, StoreService
 from openvegas.wallet.ledger import WalletService
+from tests.emote_release_fixture import pin_delivery_release
 from tests.integration.test_restoration_db import _billing, _checkout_event, _signed, _topup, _user
 
 pytestmark = pytest.mark.asyncio
@@ -21,6 +22,7 @@ async def test_signed_test_topup_concurrent_buy_equip_and_revoke(database_factor
     monkeypatch.setitem(STORE_CATALOG, "openvegas.test-only", {
         "name": "Test only", "type": "cosmetic", "slot": "companion",
         "cost_v": Decimal("2.50"), "approval_status": "approved", "sale_enabled": True,
+        "artwork_approved": True, "native_compatibility_verified": True,
         "asset": {"pack_id": "openvegas.test-only", "version": "0.0.1", "delivery_resource": "test-only"},
     })
     public = Path(manifest.__file__).parent / "assets" / "pixel-courier"
@@ -32,6 +34,7 @@ async def test_signed_test_topup_concurrent_buy_equip_and_revoke(database_factor
     (target / "manifest.json").write_text(json.dumps(raw), encoding="utf-8")
     (target / "sheet.png").write_bytes((public / "sheet.png").read_bytes())
     monkeypatch.setenv("OPENVEGAS_EMOTE_PACK_ROOT", str(root))
+    pin_delivery_release(root, monkeypatch)
     async with database_factory() as sandbox:
         db = sandbox.db
         topup = await _topup(db)

@@ -17,6 +17,7 @@ from openvegas.store.service import (
     EntitlementExpired,
     IdempotencyConflict,
     StoreError,
+    _emote_release_configuration,
 )
 from openvegas.wallet.ledger import InsufficientBalance
 from server.middleware.auth import get_current_user
@@ -153,7 +154,10 @@ async def owned_cosmetics(user: CurrentUser):
 async def cosmetic_pack(item_id: str, user: CurrentUser):
     try:
         async with get_store_service().delivery_asset(str(user["user_id"]), item_id) as asset:
+            configuration = _emote_release_configuration()
             payload = await asyncio.to_thread(load_delivery_pack, item_id, asset)
+        if _emote_release_configuration() != configuration:
+            raise EmoteDeliveryUnavailable()
         return payload
     except EntitlementExpired as exc:
         raise HTTPException(status_code=410, detail=str(exc)) from exc

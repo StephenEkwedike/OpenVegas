@@ -17,6 +17,9 @@
 .collection-controls input,.collection-controls select { width:100%; padding:.8rem; color:var(--input-text); background:var(--input-bg); border:1px solid var(--line); border-radius:3px; font:14px var(--font-sans); }
 #result-count { padding-bottom:.8rem; min-width:7rem; text-align:right; }
 .catalog-status { font:11px/1.6 var(--font-mono); color:var(--muted); padding:1rem 0; min-height:2.8rem; }
+.ownership-retry { margin-bottom:1rem; }
+.ownership-retry[aria-disabled="true"] { opacity:.6; cursor:wait; }
+.preview-controls { display:flex; flex-wrap:wrap; gap:.8rem; margin-bottom:1rem; }
 .emote-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:1.3rem; }
 .emote-card { border:1px solid var(--line); background:var(--surface-1); border-radius:4px; overflow:hidden; }
 .emote-card-top { display:flex; align-items:center; justify-content:space-between; padding:.8rem 1.3rem; }

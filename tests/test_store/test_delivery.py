@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -14,6 +15,7 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from jose import jwt
+from PIL import Image
 
 import server.routes.store as routes
 from openvegas.emotes import manifest
@@ -21,6 +23,7 @@ from openvegas.store.catalog import STORE_CATALOG
 from openvegas.store.service import EntitlementDenied
 from server.middleware import auth
 from server.services import emote_delivery as delivery
+from tests.emote_release_fixture import pin_delivery_release
 
 SKU = "test_emote"
 PACK_PATH = f"/store/emotes/{SKU}/pack"
@@ -49,7 +52,8 @@ def pack_files(tmp_path, approved, monkeypatch):
     # Copy public art ONLY into a temporary synthetic SKU. No real catalog changes.
     public = Path(manifest.__file__).parent / "assets" / "pixel-courier"
     raw = json.loads((public / "manifest.json").read_bytes())
-    raw.update(pack_id=approved["asset"]["pack_id"], version=approved["asset"]["version"])
+    raw.update(pack_id=approved["asset"]["pack_id"], version=approved["asset"]["version"],
+               tags=[approved["slot"]])
     sheet = (public / "sheet.png").read_bytes()
     root = tmp_path.resolve() / "private-packs"
     target = root / "test-private-delivery"
@@ -58,6 +62,7 @@ def pack_files(tmp_path, approved, monkeypatch):
     (target / "sheet.png").write_bytes(sheet)
     approved["asset"]["delivery_resource"] = target.name
     monkeypatch.setenv("OPENVEGAS_EMOTE_PACK_ROOT", str(root))
+    pin_delivery_release(root, monkeypatch)
     return target, raw, sheet
 
 
@@ -160,12 +165,13 @@ def test_snapshot_validation_cannot_be_swapped_for_unvalidated_source_bytes(
     assert owned.get(PACK_PATH, headers=credentials()).status_code == 503
 
 
-def test_valid_nested_sheet_path_is_supported(owned, pack_files):
+def test_valid_nested_sheet_path_is_supported(owned, pack_files, monkeypatch):
     target, raw, sheet = pack_files
     (target / "frames").mkdir()
     (target / "sheet.png").rename(target / "frames/dance.png")
     raw["sheet"] = "frames/dance.png"
     (target / "manifest.json").write_text(json.dumps(raw))
+    pin_delivery_release(target.parent, monkeypatch)
     response = owned.get(PACK_PATH, headers=credentials())
     assert response.status_code == 200
     assert response.json()["manifest"]["sheet"] == "frames/dance.png"
@@ -481,11 +487,12 @@ def test_manifest_sheet_bounds_identity_and_hash_enforced(owned, pack_files, mon
 
 
 def test_catalog_upgrade_delivers_current_validated_version_not_stale_acquisition(
-    owned, approved, pack_files
+    owned, approved, pack_files, monkeypatch
 ):
     target, raw, _ = pack_files
     approved["asset"]["version"] = raw["version"] = "2.0.0"
     (target / "manifest.json").write_text(json.dumps(raw))
+    pin_delivery_release(target.parent, monkeypatch)
     response = owned.get(PACK_PATH, headers=credentials())
     assert response.status_code == 200
     assert response.json()["version"] == "2.0.0"
@@ -580,7 +587,7 @@ def test_expiration_or_withdrawal_during_validation_prevents_response(
 
 
 @pytest.mark.asyncio
-async def test_delivery_lock_released_on_cancellation(service, approved):
+async def test_delivery_lock_released_on_cancellation(service, approved, pack_files):
     await service.buy("alice", SKU, "local-cancel-test")
     entered = asyncio.Event()
 
@@ -730,3 +737,299 @@ def test_catalog_change_during_preflight_cannot_charge(client, service, approved
     assert response.status_code == 409
     assert service.db.state["debits"] == []
     assert service.db.state["orders"] == {}
+
+
+@pytest.mark.parametrize("pin", [None, "", "0" * 64, "A" * 64, "f" * 63, "f" * 64 + "\n"])
+def test_independent_release_pin_is_required(owned, monkeypatch, pin):
+    if pin is None:
+        monkeypatch.delenv(delivery.RELEASE_PIN_ENV)
+    else:
+        monkeypatch.setenv(delivery.RELEASE_PIN_ENV, pin)
+    response = owned.get(PACK_PATH, headers=credentials())
+    assert response.status_code == 503
+    assert response.json() == {"detail": "COSMETIC_DELIVERY_UNAVAILABLE"}
+    assert_private(response)
+
+
+def pin_mismatched_pixels(pack_files, monkeypatch, change):
+    target, metadata, sheet = pack_files
+    path = target.parent / delivery.RELEASE_FILE
+    release = json.loads(path.read_bytes())
+    entry = release["packs"][0]
+    with Image.open(target / metadata["sheet"]) as image, image.convert("RGBA") as rgba:
+        pixels = rgba.tobytes()
+        candidates = {
+            "rgba_only": pixels,
+            "wrong_dimensions": str((rgba.width + 1, rgba.height)).encode() + pixels,
+            "png_bytes": sheet,
+        }
+    wrong_hash = hashlib.sha256(candidates[change]).hexdigest()
+    assert wrong_hash != entry["pixels_sha256"]
+    entry["pixels_sha256"] = wrong_hash
+    # Keep every file hash and artwork fingerprint intact, and independently
+    # pin the altered release so only its decoded-pixel claim is inconsistent.
+    raw = json.dumps(release).encode()
+    path.write_bytes(raw)
+    monkeypatch.setenv(delivery.RELEASE_PIN_ENV, hashlib.sha256(raw).hexdigest())
+
+
+@pytest.mark.parametrize("change", ["rgba_only", "wrong_dimensions", "png_bytes"])
+def test_pinned_pixel_hash_mismatch_refuses_private_get(owned, pack_files, monkeypatch, change):
+    pin_mismatched_pixels(pack_files, monkeypatch, change)
+    response = owned.get(PACK_PATH, headers=credentials())
+    assert response.status_code == 503
+    assert response.json() == {"detail": "COSMETIC_DELIVERY_UNAVAILABLE"}
+    assert_private(response)
+
+
+@pytest.mark.parametrize("change", ["rgba_only", "wrong_dimensions", "png_bytes"])
+@pytest.mark.parametrize("slot", ["companion", "completion"])
+def test_pinned_pixel_hash_mismatch_precedes_purchase_debit(
+    client, service, approved, pack_files, monkeypatch, change, slot,
+):
+    approved["slot"] = slot
+    target, raw, _ = pack_files
+    raw["tags"] = [slot]
+    (target / "manifest.json").write_text(json.dumps(raw))
+    pin_delivery_release(target.parent, monkeypatch)
+    pin_mismatched_pixels(pack_files, monkeypatch, change)
+    before = deepcopy(service.db.state)
+    response = client.post("/store/buy", headers=credentials(),
+                           json={"item_id": SKU, "idempotency_key": "pixel-bound-preflight"})
+    assert response.status_code == 409
+    assert response.json() == {"detail": "COSMETIC_DELIVERY_UNAVAILABLE"}
+    assert service.db.state == before
+    assert service.db.state["debits"] == []
+    assert service.db.state["orders"] == {}
+    assert service.db.state["entitlements"] == {}
+    assert not any(query.startswith("INSERT") for query, _ in service.db.calls)
+
+
+def replace_fixture_coherently(pack_files):
+    target, original, _ = pack_files
+    raw = deepcopy(original)
+    with Image.open(target / raw["sheet"]) as image:
+        rgba = image.convert("RGBA")
+        rgba.putpixel((0, 0), (11, 22, 33, 255))
+        rgba.save(target / raw["sheet"])
+        rgba.close()
+    sheet = (target / raw["sheet"]).read_bytes()
+    raw["sha256"] = hashlib.sha256(sheet).hexdigest()
+    (target / "manifest.json").write_text(json.dumps(raw))
+    decoded = manifest.decode_pack(manifest.validate_manifest(raw), sheet)
+    for frame in decoded._frames.values():
+        frame.close()
+    assert (raw["pack_id"], raw["version"]) == (original["pack_id"], original["version"])
+    assert raw["sha256"] != original["sha256"]
+
+
+@pytest.mark.parametrize("rewrite_release", [False, True])
+def test_coherent_same_identity_replacement_is_not_approved_by_self_checksum(
+    owned, pack_files, monkeypatch, rewrite_release,
+):
+    pin = os.environ[delivery.RELEASE_PIN_ENV]
+    replace_fixture_coherently(pack_files)
+    if rewrite_release:
+        pin_delivery_release(pack_files[0].parent, monkeypatch)
+        monkeypatch.setenv(delivery.RELEASE_PIN_ENV, pin)
+    response = owned.get(PACK_PATH, headers=credentials())
+    assert response.status_code == 503
+    assert response.json() == {"detail": "COSMETIC_DELIVERY_UNAVAILABLE"}
+    assert_private(response)
+
+
+@pytest.mark.parametrize("change", ["missing_pin", "missing_release", "replacement", "provenance"])
+@pytest.mark.parametrize("slot", ["companion", "completion"])
+def test_release_binding_failure_precedes_every_new_purchase_debit(
+    client, service, approved, pack_files, monkeypatch, change, slot,
+):
+    approved["slot"] = slot
+    if change == "missing_pin":
+        monkeypatch.delenv(delivery.RELEASE_PIN_ENV)
+    elif change == "missing_release":
+        (pack_files[0].parent / delivery.RELEASE_FILE).unlink()
+    elif change == "replacement":
+        replace_fixture_coherently(pack_files)
+    else:
+        (pack_files[0] / "provenance.json").write_text('{"source_sha256":"' + "f" * 64 + '"}')
+    response = client.post("/store/buy", headers=credentials(),
+                           json={"item_id": SKU, "idempotency_key": "release-bound-preflight"})
+    assert response.status_code == 409
+    assert response.json() == {"detail": "COSMETIC_DELIVERY_UNAVAILABLE"}
+    assert service.db.state["debits"] == []
+    assert service.db.state["orders"] == {}
+    assert service.db.state["entitlements"] == {}
+    assert not any(query.startswith("INSERT") for query, _ in service.db.calls)
+
+
+@pytest.mark.parametrize("change", [
+    "schema_bool", "kind", "approval_flag", "unknown", "packs_empty", "packs_oversize",
+    "duplicate_id", "duplicate_resource", "unknown_entry", "fingerprint", "missing_file",
+    "file_size_bool", "file_size_oversize", "file_digest", "sheet_path", "identity", "version",
+    "license", "source", "slot", "resource",
+])
+def test_even_pinned_release_requires_exact_bounded_provisioning_schema(
+    owned, pack_files, monkeypatch, change,
+):
+    path = pack_files[0].parent / delivery.RELEASE_FILE
+    release = json.loads(path.read_bytes())
+    entry = release["packs"][0]
+    if change == "schema_bool":
+        release["schema_version"] = True
+    elif change == "kind":
+        release["kind"] = "client-authorization"
+    elif change == "approval_flag":
+        release["sale_enabled"] = True
+    elif change == "unknown":
+        release["private_override"] = "MUST_NOT_LEAK"
+    elif change == "packs_empty":
+        release["packs"] = []
+    elif change == "packs_oversize":
+        release["packs"] *= 7
+    elif change in {"duplicate_id", "duplicate_resource"}:
+        second = deepcopy(entry)
+        second["delivery_resource" if change == "duplicate_id" else "pack_id"] = "another"
+        release["packs"].append(second)
+    elif change == "unknown_entry":
+        entry["path"] = "MUST_NOT_LEAK"
+    elif change == "fingerprint":
+        entry["artwork_fingerprint"] = "0" * 64
+    elif change == "missing_file":
+        del entry["files"]["provenance.json"]
+    elif change == "file_size_bool":
+        entry["files"]["manifest.json"]["bytes"] = True
+    elif change == "file_size_oversize":
+        entry["files"]["sheet.png"]["bytes"] = delivery.MAX_PRIVATE_SHEET_BYTES + 1
+    elif change == "file_digest":
+        entry["files"]["manifest.json"]["sha256"] = "G" * 64
+    elif change == "sheet_path":
+        entry["files"]["../secret.png"] = entry["files"].pop("sheet.png")
+    else:
+        key, value = {"identity": ("pack_id", "another.pack"), "version": ("version", "2.0.0"),
+                      "license": ("license_id", "unapproved-license"), "source": ("source_sha256", "0" * 64),
+                      "slot": ("slot", "unreviewed"), "resource": ("delivery_resource", "another")}[change]
+        entry[key] = value
+    raw = json.dumps(release).encode()
+    path.write_bytes(raw)
+    monkeypatch.setenv(delivery.RELEASE_PIN_ENV, hashlib.sha256(raw).hexdigest())
+    response = owned.get(PACK_PATH, headers=credentials())
+    assert response.status_code == 503
+    assert response.json() == {"detail": "COSMETIC_DELIVERY_UNAVAILABLE"}
+
+
+@pytest.mark.parametrize("name", ["release-manifest.json", "provenance.json"])
+@pytest.mark.parametrize("attack", ["missing", "symlink", "hardlink", "fifo", "oversize"])
+def test_release_and_provenance_require_bounded_regular_nofollow_files(owned, pack_files, name, attack):
+    target = pack_files[0]
+    path = (target.parent if name == delivery.RELEASE_FILE else target) / name
+    if attack == "oversize":
+        path.write_bytes(b"x" * (delivery.MAX_PRIVATE_RELEASE_BYTES + 1))
+    else:
+        moved = path.with_suffix(".original")
+        path.rename(moved)
+        if attack == "symlink":
+            path.symlink_to(moved)
+        elif attack == "hardlink":
+            os.link(moved, path)
+        elif attack == "fifo":
+            os.mkfifo(path)
+    response = owned.get(PACK_PATH, headers=credentials())
+    assert response.status_code == 503
+    assert response.json() == {"detail": "COSMETIC_DELIVERY_UNAVAILABLE"}
+
+
+@pytest.mark.parametrize("change", ["pin", "root"])
+def test_operator_configuration_change_during_decode_refuses_old_response(owned, pack_files, monkeypatch, change):
+    original = manifest.load_pack
+
+    def rotate(snapshot):
+        loaded = original(snapshot)
+        if change == "pin":
+            monkeypatch.setenv(delivery.RELEASE_PIN_ENV, "0" * 64)
+        else:
+            monkeypatch.setenv("OPENVEGAS_EMOTE_PACK_ROOT", str(pack_files[0].parent / "other"))
+        return loaded
+
+    monkeypatch.setattr(manifest, "load_pack", rotate)
+    response = owned.get(PACK_PATH, headers=credentials())
+    assert response.status_code == 503
+    assert response.json() == {"detail": "COSMETIC_DELIVERY_UNAVAILABLE"}
+
+
+def test_preview_and_admin_paths_do_not_require_private_release_pin(client, monkeypatch):
+    monkeypatch.delenv(delivery.RELEASE_PIN_ENV)
+    monkeypatch.delenv("OPENVEGAS_EMOTE_PACK_ROOT")
+    response = client.get("/store/emotes/catalog/openvegas.pixel-courier/preview")
+    assert response.status_code == 200
+    # A client admin flag cannot turn preview access into a private download.
+    response = client.get(PACK_PATH + "?admin=true", headers=credentials())
+    assert response.status_code == 403
+
+
+@pytest.mark.parametrize("when", ["release-manifest.json", "manifest.json", "sheet.png", "provenance.json"])
+def test_pin_rotation_after_any_read_fails_before_new_purchase(client, service, monkeypatch, when):
+    original = delivery._read
+
+    def rotate(fd, relative, limit):
+        data = original(fd, relative, limit)
+        if relative == when:
+            monkeypatch.setenv(delivery.RELEASE_PIN_ENV, "0" * 64)
+        return data
+
+    monkeypatch.setattr(delivery, "_read", rotate)
+    response = client.post("/store/buy", headers=credentials(), json={"item_id": SKU})
+    assert response.status_code == 409
+    assert response.json() == {"detail": "COSMETIC_DELIVERY_UNAVAILABLE"}
+    assert service.db.state["debits"] == [] and service.db.state["orders"] == {}
+
+
+def test_new_release_pin_cannot_bypass_manifest_self_checksum(owned, pack_files, monkeypatch):
+    replace_fixture_coherently(pack_files)
+    # Pin new PNG bytes, but retain the old manifest/self-checksum. Both layers
+    # must pass; a valid release fingerprint cannot bless an invalid PNG pack.
+    (pack_files[0] / "manifest.json").write_text(json.dumps(pack_files[1]))
+    pin_delivery_release(pack_files[0].parent, monkeypatch)
+    response = owned.get(PACK_PATH, headers=credentials())
+    assert response.status_code == 503
+
+
+def test_two_skus_share_one_release_but_cannot_swap_resources(owned, approved, pack_files, monkeypatch):
+    first, raw, sheet = pack_files
+    other = STORE_CATALOG["test_other"]
+    target = first.parent / other["asset"]["delivery_resource"]
+    target.mkdir()
+    raw = {**raw, "pack_id": other["asset"]["pack_id"], "version": other["asset"]["version"]}
+    (target / "manifest.json").write_text(json.dumps(raw))
+    (target / "sheet.png").write_bytes(sheet)
+    release = pin_delivery_release(first.parent, monkeypatch)
+    assert len(release["packs"]) == 2
+    assert release["sale_enabled"] is False and release["native_compatibility_verified"] is False
+    bought = owned.post("/store/buy", headers=credentials(), json={"item_id": "test_other"})
+    assert bought.status_code == 200
+    for sku, item in ((SKU, approved), ("test_other", other)):
+        response = owned.get(f"/store/emotes/{sku}/pack", headers=credentials())
+        assert response.status_code == 200
+        assert response.json()["pack_id"] == item["asset"]["pack_id"]
+        assert delivery.RELEASE_PIN_ENV not in response.text and "artwork_fingerprint" not in response.text
+    approved["asset"]["delivery_resource"] = other["asset"]["delivery_resource"]
+    assert owned.get(PACK_PATH, headers=credentials()).status_code == 503
+
+
+def test_renamed_root_cannot_mix_release_and_resource_from_different_directories(
+    owned, pack_files, monkeypatch,
+):
+    root = pack_files[0].parent
+    original = delivery._read
+    moved = root.with_name("pinned-original-root")
+
+    def replace_root(fd, relative, limit):
+        data = original(fd, relative, limit)
+        if relative == delivery.RELEASE_FILE:
+            root.rename(moved)
+            root.mkdir()
+        return data
+
+    monkeypatch.setattr(delivery, "_read", replace_root)
+    response = owned.get(PACK_PATH, headers=credentials())
+    assert response.status_code == 200
+    assert base64.b64decode(response.json()["sheet_base64"], validate=True) == pack_files[2]

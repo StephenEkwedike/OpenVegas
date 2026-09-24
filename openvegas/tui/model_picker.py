@@ -188,6 +188,7 @@ def plan_switch(
     pending_attachments: bool = False,
     has_history: bool = False,
     confirm_fresh: bool = False,
+    native_task_active: bool = False,
 ) -> SwitchPlan:
     """Plan at the command-loop boundary; caller applies the tuple without awaits.
 
@@ -211,6 +212,13 @@ def plan_switch(
     ):
         return blocked("Target is unavailable; refresh /models and validate again.")
     provider, model = target["provider"], target["model_id"]
+    if native_task_active:
+        if (provider, model) == (current_provider, current_model):
+            return SwitchPlan("ready", provider, model, thread_id, "Current model unchanged.")
+        return blocked(
+            "This native task cannot yet transfer its context to another model. "
+            "Keep this model, or start a fresh chat explicitly; nothing was switched."
+        )
     if provider == current_provider:
         return SwitchPlan(
             "ready",

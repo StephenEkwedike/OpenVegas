@@ -107,7 +107,13 @@ async def load_tool_preparation_tx(tx, *, run, tool_call_id, for_start=False):
 async def require_consumed_approval_tx(tx, *, run, tool, preparation, plan):
     approval = await tx.fetchrow("SELECT * FROM agent_tool_approvals WHERE id=$1::uuid FOR UPDATE",
                                  str(preparation["approval_id"]) if preparation["approval_id"] else None)
-    if (not approval or str(approval["run_id"]) != str(run["id"])
+    if (not _matches_consumed_approval(approval, run=run, tool=tool, preparation=preparation, plan=plan)
+            or run["version"] != tool["run_version"] + 1):
+        raise ContractError(APIErrorCode.APPROVAL_REQUIRED, "Approve the exact native file edit before starting it.")
+
+
+def _matches_consumed_approval(approval, *, run, tool, preparation, plan):
+    return not (not approval or str(approval["run_id"]) != str(run["id"])
             or str(approval["tool_call_id"]) != str(tool["id"])
             or str(approval["actor_id"]) != str(run["user_id"])
             or str(approval["decision_actor_id"]) != str(run["user_id"])
@@ -115,9 +121,7 @@ async def require_consumed_approval_tx(tx, *, run, tool, preparation, plan):
             or approval["decision_state"] != "consumed" or approval["consumed_at"] is None
             or approval["approval_context_hash"] != approval_context_hash(
                 str(preparation["id"]), plan.contract_sha256, tool["payload_hash"])
-            or approval["run_version_approved"] != tool["run_version"]
-            or run["version"] != tool["run_version"] + 1):
-        raise ContractError(APIErrorCode.APPROVAL_REQUIRED, "Approve the exact native file edit before starting it.")
+            or approval["run_version_approved"] != tool["run_version"])
 
 
 async def store_observation_tx(tx, *, tool_call_id, preparation, plan, result_status, result_payload,
@@ -137,6 +141,13 @@ async def store_observation_tx(tx, *, tool_call_id, preparation, plan, result_st
 
 async def validate_observation_tx(tx, *, run, tool, preparation, plan):
     if str(tool["run_id"]) != str(run["id"]) or str(preparation["tool_call_id"]) != str(tool["id"]):
+        _fail()
+    # History can outlive an approval's lease and later run revisions, but not
+    # its exact consumed authorization. This check never grants a new execution.
+    approval = await tx.fetchrow("SELECT * FROM agent_tool_approvals WHERE id=$1::uuid",
+                                str(preparation["approval_id"]) if preparation["approval_id"] else None)
+    if (not _matches_consumed_approval(approval, run=run, tool=tool, preparation=preparation, plan=plan)
+            or run["version"] < tool["run_version"] + 1):
         _fail()
     result = object_value(tool["result_payload"])
     if set(result) != {"native_mutation_proof"} or tool["stdout"] or tool["stderr"]:

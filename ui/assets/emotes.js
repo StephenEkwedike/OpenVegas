@@ -13,6 +13,11 @@ const images = new Map();
 const previewRequests = new WeakMap();
 const owned = new Map();
 const purchaseKeys = new Map();
+const pendingItems = new Set();
+const cardControls = new Map();
+let ownershipState = "loading";
+let ownershipRequest = 0;
+let dialogOpener = null;
 let items = [];
 let paused = media.matches;
 let animationId = null;
@@ -67,8 +72,11 @@ function updateMotion() {
   for (const player of players) player.lastTick = null;
   if (animationId !== null) cancelAnimationFrame(animationId);
   animationId = null;
-  $("motion-toggle").textContent = paused ? "Play previews" : "Pause previews";
-  $("motion-toggle").setAttribute("aria-pressed", String(paused));
+  for (const id of ["motion-toggle", "preview-motion-toggle"]) {
+    $(id).textContent = paused ? "Play previews" : "Pause previews";
+    $(id).setAttribute("aria-pressed", String(paused));
+    $(id).disabled = media.matches;
+  }
   tick(performance.now());
 }
 
@@ -131,6 +139,7 @@ async function mountPreview(stage, item) {
 }
 
 function openPreview(item) {
+  dialogOpener = `${item.id}:preview`;
   $("preview-title").textContent = item.name;
   $("preview-description").textContent = item.description || "";
   clearPreview($("preview-stage"));
@@ -142,52 +151,87 @@ function openPreview(item) {
   void mountPreview($("preview-stage"), item);
 }
 
-async function refreshOwned() {
+function ownershipFailure(error, message) {
+  ownershipState = error.status === 401 ? "signed-out" : "stale";
+  if (ownershipState === "signed-out") {
+    owned.clear();
+    purchaseKeys.clear();
+    tell("Sign in to check ownership, purchase or equip an emote.");
+    const link = node("a", " Sign in");
+    link.href = getLoginHref("/ui/emotes");
+    $("catalog-status").append(link);
+  } else tell(message || "Previews are available. Ownership could not be checked. Actions are disabled until you retry the ownership check.");
+}
+
+async function refreshOwned(message) {
+  const request = ++ownershipRequest;
+  ownershipState = "loading";
+  render();
   try {
     const result = await apiJson("/store/emotes/owned");
+    if (request !== ownershipRequest) return;
+    if (!Array.isArray(result?.entitlements)) throw new Error("Invalid ownership response.");
     owned.clear();
-    for (const entry of result.entitlements || []) {
-      if (entry.effective_status === "active") owned.set(entry.item_id, entry);
+    for (const entry of result.entitlements) {
+      if (entry?.effective_status === "active") owned.set(entry.item_id, entry);
     }
+    ownershipState = "ready";
+    // Only the ownership endpoint can confirm a purchase, not its POST response.
+    for (const id of owned.keys()) purchaseKeys.delete(id);
+    tell(message || collectionStatus(items));
   } catch (error) {
-    owned.clear();
-    if (error.status !== 401) tell("Previews are available. Ownership could not be checked; try again before purchasing.");
+    if (request !== ownershipRequest) return;
+    ownershipFailure(error);
+  } finally {
+    if (request === ownershipRequest) render();
   }
 }
 
-async function transact(item, button) {
-  button.disabled = true;
+async function transact(item) {
+  const entitlement = owned.get(item.id);
+  if (ownershipState !== "ready" || pendingItems.has(item.id)
+    || entitlement?.activatable === false || entitlement?.equipped) return;
+  if (!entitlement && (!isPurchasable(item)
+    || !window.confirm(`Purchase ${item.name} for ${item.cost_v} $V from your OpenVegas balance?`))) return;
+  pendingItems.add(item.id);
+  render();
   try {
-    if (owned.has(item.id)) {
+    if (entitlement) {
       await apiJson("/store/emotes/equip", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(equipmentRequest(item)) });
-      tell(`${item.name} equipped on your account. In the updated CLI, run openvegas emote sync to restore it on this device. Existing terminals stop safely when the selection changes.`);
     } else {
-      if (!isPurchasable(item)) return;
-      if (!window.confirm(`Purchase ${item.name} for ${item.cost_v} $V from your OpenVegas balance?`)) return;
       const key = purchaseKeys.get(item.id) || crypto.randomUUID();
       purchaseKeys.set(item.id, key);
       await apiJson("/store/buy", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ item_id: item.id, idempotency_key: key }) });
-      purchaseKeys.delete(item.id);
-      tell(`${item.name}: purchase checked. Your current ownership is shown below.`);
     }
-    await refreshOwned();
-    render();
+    await refreshOwned(`${item.name}: request completed. Current ownership and equipment are shown below. Run openvegas emote sync in the updated CLI to restore your account selection on this device.`);
   } catch (error) {
-    if (error.status === 401) {
-      tell("Sign in to purchase or equip an emote.");
-      const link = node("a", " Sign in");
-      link.href = getLoginHref("/ui/emotes");
-      $("catalog-status").append(link);
-    } else if (error.status === 400) {
-      tell("Purchase could not complete. Check your balance; no automatic top-up will be made.");
+    // An uncertain write or auth failure invalidates reads already in flight.
+    ++ownershipRequest;
+    ownershipFailure(error, error.status === 400
+      ? "Action could not complete. Check your balance; no automatic top-up will be made. Retry the ownership check before another action."
+      : "Could not confirm this action. Retry the ownership check first; an unconfirmed purchase keeps the same purchase reference.");
+    if (error.status === 400) {
       const link = node("a", " View balance"); link.href = "/ui/balance"; $("catalog-status").append(link);
-    } else tell("Could not confirm this action. Retry uses the same purchase reference to avoid a duplicate charge.");
-  } finally { button.disabled = false; }
+    }
+  } finally { pendingItems.delete(item.id); render(); }
+}
+
+function restoreCardFocus(key) {
+  const target = cardControls.get(key);
+  const preview = cardControls.get(`${key.split(":")[0]}:preview`);
+  (target && !target.disabled ? target : preview || $("emote-search")).focus({ preventScroll: true });
 }
 
 function render() {
   const grid = $("emote-grid");
+  const focused = grid.contains(document.activeElement) ? document.activeElement.getAttribute("data-emote-control") : null;
+  const retryFocused = document.activeElement === $("ownership-retry");
   grid.replaceChildren();
+  cardControls.clear();
+  $("ownership-retry").hidden = ownershipState === "ready";
+  // Keep a retry's keyboard focus while the read is in flight.
+  $("ownership-retry").setAttribute("aria-disabled", String(ownershipState === "loading"));
+  $("ownership-retry").textContent = ownershipState === "loading" ? "Checking ownership..." : "Retry ownership check";
   const matched = matchingItems(items, $("emote-search").value, $("emote-category").value, owned);
   $("result-count").textContent = `${matched.length} ${matched.length === 1 ? "emote" : "emotes"}`;
   $("empty-state").hidden = matched.length !== 0;
@@ -203,18 +247,24 @@ function render() {
     if (priceLabel) body.append(node("p", priceLabel, "text-mono-xs"));
     const actions = node("div", undefined, "emote-card-actions");
     const preview = node("button", item.category === "completion" ? "Preview celebration" : "Preview dance", "btn btn-primary");
+    preview.setAttribute("data-emote-control", `${item.id}:preview`);
+    cardControls.set(`${item.id}:preview`, preview);
     preview.type = "button"; preview.addEventListener("click", () => openPreview(item)); actions.append(preview);
     if (owned.has(item.id) || isPurchasable(item)) {
       const entitlement = owned.get(item.id);
       const unavailable = entitlement && entitlement.activatable === false;
       const label = unavailable ? "Activation unavailable" : entitlement?.equipped ? "Equipped" : entitlement ? "Equip" : `Buy for ${item.cost_v} $V`;
       const buy = node("button", label, "btn btn-secondary");
-      buy.disabled = Boolean(unavailable || entitlement?.equipped);
-      buy.type = "button"; buy.addEventListener("click", () => void transact(item, buy)); actions.append(buy);
+      buy.setAttribute("data-emote-control", `${item.id}:action`);
+      cardControls.set(`${item.id}:action`, buy);
+      buy.disabled = Boolean(unavailable || entitlement?.equipped || pendingItems.has(item.id) || ownershipState !== "ready");
+      buy.type = "button"; buy.addEventListener("click", () => void transact(item)); actions.append(buy);
     } else actions.append(node("span", "Not yet for sale", "text-mono-xs"));
     body.append(actions); card.append(top, stage, body); grid.append(card);
     void mountPreview(stage, item);
   }
+  if (focused && !$("emote-dialog").open) restoreCardFocus(focused);
+  else if (retryFocused && $("ownership-retry").hidden && !$("emote-dialog").open) $("emote-search").focus({ preventScroll: true });
 }
 
 async function load() {
@@ -225,7 +275,6 @@ async function load() {
     tell(collectionStatus(items));
     render();
     await refreshOwned();
-    render();
   } catch {
     tell("The collection could not load. ");
     const retry = node("button", "Retry", "text-button"); retry.addEventListener("click", () => void load()); $("catalog-status").append(retry);
@@ -234,12 +283,19 @@ async function load() {
 
 $("emote-search").addEventListener("input", render);
 $("emote-category").addEventListener("change", render);
-$("motion-toggle").addEventListener("click", () => { paused = !paused; updateMotion(); });
+$("ownership-retry").addEventListener("click", () => { if (ownershipState !== "loading") void refreshOwned(); });
+for (const id of ["motion-toggle", "preview-motion-toggle"]) {
+  $(id).addEventListener("click", () => { if (!media.matches) { paused = !paused; updateMotion(); } });
+}
 media.addEventListener("change", () => { paused = media.matches; $("replay-preview").disabled = media.matches; updateMotion(); });
 document.addEventListener("visibilitychange", updateMotion);
 $("emote-dialog").addEventListener("close", () => {
   // A queued close event must not invalidate a modal that has already reopened.
-  if (!$("emote-dialog").open) clearPreview($("preview-stage"));
+  if (!$("emote-dialog").open) {
+    clearPreview($("preview-stage"));
+    if (dialogOpener) restoreCardFocus(dialogOpener);
+    dialogOpener = null;
+  }
 });
 $("copy-command").addEventListener("click", async () => {
   try { await navigator.clipboard.writeText("openvegas emote"); $("copy-command").textContent = "Copied"; }

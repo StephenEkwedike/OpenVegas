@@ -286,6 +286,19 @@ async def assert_schema_compatible(db: Any, flags: FeatureFlags) -> None:
     await require_migration_min(db, "046_native_generation_envelopes")
     await require_migration_min(db, "047_native_continuation_revisions")
     await require_migration_min(db, "048_native_mutation_preparations")
+    if os.getenv("OPENVEGAS_NATIVE_TASK_HANDOFF", "0") == "1":
+        if any(os.getenv(name, "0") != "1" for name in (
+            "OPENVEGAS_NATIVE_GENERATION_SCOPE", "OPENVEGAS_NATIVE_GENERATION_HISTORY",
+        )):
+            raise RuntimeError("Native task handoff requires native generation scope and history.")
+        await require_migration_min(db, "049_native_task_handoffs")
+        await require_tables(db, {"native_task_handoffs"})
+        await require_columns(db, {
+            ("native_task_handoffs", name) for name in (
+                "source_scope_json", "document_json", "document_sha256", "target_json",
+                "handoff_sha256", "expires_at", "destination_scope_json", "first_request_id", "first_dispatch_json",
+            )
+        } | {("agent_runs", "native_handoff_id")})
 
     await require_tables(
         db,

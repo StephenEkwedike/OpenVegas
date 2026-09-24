@@ -13,7 +13,7 @@
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@300;400;500;700&display=swap" rel="stylesheet" />
   <link rel="stylesheet" href="/ui/assets/theme.css?v=20260330" />
   <link rel="stylesheet" href="/ui/assets/layout.css?v=20260330" />
-  <link rel="stylesheet" href="/ui/assets/emotes.css?v=3" />
+  <link rel="stylesheet" href="/ui/assets/emotes.css?v=4" />
   <script defer src="/ui/assets/theme-fallback.js?v=20260330"></script>
 </head>
 <body>
@@ -44,6 +44,7 @@
         <span id="result-count" class="text-mono-xs" aria-live="polite"></span>
       </div>
       <p id="catalog-status" class="catalog-status" role="status">Loading collection...</p>
+      <button id="ownership-retry" class="text-button ownership-retry" type="button" hidden>Retry ownership check</button>
       <div id="emote-grid" class="emote-grid"></div>
       <p id="empty-state" class="empty-state" hidden>No matching emotes. Try a different search or collection.</p>
     </section>
@@ -75,9 +76,12 @@
     <form method="dialog"><button class="dialog-close text-button" aria-label="Close preview">Close &times;</button></form>
     <h2 id="preview-title"></h2><p id="preview-description"></p>
     <div id="preview-stage" class="preview-stage"></div>
-    <button id="replay-preview" type="button" class="btn btn-secondary" hidden>Replay celebration</button>
+    <div class="preview-controls">
+      <button id="preview-motion-toggle" type="button" class="text-button" aria-pressed="false">Pause previews</button>
+      <button id="replay-preview" type="button" class="btn btn-secondary" hidden>Replay celebration</button>
+    </div>
     <code id="preview-command"></code><p id="preview-notice" role="status"></p>
   </dialog>
-  <script type="module" src="/ui/assets/emotes.js?v=3"></script>
+  <script type="module" src="/ui/assets/emotes.js?v=4"></script>
 </body>
 </html>

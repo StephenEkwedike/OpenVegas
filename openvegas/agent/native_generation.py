@@ -112,6 +112,12 @@ async def lock_dispatch_claim_tx(tx: Any, claim: NativeGenerationClaim, req: Any
             or req.provider != "openrouter" or not req.enable_tools):
         reject("Native generation account or request does not match its claim.")
     run = await lock_run_tx(tx, user_id=claim.user_id, scope=claim.scope)
+    binding = getattr(req, "_native_handoff_binding", None)
+    if run.get("native_handoff_id") is not None or binding is not None:
+        from server.services.native_handoff_dispatch import validate_bound_request
+        binding = validate_bound_request(req)
+        if str(run.get("native_handoff_id")) != binding.handoff_id:
+            reject("Native handoff ownership is required; no context-free dispatch is allowed.")
     await require_fresh_projection_tx(tx, run=run, scope=claim.scope,
                                       continuing=claim.previous_request_id is not None)
     row = await tx.fetchrow(

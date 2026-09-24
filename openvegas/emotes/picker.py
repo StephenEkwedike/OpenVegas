@@ -64,6 +64,21 @@ def _previews(ctx, services):
         ctx.invoke(preview, pack_id=entries[int(choice) - 1].pack_id, reduced_motion=False)
 
 
+def _setup_help():
+    click.echo("Setup guide: nothing installed, equipped, or launched.")
+    click.echo("Keep animations in a separate companion pane to preserve your coding terminal.")
+    click.echo("OpenVegas chat: /emote shows the exact companion command for that session.")
+    click.echo("Check local support: openvegas emote doctor")
+    click.echo("Claude activity-only pilot, dry-run first:")
+    click.echo("  openvegas emote hooks setup claude --settings /path/to/.claude/settings.local.json")
+    click.echo("Gemini session discovery only (no task animation), dry-run first:")
+    click.echo("  openvegas emote hooks setup gemini --settings /path/to/.gemini/settings.json")
+    click.echo("Codex native hook installation is unsupported; no settings will be changed.")
+    click.echo("Whole-process wrapper options: openvegas emote run --help")
+    click.echo("The wrapper observes process exit, not each answer inside a running LLM session.")
+    click.echo("External-host lifecycle and native UX certification are still pending.")
+
+
 def choose(ctx, services):
     from .commands import off
 
@@ -91,13 +106,16 @@ def choose(ctx, services):
         for index, (pack_id, slot) in enumerate(choices, 1):
             click.echo(f"  {index}. Equip {pack_id} [{slot}]")
         click.echo("  p. Public previews (no ownership required)")
+        click.echo("  s. Setup guide (read-only)")
         click.echo("  o. Turn both slots off locally")
         click.echo("  q. Exit without changes")
-        choice = _prompt([str(i) for i in range(1, len(choices) + 1)] + ["p", "o", "q"])
+        choice = _prompt([str(i) for i in range(1, len(choices) + 1)] + ["p", "s", "o", "q"])
         if choice == "q":
             return
         if choice == "p":
             _previews(ctx, services)
+        elif choice == "s":
+            _setup_help()
         elif choice == "o":
             ctx.invoke(off)
         else:

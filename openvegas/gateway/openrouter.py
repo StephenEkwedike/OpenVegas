@@ -687,9 +687,17 @@ def parse_response(body: Any, req: Any, model_config: dict, parse_tool) -> dict:
 
 
 async def complete(
-    req, api_key: str, *, model_config: dict, capabilities: dict, parse_tool, client=None
+    req, api_key: str, *, model_config: dict, capabilities: dict, parse_tool, client=None,
+    handoff_binding=None,
 ) -> dict:
     payload = build_payload(req, model_config, capabilities)
+    if handoff_binding is not None:
+        from server.services.native_handoff_dispatch import (
+            validate_bound_request,
+            validate_dispatch_deadline,
+        )
+        validate_bound_request(req, payload=payload, expected=handoff_binding)
+        validate_dispatch_deadline(req, expected=handoff_binding)
     from openvegas.agent.native_envelope import capture_dispatch, capture_response
     native_dispatch = capture_dispatch(req, payload)
     if not api_key or not isinstance(api_key, str):

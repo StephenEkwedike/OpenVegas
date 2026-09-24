@@ -354,11 +354,20 @@ async def test_real_parent_private_observation_verifier_is_invoked(boundary, mon
     await bind(tx)
     tx.tool = terminal_tool(tx)
     original_fetchrow = tx.fetchrow
+    tx.prep["approval_id"] = PREP
+    tx.tool["run_version"] = RUN_ROW["version"] - 1
+    approval = {"run_id": RUN, "tool_call_id": TOOL, "actor_id": USER, "decision_actor_id": USER,
+                "decision_source": "native_mutation_v1", "decision_state": "consumed",
+                "consumed_at": datetime.now(UTC), "run_version_approved": tx.tool["run_version"],
+                "approval_context_hash": service.approval_context_hash(PREP, tx.plan.contract_sha256, tx.tool["payload_hash"])}
     stored = {"preparation_id": PREP, "result_submission_sha256": tx.tool["result_submission_hash"],
               "proof_json": canonical_json(proof_for(tx.plan))}
     if corrupt:
         stored["result_submission_sha256"] = "0" * 64
     async def fetchrow(query, *args):
+        if "agent_tool_approvals" in query:
+            assert args == (PREP,)
+            return approval
         if "native_mutation_observations" in query:
             assert args == (TOOL,)
             return stored
