@@ -18,6 +18,8 @@ from openvegas.agent.native_history import (
 from openvegas.agent.orchestration_service import AgentOrchestrationService
 from openvegas.agent.runtime_contracts import result_submission_hash, tool_payload_hash
 from openvegas.contracts.errors import ContractError
+from openvegas.contracts.native_tool_schema import GENERIC_V1, GOOGLE_FLAT_V1
+from openvegas.gateway.openrouter import _versioned_tool_definitions
 from tests.test_agent.test_native_history_contract import REQUEST, RUN_ROW, Tx
 
 NORMALIZE = AgentOrchestrationService._normalize_tool_arguments
@@ -60,6 +62,9 @@ def rehash(tool):
 
 async def scenario(*, model=MODEL, shell_mode="read_only"):
     tx = ReceiptTx(model)
+    # These seeded receipts intentionally retain the historical wire contracts.
+    version = GOOGLE_FLAT_V1 if model.startswith("google/") else GENERIC_V1
+    tx.original_request = {"model": model, "tools": _versioned_tool_definitions(model, version)}
     calls = [
         {"tool_name": "Search", "arguments": {"pattern": "error"}, "shell_mode": "read_only",
          "timeout_sec": 30, "provider_call_id": "call-search"},
@@ -104,7 +109,8 @@ async def scenario(*, model=MODEL, shell_mode="read_only"):
 
 async def load(tx, original):
     return await load_native_tool_results_tx(tx, run=RUN, source=tx.source,
-                                           request_id=REQUEST, assistant_message=original)
+                                           request_id=REQUEST, assistant_message=original,
+                                           request_payload=tx.original_request)
 
 
 @pytest.mark.asyncio
@@ -285,4 +291,5 @@ async def test_inactive_run_cannot_materialize_a_continuation(change):
     tx, original = await scenario()
     with pytest.raises(ContractError):
         await load_native_tool_results_tx(tx, run=dict(RUN, **change), source=tx.source,
-                                         request_id=REQUEST, assistant_message=original)
+                                         request_id=REQUEST, assistant_message=original,
+                                         request_payload=tx.original_request)

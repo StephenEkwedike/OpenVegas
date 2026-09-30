@@ -82,7 +82,7 @@ async def test_cli_canonical_switch_commits_only_after_confirmation(scenario):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('scenario', ['text', 'attachment', 'tool', 'blocked', 'error'])
+@pytest.mark.parametrize('scenario', ['text', 'incomplete', 'attachment', 'tool', 'blocked', 'error'])
 async def test_cli_canonical_turn_bypasses_tool_loop_and_has_no_paid_fallback(scenario):
     tree = ast.parse((Path(__file__).parents[2] / 'openvegas/cli.py').read_text())
     function = next(node for node in ast.walk(tree) if isinstance(node, ast.AsyncFunctionDef) and node.name == '_run_tool_loop')
@@ -90,27 +90,33 @@ async def test_cli_canonical_turn_bypasses_tool_loop_and_has_no_paid_fallback(sc
     fragment = '\n'.join(ast.unparse(node) for node in function.body[index:index + 2])
     source = 'async def run(client, pending_attachments, user_message):\n' + '\n'.join('    ' + line for line in fragment.splitlines())
     client = SimpleNamespace(_canonical_chat={'revision': None if scenario == 'blocked' else 'before'}, _request=AsyncMock(return_value={'text': 'answer', 'revision': 'after', 'v_cost': '1'}))
+    if scenario == 'incomplete':
+        client._request.return_value['completion_status'] = 'incomplete'
     if scenario == 'error':
         client._request.side_effect = RuntimeError('uncertain request')
     finish = []
+    rendered, usage = [], []
     namespace = {
         'APIError': RuntimeError, 'current_provider': 'openai', 'current_model': 'reviewed-test',
         'current_reasoning_effort': None,
         'current_thread_id': 'source', '_has_workspace_tooling_intent': lambda _: scenario == 'tool',
         'uuid': __import__('uuid'), 'console': SimpleNamespace(print=lambda *a, **k: None),
-        'render_assistant': lambda *a: None, '_render_usage_summary': lambda *_: None,
+        'render_assistant': lambda _, text: rendered.append(text), '_render_usage_summary': usage.append,
         'emote_turn': 'logical-turn', 'emote_bridge': SimpleNamespace(finish=lambda **k: finish.append(k)),
     }
     validator = next(node for node in ast.walk(tree) if isinstance(node, ast.AsyncFunctionDef) and node.name == '_validate_openrouter_request')
-    exec(compile(ast.Module(body=[validator], type_ignores=[]), 'trusted_cli_validator', 'exec'), namespace)  # noqa: S102 - Actual CLI validator.
+    completion_helper = next(node for node in function.body if isinstance(node, ast.FunctionDef) and node.name == '_emote_response_is_final')
+    exec(compile(ast.Module(body=[validator, completion_helper], type_ignores=[]), 'trusted_cli_validator', 'exec'), namespace)  # noqa: S102 - Actual CLI validator and completion decision.
     exec(compile(source, 'trusted_cli_canonical_turn', 'exec'), namespace)  # noqa: S102 - Exact trusted repository AST, not caller-supplied code.
-    if scenario == 'text':
+    if scenario in {'text', 'incomplete'}:
         assert await namespace['run'](client, [], 'plain question')
         client._request.assert_awaited_once()
         assert client._request.call_args.args == ('POST', '/models/conversations/ask')
         assert client._request.call_args.kwargs['json']['prompt'] == 'plain question'
         assert client._canonical_chat['revision'] == 'after'
-        assert finish == [{'success': True, 'turn': 'logical-turn'}]
+        assert rendered == ['answer']
+        assert usage == [client._request.return_value]
+        assert finish == [{'success': scenario == 'text', 'turn': 'logical-turn'}]
     else:
         with pytest.raises(RuntimeError):
             await namespace['run'](client, ['file'] if scenario == 'attachment' else [], 'question')

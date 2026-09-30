@@ -799,28 +799,34 @@ async def create_owned_chat(
 ) -> OwnedChatCompositor | None:
     """Activate only equipped, server-verified art (or an explicit empty owner).
 
-    Saved selection is a trigger, never authorization. This path deliberately
+    Auto stays neutral until a native surface is certified. Explicit on is an
+    experimental developer/native-review opt-in, never certification.
+    Saved selection is never authorization. This path deliberately
     uses an EMPTY base catalog: no public preview/free fallback can accidentally
     authorize private frames after refund, expiry, account switch or revocation.
     Sync/refresh are bounded by RemoteLibrary; frame checks are cached/local.
     """
-    from .manifest import PackError
-    from .online import LeaseRefresher, remote_library
-    from .resources import Catalog, PackRepository
-    from .selection import SelectionStore
-
     mode = str(mode).strip().lower()
     if mode in {"0", "false", "no", "off"}:
         return None
     explicit = mode in {"1", "true", "yes", "on"}
     if mode != "auto" and not explicit:
         raise ValueError("Compositor mode must be auto, on, or off")
+    # No native surfaces are certified yet. Do not inspect equipment or contact
+    # the server merely because the caller uses a TTY or has a saved selection.
+    if mode == "auto":
+        return None
+
+    from .manifest import PackError
+    from .online import LeaseRefresher, remote_library
+    from .resources import Catalog, PackRepository
+    from .selection import SelectionStore
+
+    console.print("[dim]Experimental same-window developer/native-review opt-in; not native-certified.[/dim]")
     library = lease = owner = None
     try:
         selection = selection if selection is not None else SelectionStore()
         slots, _ = selection.snapshot()
-        if not any(slots.values()) and not explicit:
-            return None
         packs = {"companion": None, "completion": None}
         guard = lambda: False
         if any(slots.values()):

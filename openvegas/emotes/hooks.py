@@ -597,6 +597,12 @@ def handle_input(data: bytes, *, installation: Path, owner: str,
                 turns[prompt] = {"generation": generation, "sequence": 0, "quiet": False, "tools": []}
                 state["active"] = prompt
                 emit(prompt, Phase.START)
+            elif prompt is not None and prompt not in turns:
+                # Include SessionEnd: an unseen terminal UUID must not later
+                # start or supersede another active prompt after delayed delivery.
+                if name == "PreToolUse" or len(turns) >= MAX_TURNS:
+                    return False
+                turns[prompt] = {"generation": 0, "sequence": 0, "quiet": True, "tools": []}
             elif name == "SessionEnd":
                 active = state["active"]
                 if active is None or (prompt is not None and prompt != active):
@@ -604,12 +610,6 @@ def handle_input(data: bytes, *, installation: Path, owner: str,
                 turns[active]["quiet"] = True
                 emit(active, Phase.EXIT)
                 state["active"] = None
-            elif prompt not in turns:
-                # A terminal/permission event can beat a delayed start. Tombstone
-                # that UUID without synthesizing an active turn or publishing it.
-                if name == "PreToolUse" or len(turns) >= MAX_TURNS:
-                    return False
-                turns[prompt] = {"generation": 0, "sequence": 0, "quiet": True, "tools": []}
             elif prompt != state["active"]:
                 return False
             elif name == "PreToolUse":

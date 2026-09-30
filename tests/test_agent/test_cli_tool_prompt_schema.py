@@ -28,8 +28,11 @@ def chat_prompt(provider, model):
     )
 
 
-@pytest.mark.parametrize("model", ["google/gemini-2.5-flash-lite", "google/schema-fixture"])
-def test_google_prompt_matches_every_flat_function_field(model):
+@pytest.mark.parametrize("model", [
+    "google/gemini-2.5-flash-lite", "google/schema-fixture", "openai/example",
+    "anthropic/example", "mistralai/example",
+])
+def test_managed_prompt_matches_every_flat_function_field(model):
     prompt = chat_prompt("openrouter", model)
     usage = cli._local_tool_usage_prompt("openrouter", model)
     assert usage in prompt
@@ -69,8 +72,6 @@ def test_google_read_prompt_survives_real_local_preprocessing(tmp_path, monkeypa
 
 @pytest.mark.parametrize("provider,model", [
     ("openai", "example"), ("anthropic", "example"), ("gemini", "example"),
-    ("openrouter", "openai/example"), ("openrouter", "anthropic/example"),
-    ("openrouter", "mistralai/example"),
 ])
 def test_generic_dispatcher_instructions_remain_unchanged(provider, model):
     prompt = chat_prompt(provider, model)

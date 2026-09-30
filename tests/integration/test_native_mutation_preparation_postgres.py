@@ -48,12 +48,11 @@ async def mutation_db(continuation_db, monkeypatch):
 
 async def seed(c, *, name="Write", arguments=None):
     arguments = {"filepath": "notes.txt", "content": "after\n", "write_mode": "replace"} if arguments is None else arguments
-    call = {"tool_name": name, "arguments": arguments, "shell_mode": "mutating", "timeout_sec": 30}
     c.provider_body = {"id": "gen-native-local", "model": c.command["model"],
         "choices": [{"message": {"role": "assistant", "content": None,
             "reasoning_details": [{"type": "reasoning.encrypted", "data": PRIVATE}],
             "tool_calls": [{"id": "native-write-1", "type": "function", "function": {
-                "name": "call_local_tool", "arguments": json.dumps(call)}}]}, "finish_reason": "tool_calls"}],
+                "name": name, "arguments": json.dumps({**arguments, "timeout_sec": 30})}}]}, "finish_reason": "tool_calls"}],
         "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15, "cost": 0.00002}}
     result = payload(await post(c))
     c.seeded = True

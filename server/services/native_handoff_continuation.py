@@ -238,7 +238,7 @@ async def _history(tx, req):
                                claim.previous_request_id, claim.user_id)
     assistant = envelope.assistant_message()
     results = await load_native_tool_results_tx(tx, run=run, source=source,
-        request_id=claim.previous_request_id, assistant_message=assistant)
+        request_id=claim.previous_request_id, assistant_message=assistant, request_payload=envelope.request_payload())
     if not results or len(results) != len(assistant["tool_calls"]):
         _fail()
     payload = envelope.request_payload()

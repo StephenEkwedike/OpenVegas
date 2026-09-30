@@ -7,6 +7,9 @@ Windows uses a protected-ACL, handle-relative backend; POSIX uses descriptors.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import math
 import os
 import re
 import stat
@@ -23,13 +26,19 @@ from ._windows_state import (
     private_windows_directory,
     validate_info,
 )
-from .events import MAX_EVENT_BYTES, Event, Phase
+from .events import IDENTITY, MAX_EVENT_BYTES, Event, Phase
+from .manifest import parse_json
 
 MAX_QUEUE = 256
 MAX_SCAN = MAX_QUEUE * 4
 STALE_SECONDS = 60.0
 EVENT_FILE = re.compile(r"[0-9a-f]{32}\.json\Z")
 TEMP_FILE = re.compile(r"\.[0-9a-f]{32}\.tmp\Z")
+MAX_COMPLETED_TURNS = 4096
+COMPLETION_RETENTION_SECONDS = 24 * 60 * 60
+MAX_COMPLETION_STATE_BYTES = 512 * 1024
+MAX_COMPLETION_TEMPS = 64
+COMPLETION_FILE = "completed-v1.json"
 
 
 class SpoolError(ValueError):
@@ -313,6 +322,90 @@ class EventSpool:
 
     def publish(self, event: Event) -> bool:
         return publish_event(event, directory=self.directory)
+
+    def completion_allowed(
+        self, *, source: str, session_id: str, turn_id: str, claim: bool = False,
+    ) -> bool | None:
+        """Check/reserve one semantic completion independently of queue draining.
+
+        True permits it, False means already reserved, None means unavailable.
+        The owned observer checks before START and claims BEFORE publishing
+        COMPLETE. Stream/owner IDs and generations cannot reset this guard.
+        One ledger retains up to 4096 SHA-256 logical identity digests for 24
+        hours after claiming, across all sessions. Only expired claims are
+        pruned; full recent state fails neutral until expiry. Live-instance
+        semantic guards are separate and never expire. No content is stored.
+        Retention assumes a trustworthy wall clock; observed rollback disables
+        access until it catches up, but forward jumps can shorten real retention.
+        This protects process recreation, not deletion/rollback of private state
+        or power loss (the existing atomic writer does not fsync). It cannot
+        reconstruct completions from before this ledger was introduced.
+        """
+        if type(claim) is not bool or not all(
+            type(value) is str and IDENTITY.fullmatch(value)
+            for value in (source, session_id, turn_id)
+        ):
+            return None
+        token = hashlib.sha256(json.dumps([source, session_id, turn_id]).encode("ascii")).hexdigest()
+        try:
+            with _locked(self.directory.parent / "completion-guards") as fd:
+                now = time.time()
+                if type(now) not in (int, float) or not math.isfinite(now) or not 0 <= now < 2**53:
+                    return None
+                names = state_names(fd, limit=MAX_COMPLETION_TEMPS + 1, include_lock=False)
+                temps = {}
+                # Validate the entire inventory before deleting anything. The
+                # common lock excludes a live atomic writer, so valid UUID temps
+                # here are orphans, even when their contents are only partial.
+                for name in names:
+                    if name != COMPLETION_FILE and not TEMP_FILE.fullmatch(name):
+                        return None
+                    info = state_stat(fd, name)
+                    if info.st_size > MAX_COMPLETION_STATE_BYTES:
+                        return None
+                    if name != COMPLETION_FILE:
+                        temps[name] = info
+                if len(temps) > MAX_COMPLETION_TEMPS:
+                    return None
+                try:
+                    state = parse_json(_read(fd, COMPLETION_FILE, MAX_COMPLETION_STATE_BYTES),
+                                       MAX_COMPLETION_STATE_BYTES)
+                except FileNotFoundError:
+                    # A claim must use the ledger checked before START. Losing
+                    # that receipt mid-turn must not silently create new authority.
+                    if claim:
+                        return None
+                    state = {"schema": 1, "last_seen": now, "completed": {}}
+                completed = state.get("completed")
+                last_seen = state.get("last_seen")
+                if (set(state) != {"schema", "last_seen", "completed"}
+                        or type(state["schema"]) is not int or state["schema"] != 1
+                        or type(last_seen) not in (int, float) or not math.isfinite(last_seen)
+                        or not 0 <= last_seen <= now
+                        or not isinstance(completed, dict)
+                        or len(completed) > MAX_COMPLETED_TURNS
+                        or any(not re.fullmatch(r"[0-9a-f]{64}", item)
+                               or type(stamp) not in (int, float) or not math.isfinite(stamp)
+                               or not 0 <= stamp <= last_seen
+                               for item, stamp in completed.items())):
+                    return None
+                for name, info in temps.items():
+                    state_unlink(fd, name, expected=info)
+                completed = {key: stamp for key, stamp in completed.items()
+                             if now - stamp < COMPLETION_RETENTION_SECONDS}
+                allowed = False if token in completed else (
+                    True if len(completed) < MAX_COMPLETED_TURNS else None
+                )
+                if claim and allowed:
+                    completed[token] = now
+                state.update(last_seen=now, completed=completed)
+                encoded = json.dumps(state, separators=(",", ":")).encode("ascii")
+                if len(encoded) > MAX_COMPLETION_STATE_BYTES:
+                    return None
+                atomic_write(fd, COMPLETION_FILE, encoded)
+                return allowed
+        except Exception:  # noqa: BLE001 - missing replay authority disables cosmetics
+            return None
 
     def drain(self, *, source: str, session_id: str) -> list[Event]:
         """Consume selected-session events; clean stale whole turns globally.

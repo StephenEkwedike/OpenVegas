@@ -116,7 +116,13 @@ def test_unsafe_nodes_never_read_or_block(root, kind):
 
 @pytest.mark.parametrize("mode", [0o444,0o666,0o4755,0o2755,0o1755])
 def test_unsafe_modes(root, mode):
-    (root/"a.txt").write_text("x"); (root/"a.txt").chmod(mode)
+    leaf = root / "a.txt"
+    leaf.write_text("x")
+    # macOS clears setgid when the inherited temporary-directory group is not
+    # ours. Establish a real unsafe fixture instead of testing cleared bits.
+    os.chown(leaf, -1, os.getegid())
+    leaf.chmod(mode)
+    assert stat.S_IMODE(leaf.stat().st_mode) == mode
     with pytest.raises(NativeMutationError, match="native_runtime_unsafe_file"):
         rw.capture_source(str(root), "a.txt")
 

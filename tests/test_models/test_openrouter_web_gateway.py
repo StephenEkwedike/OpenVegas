@@ -789,14 +789,7 @@ async def test_local_tools_and_web_compose_preserve_ids_and_settle_once(
     body = response(searches)
     body["model"] = model
     body["choices"][0]["finish_reason"] = "tool_calls"
-    function = (
-        {"name": "Read", "arguments": json.dumps({"path": "README.md"})}
-        if flat
-        else {
-            "name": "call_local_tool",
-            "arguments": json.dumps({"tool_name": "Read", "arguments": {"path": "README.md"}}),
-        }
-    )
+    function = {"name": "Read", "arguments": json.dumps({"path": "README.md"})}
     body["choices"][0]["message"]["tool_calls"] = [
         {
             "id": "call-preserved-fixture-id",
@@ -827,7 +820,7 @@ async def test_local_tools_and_web_compose_preserve_ids_and_settle_once(
     assert result.v_cost == Decimal("0.012") + Decimal("0.2") * searches
     assert observed[0]["tools"][0]["type"] == "openrouter:web_search"
     functions = [t["function"]["name"] for t in observed[0]["tools"][1:]]
-    assert ("Read" in functions) if flat else functions == ["call_local_tool"]
+    assert functions == ["Read", "Search", "Write", "FindAndReplace", "InsertAtEnd", "Bash", "List"]
     replay = await gateway.infer(request(model=model, enable_tools=True))
     assert (
         replay.tool_calls == result.tool_calls
@@ -849,8 +842,8 @@ async def test_local_only_call_can_have_null_text_and_explicit_zero_search_usage
                     "id": "call-only-local",
                     "type": "function",
                     "function": {
-                        "name": "call_local_tool",
-                        "arguments": '{"tool_name":"List","arguments":{}}',
+                        "name": "List",
+                        "arguments": '{}',
                     },
                 }
             ],
@@ -868,7 +861,7 @@ async def test_standard_tools_enabled_chat_can_return_final_web_answer(setup):
     gateway, db, observed = setup()
     result = await gateway.infer(request(enable_tools=True))
     assert result.completion_status == "complete" and result.web_search_requests == 1
-    assert len(observed[0]["tools"]) == 2
+    assert len(observed[0]["tools"]) == 8
     assert len(db.data["usage"]) == 1
 
 
@@ -956,7 +949,7 @@ async def test_compatible_owned_attachments_local_tools_and_web_compose(setup, m
         if kind == "pdf"
         else {"id": "file-parser", "enabled": False}
     )
-    assert len(observed[0]["tools"]) == 2 and len(db.data["usage"]) == 1
+    assert len(observed[0]["tools"]) == 8 and len(db.data["usage"]) == 1
 
 
 @pytest.mark.asyncio

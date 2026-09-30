@@ -191,10 +191,8 @@ async def integrated(setup, monkeypatch):
             "type": "function",
             "native_inference_request_id": "untrusted-provider-reference",
             "function": {
-                "name": "Read" if flat else "call_local_tool",
-                "arguments": json.dumps(
-                    arguments if flat else {"tool_name": "Read", "arguments": arguments}
-                ),
+                "name": "Read",
+                "arguments": json.dumps(arguments),
             },
         }]
         billing = web.MemoryDB()
@@ -281,7 +279,7 @@ def assert_once_billed(state):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("endpoint", ["ask", "stream"])
-@pytest.mark.parametrize("flat", [False, True], ids=["generic-tools", "gemini-named-tools"])
+@pytest.mark.parametrize("flat", [False, True], ids=["named-tools", "gemini-named-tools"])
 @pytest.mark.parametrize("file_ids", [[], [uploads.TEXT_ID], [uploads.IMAGE_ID], [uploads.TEXT_ID, uploads.IMAGE_ID]], ids=["text-only", "owned-text", "owned-image", "owned-both"])
 async def test_authenticated_web_tools_and_owned_bytes_reach_real_gateway(
     integrated, endpoint, flat, file_ids,
@@ -302,7 +300,7 @@ async def test_authenticated_web_tools_and_owned_bytes_reach_real_gateway(
     assert payload["tools"][0]["parameters"]["engine"] == "exa"
     assert payload["tools"][0]["parameters"]["max_uses"] == 1
     functions = [tool["function"]["name"] for tool in payload["tools"][1:]]
-    assert "Read" in functions if flat else functions == ["call_local_tool"]
+    assert functions == ["Read", "Search", "Write", "FindAndReplace", "InsertAtEnd", "Bash", "List"]
     assert payload["provider"]["only"] == ["fixture/endpoint"]
     assert payload["provider"]["allow_fallbacks"] is False
     assert payload["messages"] == req.messages

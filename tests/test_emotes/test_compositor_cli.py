@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import base64
 import io
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -82,6 +84,24 @@ async def test_no_equipment_or_disabled_mode_keeps_existing_prompt(tmp_path, mod
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("supplied_selection", [False, True])
+async def test_auto_uncertified_surface_does_not_inspect_equipment_or_start_owner(monkeypatch, supplied_selection):
+    from openvegas.emotes import compositor
+    from openvegas.emotes import selection as selection_module
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("auto must not inspect equipment, contact the server, or start an owner")
+
+    monkeypatch.setattr(selection_module, "SelectionStore", forbidden)
+    monkeypatch.setattr(compositor, "OwnedChatCompositor", forbidden)
+    selection = SimpleNamespace(snapshot=forbidden) if supplied_selection else None
+    assert await create_owned_chat(
+        None, Console(file=io.StringIO()), session_id="uncertified", mode="auto",
+        selection=selection, library_factory=forbidden, lease_factory=forbidden,
+    ) is None
+
+
+@pytest.mark.asyncio
 async def test_explicit_empty_owner_does_not_grant_public_or_private_pack(tmp_path):
     with create_pipe_input() as pipe:
         owner = await create_owned_chat(
@@ -106,7 +126,7 @@ async def test_equipped_chat_requires_online_library_and_revokes_cached_frames(t
     with create_pipe_input() as pipe:
         owner = await create_owned_chat(
             PromptSession(input=pipe, output=DummyOutput()), Console(file=io.StringIO()),
-            session_id="session", selection=selection, library_factory=lambda _: library,
+            session_id="session", mode="on", selection=selection, library_factory=lambda _: library,
             lease_factory=NoWorkerLease,
         )
         try:
@@ -141,11 +161,43 @@ async def test_forged_selection_never_grants_bundled_preview(tmp_path, pack_dir)
     with create_pipe_input() as pipe:
         assert await create_owned_chat(
             PromptSession(input=pipe, output=DummyOutput()), console,
-            session_id="session", selection=selection, library_factory=lambda _: library,
+            session_id="session", mode="on", selection=selection, library_factory=lambda _: library,
             lease_factory=NoWorkerLease,
         ) is None
     assert api.calls == ["owned", "owned"]
     assert "chat remains usable" in console.file.getvalue()
+
+
+@pytest.mark.parametrize("active", [False, True])
+def test_emote_guidance_matches_actual_session_transport(active):
+    # Execute the actual text-only CLI branch without starting a chat or login.
+    source = Path(__file__).resolve().parents[2] / "openvegas" / "cli.py"
+    tree = ast.parse(source.read_text())
+    branches = [node for node in ast.walk(tree) if isinstance(node, ast.If)
+                and ast.unparse(node.test) == "cmd == '/emote'"]
+    assert len(branches) == 1
+    loop = ast.For(target=ast.Name(id="_", ctx=ast.Store()),
+                   iter=ast.List(elts=[ast.Constant(0)], ctx=ast.Load()),
+                   body=branches[0].body, orelse=[])
+    code = compile(ast.fix_missing_locations(ast.Module(body=[loop], type_ignores=[])), str(source), "exec")
+    output = io.StringIO()
+    session_id = str(uuid4())
+    exec(code, {"console": Console(file=output, width=240),  # noqa: S102 - trusted local CLI branch, no external input
+                "owned_compositor": object() if active else None,
+                "runtime_session_id": session_id})
+    text = output.getvalue()
+    assert "not certification" in text and "Native UX certification remains pending" in text
+    assert "Owned packs require server verification" in text
+    assert "watch may show a labeled public preview" in text
+    assert "previewing does not grant ownership" in text
+    if active:
+        assert "not native-certified" in text
+        assert "new session's command" in text
+        assert "emote watch" not in text
+    else:
+        assert f"openvegas emote watch --source openvegas --session {session_id}" in text
+        assert "No pane or watcher was launched" in text
+        assert "auto mode has no certified native surfaces" in text
 
 
 @pytest.mark.parametrize("ending", ["success", "failure", "cancel", "ui"])
@@ -209,6 +261,10 @@ def test_real_chat_voice_modal_draft_and_turn_cleanup(monkeypatch, tmp_path, end
             if len(captured) > 1:
                 owner.request_command("/exit")
                 return
+            owner.request_command("/emote")
+            await until(lambda: "not native-certified" in owner.history_buffer.text)
+            await ready()
+            assert "emote watch" not in owner.history_buffer.text
             owner.request_command("/voice")
             await until(owner.voice_active)
             await ready()
@@ -286,4 +342,112 @@ def test_real_chat_voice_modal_draft_and_turn_cleanup(monkeypatch, tmp_path, end
     assert all(owner._closed and owner._tick_task.done() for owner in captured)
     assert len(captured) == (2 if ending == "ui" else 1)
     assert console.file.getvalue().count("Offline answer fixture.") == (0 if ending in {"failure", "cancel"} else 1)
+    client.aclose.assert_awaited_once()
+
+
+@pytest.mark.parametrize("mode", ["auto", "off"])
+def test_real_legacy_chat_watch_identity_and_readiness(monkeypatch, tmp_path, mode):
+    import re
+
+    import httpx
+
+    from openvegas import cli as cli_module
+    from openvegas import client as client_module
+    from openvegas.emotes import compositor, spool
+    from openvegas.emotes.commands import _watch_boundary
+    from openvegas.emotes.events import Phase
+
+    console = Console(file=io.StringIO(), force_terminal=True, width=320, highlight=False)
+    client = SimpleNamespace(
+        _canonical_chat={"revision": "before"}, auth_preflight=AsyncMock(), aclose=AsyncMock(),
+        agent_run_create=AsyncMock(return_value={}), get_balance=AsyncMock(return_value={"balance": "99999"}),
+    )
+    requested, published, owners = [], [], []
+    queue = spool.EventSpool(tmp_path / "events")
+    original_publish = spool.publish_event
+    identity = None
+    watermark = None
+    prompt_count = 0
+
+    def publish(event):
+        published.append(event)
+        return original_publish(event, directory=queue.directory)
+
+    async def request(method, path, **kwargs):
+        requested.append(kwargs["json"]["prompt"])
+        return {"text": "Offline answer fixture.", "revision": "after"}
+
+    client._request = request
+
+    async def factory(session, output, **kwargs):
+        assert kwargs["mode"] == mode
+        result = await create_owned_chat(session, output, **kwargs)
+        owners.append(result)
+        assert result is None
+        return result
+
+    async def prompt(session, *args, **kwargs):
+        nonlocal prompt_count, identity, watermark
+        prompt_count += 1
+        if prompt_count == 1:
+            return "before watcher readiness"
+        if prompt_count == 2:
+            return "/emote"
+        if prompt_count == 3:
+            match = re.search(r"openvegas emote watch --source (\S+) --session\s+([A-Za-z0-9-]+)",
+                              console.file.getvalue())
+            assert match is not None, repr(console.file.getvalue())
+            identity = match.groups()
+            assert identity[0] == "openvegas"
+            assert published and all((event.source, event.session_id) == identity for event in published)
+            assert [event.phase for event in published] == [Phase.START, Phase.COMPLETE]
+            # Exercise the watcher's actual startup discard against real local
+            # metadata files; no renderer, terminal process, or provider runs.
+            watermark = _watch_boundary(queue, *identity)
+            assert watermark == published[-1].generation
+            assert queue.drain(source=identity[0], session_id=identity[1]) == []
+            return "after watcher readiness"
+        assert prompt_count == 4
+        future = queue.drain(source=identity[0], session_id=identity[1])
+        eligible = [event for event in future if event.generation > watermark]
+        assert [event.phase for event in eligible] == [Phase.START, Phase.COMPLETE]
+        assert len({event.turn_id for event in eligible}) == 1
+        assert eligible[0].turn_id != published[0].turn_id
+        assert all((event.source, event.session_id) == identity for event in eligible)
+        return "/exit"
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Offline legacy chat regression must not access provider/network or native voice")
+
+    for key in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY",
+                "OPENROUTER_API_KEY", "MISTRAL_API_KEY"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(httpx.AsyncClient, "send", forbidden)
+    monkeypatch.setattr(httpx.Client, "send", forbidden)
+    monkeypatch.setattr(cli_module, "_load_openvegas_env_defaults_from_dotenv", lambda: None)
+    monkeypatch.setattr(cli_module, "load_config", dict)
+    monkeypatch.setattr(cli_module, "console", console)
+    monkeypatch.setattr(cli_module, "VoiceButton", lambda _: SimpleNamespace(
+        is_recording=False, state=SimpleNamespace(value="idle"), last_error=None,
+        label=lambda **kwargs: "mic", stop_if_recording=lambda: None, toggle=forbidden))
+    monkeypatch.setattr(cli_module, "resolve_capability", lambda *args: True)
+    monkeypatch.setattr(cli_module, "_clipboard_has_image", lambda: False)
+    monkeypatch.setattr(cli_module, "_read_clipboard_text", lambda: "")
+    monkeypatch.setattr(cli_module, "emit_metric", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli_module.sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(cli_module.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(client_module, "OpenVegasClient", lambda: client)
+    monkeypatch.setattr(compositor, "create_owned_chat", factory)
+    monkeypatch.setattr(spool, "publish_event", publish)
+    monkeypatch.setattr(PromptSession, "prompt_async", prompt)
+    monkeypatch.setenv("OPENVEGAS_CHAT_COMPOSITOR", mode)
+    monkeypatch.setenv("OPENVEGAS_CHAT_FULLSCREEN", "0")
+    with create_pipe_input() as pipe:
+        monkeypatch.setattr(cli_module, "PromptSession", lambda **kwargs: PromptSession(
+            input=pipe, output=DummyOutput(), **kwargs))
+        cli_module.chat.callback(provider="openai", model="offline-fixture", dealer_sprite=False)
+    assert owners == [None]
+    assert requested == ["before watcher readiness", "after watcher readiness"]
+    assert published[-1].phase == Phase.EXIT
+    assert all((event.source, event.session_id) == identity for event in published)
     client.aclose.assert_awaited_once()

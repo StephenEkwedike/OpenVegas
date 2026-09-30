@@ -720,20 +720,22 @@ async def accepted_native_receipts_tx(
     return receipts
 
 
-def _original_call_projection(raw: dict, model: str) -> dict:
+def _original_call_projection(raw: dict, model: str, *, request_payload: dict) -> dict:
     """Match the private original function arguments, not a client reconstruction."""
-    from openvegas.gateway.openrouter import _flat_tool
+    from openvegas.contracts.native_tool_schema import GENERIC_V1, validate_operation
+    from openvegas.gateway.openrouter import _flat_tool, retained_tool_schema_version
 
+    version = retained_tool_schema_version(request_payload, model=model)
     if raw.get("type") != "function":
         fail("Original native tool envelope is not a function call.")
     function = object_value(raw.get("function"))
     arguments = function.get("arguments")
-    if not isinstance(arguments, str):
+    if not isinstance(arguments, str) or len(arguments.encode("utf-8")) > 32_000:
         fail("Original native function arguments are missing.")
     parsed = object_value(arguments)
-    if model.startswith("google/"):
+    if version != GENERIC_V1:
         try:
-            projected = _flat_tool(dict(function, arguments=canonical_json(parsed)), model)
+            projected = _flat_tool(function, model, schema_version=version)
         except (ValueError, TypeError, KeyError):
             fail("Original native function arguments violate their advertised schema.")
     else:
@@ -745,16 +747,20 @@ def _original_call_projection(raw: dict, model: str) -> dict:
             "shell_mode": parsed.get("shell_mode", "read_only"),
             "timeout_sec": parsed.get("timeout_sec", 30),
         }
+        try:
+            validate_operation(projected, legacy_read_alias=True)
+        except (ValueError, TypeError):
+            fail("Original native function arguments violate their advertised schema.")
     return dict(projected, provider_call_id=require_call_id(raw.get("id")))
 
 
 async def load_native_tool_results_tx(
-    tx: Any, *, run: Any, source: Any, request_id: str, assistant_message: dict,
+    tx: Any, *, run: Any, source: Any, request_id: str, assistant_message: dict, request_payload: dict,
 ) -> list[dict]:
     """Materialize every original call exactly once in its original order.
 
-    Caller holds run -> route -> gateway locks and loads assistant_message from
-    the private server envelope. This is not a client-supplied history endpoint.
+    Caller holds run -> route -> gateway locks and loads assistant_message and
+    request_payload from the validated private server envelope, never HTTP input.
     Missing bindings, unfinished work and secret/redacted output abort the whole
     continuation. No paid call, tool execution or state transition occurs here.
     """
@@ -779,7 +785,8 @@ async def load_native_tool_results_tx(
             or not isinstance(settled_calls, list) or len(settled_calls) != len(calls)
             or require_call_id(body.get("provider_request_id")) != str(source["provider_request_id"])):
         fail("Original assistant envelope and settled native calls disagree.")
-    expected = [_original_call_projection(object_value(call), model) for call in calls]
+    expected = [_original_call_projection(object_value(call), model, request_payload=request_payload)
+                for call in calls]
     if len({call["provider_call_id"] for call in expected}) != len(expected):
         fail("Original assistant envelope contains duplicate call IDs.")
     if canonical_json(expected) != canonical_json(settled_calls):

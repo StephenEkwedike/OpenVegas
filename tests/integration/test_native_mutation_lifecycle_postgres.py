@@ -56,7 +56,8 @@ async def emit(c, calls=None):
     message = {"role": "assistant", "content": None,
                "reasoning_details": [{"type": "reasoning.encrypted", "data": PRIVATE}],
                "tool_calls": [{"id": f"original-{i}", "type": "function", "function": {
-                   "name": "call_local_tool", "arguments": json.dumps(item)}} for i, item in enumerate(calls)]}
+                   "name": item["tool_name"], "arguments": json.dumps({**item["arguments"],
+                       "timeout_sec": item["timeout_sec"]})}} for i, item in enumerate(calls)]}
     c.provider_body = {"id": "gen-native-local", "model": c.command["model"],
         "choices": [{"message": message, "finish_reason": "tool_calls"}],
         "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15, "cost": 0.00002}}

@@ -15,6 +15,7 @@ from uuid import uuid4
 
 import pytest
 from click.testing import CliRunner
+
 from openvegas.emotes import hooks as h
 from openvegas.emotes.controller import EmoteController, State
 from openvegas.emotes.events import Phase
@@ -287,14 +288,76 @@ def test_old_turn_events_and_duplicate_starts_cannot_affect_new_turn(settings, t
     assert rows[2].generation > rows[0].generation
 
 
-def test_early_terminal_tombstones_delayed_start(settings, tmp_path):
+@pytest.mark.parametrize("terminal", [
+    "Stop", "StopFailure", "PermissionRequest", "PostToolUseFailure", "SessionEnd",
+])
+def test_early_terminal_tombstones_delayed_start(settings, tmp_path, terminal):
     root, receipt = install(settings)
     spool = EventSpool(tmp_path / "events")
     prompt = str(uuid4())
-    for name in ("Stop", "UserPromptSubmit", "PreToolUse"):
+    for name in (terminal, "UserPromptSubmit", "PreToolUse"):
         assert not h.handle_input(payload(name, prompt, tool_use_id="tool"),
                                   installation=root, owner=receipt["id"], spool=spool)
     assert events(spool, receipt) == []
+
+
+def test_unseen_session_end_tombstones_only_its_prompt(settings, tmp_path):
+    root, receipt = install(settings)
+    spool = EventSpool(tmp_path / "events")
+    active, ended = str(uuid4()), str(uuid4())
+
+    def send(name, prompt, **extra):
+        return h.handle_input(payload(name, prompt, **extra), installation=root,
+                              owner=receipt["id"], spool=spool)
+
+    assert send("UserPromptSubmit", active)
+    assert not send("SessionEnd", ended)
+    state_path = next(root.glob("claude-*.json"))
+    before = state_path.read_bytes()
+    assert not send("SessionEnd", ended)
+    assert state_path.read_bytes() == before
+    assert not send("UserPromptSubmit", ended)
+    assert not send("PreToolUse", ended, tool_use_id="late-tool")
+    assert send("PreToolUse", active, tool_use_id="current-tool")
+    assert send("SessionEnd", active)
+    assert [(event.turn_id, event.phase) for event in events(spool, receipt)] == [
+        (active, Phase.START), (active, Phase.BUSY), (active, Phase.EXIT),
+    ]
+
+
+def test_early_session_end_respects_tombstone_capacity(settings, tmp_path, monkeypatch):
+    root, receipt = install(settings)
+    spool = EventSpool(tmp_path / "events")
+    monkeypatch.setattr(h, "MAX_TURNS", 1)
+    ended, overflow = str(uuid4()), str(uuid4())
+    assert not h.handle_input(payload("SessionEnd", ended), installation=root,
+                              owner=receipt["id"], spool=spool)
+    state_path = next(root.glob("claude-*.json"))
+    before = state_path.read_bytes()
+    for name, prompt in [("SessionEnd", overflow), ("UserPromptSubmit", ended),
+                         ("UserPromptSubmit", overflow)]:
+        assert not h.handle_input(payload(name, prompt), installation=root,
+                                  owner=receipt["id"], spool=spool)
+        assert state_path.read_bytes() == before
+    assert events(spool, receipt) == []
+
+
+def test_session_end_without_prompt_still_closes_active_turn(settings, tmp_path):
+    root, receipt = install(settings)
+    spool = EventSpool(tmp_path / "events")
+    prompt = str(uuid4())
+    assert not h.handle_input(payload("SessionEnd", None), installation=root,
+                              owner=receipt["id"], spool=spool)
+    assert not list(root.glob("claude-*.json"))
+    assert h.handle_input(payload("UserPromptSubmit", prompt), installation=root,
+                          owner=receipt["id"], spool=spool)
+    assert h.handle_input(payload("SessionEnd", None), installation=root,
+                          owner=receipt["id"], spool=spool)
+    assert not h.handle_input(payload("UserPromptSubmit", prompt), installation=root,
+                              owner=receipt["id"], spool=spool)
+    assert [(event.turn_id, event.phase) for event in events(spool, receipt)] == [
+        (prompt, Phase.START), (prompt, Phase.EXIT),
+    ]
 
 
 @pytest.mark.parametrize("data", [b"not json", b"[]", pytest.param(b"[" * 10000, id="deeply-nested"), b'{"x":NaN}',

@@ -55,6 +55,23 @@ from openvegas.telemetry import emit_metric
 logger = logging.getLogger(__name__)
 
 
+def _require_matching_read_paths(arguments: dict[str, Any]) -> None:
+    paths = [arguments[key] for key in ("path", "filepath", "file_path", "target_path")
+             if key in arguments]
+    if "file" in arguments:
+        file = arguments["file"]
+        if isinstance(file, dict):
+            if "path" in file:
+                paths.append(file["path"])
+        else:
+            paths.append(file)
+    if paths and any(value != paths[0] for value in paths[1:]):
+        raise ContractError(
+            APIErrorCode.INVALID_TRANSITION,
+            "Conflicting file path aliases; supply one unambiguous path.",
+        )
+
+
 def _rows_affected(exec_status: str) -> int:
     try:
         return int(str(exec_status).rsplit(" ", 1)[-1])
@@ -1561,6 +1578,7 @@ class AgentOrchestrationService:
                     args[dest] = default
 
         if tool_name in {ToolName.FS_READ.value, ToolName.EDITOR_OPEN.value}:
+            _require_matching_read_paths(args)
             _alias("path", ("file_path", "filepath", "file", "target_path"))
             if "line" not in args and "line_number" in args:
                 args["line"] = args.get("line_number")
@@ -1637,6 +1655,7 @@ class AgentOrchestrationService:
                 raise ContractError(APIErrorCode.INVALID_TRANSITION, f"{tool_name} requires string field: {name}")
 
         if tool_name in {ToolName.FS_READ.value, ToolName.EDITOR_OPEN.value}:
+            _require_matching_read_paths(arguments)
             _require_string("path")
             return
         if tool_name == ToolName.FS_LIST.value:

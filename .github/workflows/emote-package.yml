@@ -46,6 +46,7 @@ jobs:
           tests/test_emotes/test_windows_resources.py
           tests/test_emotes/test_windows_state.py
           tests/test_emotes/test_spool_platform.py
+          tests/test_emotes/test_replay_guard_lifetime.py
           --junitxml=emote-resource-tests.xml
       - name: Rebuild authored sports assets identically on every OS
         if: always()

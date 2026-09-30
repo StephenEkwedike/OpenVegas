@@ -67,7 +67,9 @@ def _previews(ctx, services):
 def _setup_help():
     click.echo("Setup guide: nothing installed, equipped, or launched.")
     click.echo("Keep animations in a separate companion pane to preserve your coding terminal.")
-    click.echo("OpenVegas chat: /emote shows the exact companion command for that session.")
+    click.echo("OpenVegas chat: /emote shows status and manual companion setup when available.")
+    click.echo("Auto mode keeps same-window emotes off: no native surfaces are certified.")
+    click.echo("Same-window mode on is an experimental developer/native-review opt-in, not certification.")
     click.echo("Check local support: openvegas emote doctor")
     click.echo("Claude activity-only pilot, dry-run first:")
     click.echo("  openvegas emote hooks setup claude --settings /path/to/.claude/settings.local.json")
@@ -126,8 +128,8 @@ def choose(ctx, services):
             asyncio.run(library.equip(pack_id, slot=slot))
             click.echo(f"Equipped {pack_id} in {slot}. Ownership remains server-controlled.")
             click.echo(
-                "No renderer started. In OpenVegas chat, /emote shows the command "
-                "to run in a separate companion terminal."
+                "No renderer started. In OpenVegas chat, /emote shows status "
+                "and manual companion setup when available."
             )
     finally:
         if library is not None:

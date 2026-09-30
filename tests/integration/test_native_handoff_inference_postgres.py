@@ -11,6 +11,7 @@ import pytest
 
 from openvegas.contracts.native_scope import NativeContinuationRef, NativeInferenceScope
 from server.services.native_handoff_service import HandoffSelection
+from tests.integration.native_supplier_schema import tool_function
 from tests.integration.test_native_continuation_postgres import complete_tools, payload
 from tests.integration.test_native_handoff_service_postgres import confirm, prepare
 from tests.integration.test_native_handoff_service_postgres import (
@@ -60,9 +61,9 @@ async def supplier(c, d):
                    "reasoning_details": [{"type": "reasoning.encrypted", "data": "private-destination-signature",
                                           "format": "google-gemini-v1", "index": 0}]}
         if d.tools:
-            message["tool_calls"] = [{"id": "destination-call", "type": "function", "function": {
-                "name": "call_local_tool", "arguments": json.dumps({"tool_name": "Read",
-                    "arguments": {"path": "notes.txt"}, "shell_mode": "read_only", "timeout_sec": 30})}}]
+            message["tool_calls"] = [{"id": "destination-call", "type": "function", "function":
+                tool_function(data, {"tool_name": "Read", "arguments": {"path": "notes.txt"},
+                                     "shell_mode": "read_only", "timeout_sec": 30})}]
         return httpx.Response(200, json={"id": "gen-destination-http", "model": d.command["model"],
             "choices": [{"message": message, "finish_reason": "tool_calls" if d.tools else "stop"}],
             "usage": {"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110, "cost": 0.0001}})

@@ -109,7 +109,7 @@ def _schema(value, schema, depth=0):
     """Validate the original stored bounded object/primitive tool schema, not today's schema."""
     if depth > 6 or type(schema) is not dict:
         _fail("integrity")
-    allowed = {"type", "properties", "required", "additionalProperties", "description", "enum", "minimum", "maximum"}
+    allowed = {"type", "properties", "required", "additionalProperties", "description", "enum", "minimum", "maximum", "minLength"}
     if set(schema) - allowed:
         _fail("integrity")
     kind = schema.get("type")
@@ -117,6 +117,8 @@ def _schema(value, schema, depth=0):
     if kind not in types or type(value) is not types[kind]:
         _fail("integrity")
     if "enum" in schema and value not in schema["enum"]:
+        _fail("integrity")
+    if kind == "string" and len(value) < schema.get("minLength", 0):
         _fail("integrity")
     if kind == "integer" and (value < schema.get("minimum", value) or value > schema.get("maximum", value)):
         _fail("integrity")
@@ -157,7 +159,8 @@ async def _call_tx(tx, *, run, request_id, call_id, require_latest=True,
     raw_calls = envelope.assistant_message().get("tool_calls")
     if type(raw_calls) is not list or not 1 <= len(raw_calls) <= 16:
         _fail("integrity")
-    projected = [_original_call_projection(call, model) for call in raw_calls]
+    request_payload = envelope.request_payload()
+    projected = [_original_call_projection(call, model, request_payload=request_payload) for call in raw_calls]
     ids = [item["provider_call_id"] for item in projected]
     if len(set(ids)) != len(ids) or call_id not in ids:
         _fail("ownership")
@@ -169,7 +172,7 @@ async def _call_tx(tx, *, run, request_id, call_id, require_latest=True,
     if call["tool_name"] not in {"Write", "FindAndReplace", "InsertAtEnd"}:
         _fail()
     function = raw_calls[ordinal]["function"]
-    definitions = envelope.request_payload().get("tools")
+    definitions = request_payload.get("tools")
     if type(definitions) is not list:
         _fail("integrity")
     matching = [d["function"] for d in definitions if type(d) is dict and d.get("type") == "function"

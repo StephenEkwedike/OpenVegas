@@ -168,7 +168,7 @@ Prepare AND dispatch must separately resolve ownership, expiry and media support
                     _fail()
                 results = await load_native_tool_results_tx(
                     tx, run=run, source=source, request_id=request_id,
-                    assistant_message=envelope.assistant_message(),
+                    assistant_message=envelope.assistant_message(), request_payload=envelope.request_payload(),
                 )
                 if len(results) != len(calls):
                     _fail()

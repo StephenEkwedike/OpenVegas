@@ -104,6 +104,12 @@ def response():
 
 
 def tool_response(arguments=None):
+    call = arguments if arguments is not None else {
+        "tool_name": "Read", "arguments": {"path": "README.md"},
+    }
+    fields = copy.deepcopy(call.get("arguments"))
+    if isinstance(fields, dict):
+        fields.update({key: call[key] for key in ("shell_mode", "timeout_sec") if key in call})
     body = response()
     body["choices"][0] = {
         "finish_reason": "tool_calls",
@@ -115,16 +121,8 @@ def tool_response(arguments=None):
                     "id": "call-fixture",
                     "type": "function",
                     "function": {
-                        "name": "call_local_tool",
-                        "arguments": json.dumps(
-                            arguments
-                            or {
-                                "tool_name": "Read",
-                                "arguments": {"path": "README.md"},
-                                "shell_mode": "read_only",
-                                "timeout_sec": 30,
-                            }
-                        ),
+                        "name": call.get("tool_name"),
+                        "arguments": json.dumps(fields),
                     },
                 }
             ],
@@ -229,7 +227,10 @@ async def test_bad_payload_is_refused_before_transport(changes):
 def test_tool_definition_and_schema_are_in_reservation_bound():
     req = request(enable_tools=True)
     payload = openrouter.build_payload(req, catalog_row(), capabilities())
-    assert payload["tools"] == [openrouter.local_tool_definition()]
+    assert payload["tools"] == openrouter.local_tool_definitions(req.model)
+    assert {tool["function"]["name"] for tool in payload["tools"]} == {
+        "Read", "Search", "Write", "FindAndReplace", "InsertAtEnd", "Bash", "List",
+    }
     assert payload["tool_choice"] == "auto"
     assert openrouter.input_token_bound(req) > openrouter.input_token_bound(request())
     with pytest.raises(ContractError):
@@ -243,35 +244,16 @@ def test_tool_definition_and_schema_are_in_reservation_bound():
 
 
 def test_google_compatible_tool_schema_has_closed_typed_objects():
-    parameters = openrouter.build_payload(
+    definitions = openrouter.build_payload(
         request(enable_tools=True), catalog_row(), capabilities()
-    )["tools"][0]["function"]["parameters"]
-    assert parameters["required"] == ["tool_name", "arguments"]
+    )["tools"]
+    parameters = definitions[0]["function"]["parameters"]
+    assert definitions[0]["function"]["name"] == "Read"
+    assert parameters["required"] == ["path"]
     assert set(parameters["properties"]) == {
-        "tool_name", "arguments", "shell_mode", "timeout_sec"
+        "path", "max_bytes", "result_content_max_chars", "timeout_sec",
     }
-    assert parameters["properties"]["tool_name"]["enum"] == [
-        "Read", "Search", "Write", "FindAndReplace", "InsertAtEnd", "Bash", "List"
-    ]
-    arguments = parameters["properties"]["arguments"]
-    assert {name: schema["type"] for name, schema in arguments["properties"].items()} == {
-        "filepath": "string",
-        "path": "string",
-        "pattern": "string",
-        "content": "string",
-        "old_string": "string",
-        "new_string": "string",
-        "replace_all": "boolean",
-        "write_mode": "string",
-        "command": "string",
-        "recursive": "boolean",
-        "max_entries": "integer",
-        "max_bytes": "integer",
-        "result_content_max_chars": "integer",
-        "max_files": "integer",
-        "max_matches": "integer",
-        "foreground_job_id": "string",
-    }
+    assert parameters["properties"]["max_bytes"] == {"type": "integer", "minimum": 1}
 
     def check(schema):
         assert schema["type"] in {"object", "array", "string", "boolean", "integer"}
@@ -284,22 +266,22 @@ def test_google_compatible_tool_schema_has_closed_typed_objects():
             assert isinstance(schema["items"], dict) and schema["items"]
             check(schema["items"])
 
-    check(parameters)
+    for definition in definitions:
+        check(definition["function"]["parameters"])
 
 
 @pytest.mark.parametrize(
     "tool_name,arguments",
     [
-        ("Read", {"filepath": "README.md", "max_bytes": 4096, "result_content_max_chars": 1024}),
+        ("Read", {"path": "README.md", "max_bytes": 4096, "result_content_max_chars": 1024}),
         ("Read", {"path": "README.md"}),
-        ("Search", {"pattern": "TODO", "path": ".", "recursive": True,
+        ("Search", {"pattern": "TODO", "path": ".",
                     "max_files": 25, "max_matches": 10}),
         ("Write", {"filepath": "fixture.txt", "content": "line\n", "write_mode": "replace"}),
         ("FindAndReplace", {"filepath": "fixture.txt", "old_string": "line\n",
                             "new_string": "", "replace_all": False}),
         ("InsertAtEnd", {"filepath": "fixture.txt", "content": "next\n"}),
         ("Bash", {"command": "printf fixture"}),
-        ("Bash", {"command": "printf fixture", "foreground_job_id": "job-fixture"}),
         ("List", {"path": ".", "recursive": False, "max_entries": 20}),
         ("List", {}),
     ],
@@ -311,9 +293,26 @@ def test_supported_primitive_arguments_are_preserved_exactly(tool_name, argument
         body, request(enable_tools=True), catalog_row(), AIGateway._parse_local_tool_call
     )
     assert result["tool_calls"] == [{
-        "tool_name": tool_name, "arguments": arguments, "shell_mode": "read_only",
+        "tool_name": tool_name, "arguments": arguments,
+        "shell_mode": "mutating" if tool_name in {"Write", "FindAndReplace", "InsertAtEnd"} else "read_only",
         "timeout_sec": 30, "provider_call_id": "call-fixture",
     }]
+    assert body == original
+
+
+@pytest.mark.parametrize("name,arguments", [
+    ("Read", {"filepath": "README.md"}),
+    ("Read", {"path": "README.md", "filepath": "other.txt"}),
+    ("Search", {"pattern": "TODO", "recursive": True}),
+    ("Bash", {"command": "printf fixture", "foreground_job_id": "job-fixture"}),
+])
+def test_fresh_flat_contract_rejects_fields_only_in_legacy_union(name, arguments):
+    body = tool_response({"tool_name": name, "arguments": arguments})
+    original = copy.deepcopy(body)
+    with pytest.raises(ValueError):
+        openrouter.parse_response(
+            body, request(enable_tools=True), catalog_row(), AIGateway._parse_local_tool_call
+        )
     assert body == original
 
 

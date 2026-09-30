@@ -106,7 +106,7 @@ async def reserve_history_tx(
     check_options(command, inputs)
     results = await load_native_tool_results_tx(
         tx, run=run, source=source, request_id=ref.previous_inference_request_id,
-        assistant_message=assistant,
+        assistant_message=assistant, request_payload=envelope.request_payload(),
     )
     payload = envelope.request_payload()
     messages = payload.get("messages")

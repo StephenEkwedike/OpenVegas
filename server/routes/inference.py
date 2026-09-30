@@ -778,6 +778,7 @@ async def _prepare_authorized_ask_context(
             response_warnings.append("capability_unavailable:image_input")
         return {
             "text": "Image input is unavailable for this model/provider. Remove image attachments or switch model.",
+            "completion_status": "incomplete",
             "v_cost": "0",
             "input_tokens": 0,
             "output_tokens": 0,
@@ -904,6 +905,11 @@ def _native_tool_references(result: Any, *, provider: str) -> list[dict]:
     return calls
 
 
+def _public_completion_status(value: Any) -> str:
+    """Fresh responses must not turn unknown status into legacy success."""
+    return value if type(value) is str and value in {"complete", "incomplete"} else "incomplete"
+
+
 async def _finalize_ask_result(
     prepared: _PreparedAskContext,
     *,
@@ -950,6 +956,7 @@ async def _finalize_ask_result(
     )
     payload = {
         "text": result.text,
+        "completion_status": _public_completion_status(getattr(result, "completion_status", None)),
         "v_cost": str(result.v_cost),
         "input_tokens": result.input_tokens,
         "output_tokens": result.output_tokens,
@@ -1263,7 +1270,9 @@ async def ask_stream(
                 **({"native_generation": result_payload["native_generation"],
                     "completion_status": result_payload["completion_status"],
                     "provider_request_id": result_payload.get("provider_request_id")}
-                   if "native_generation" in result_payload else {}),
+                   if "native_generation" in result_payload else
+                   {"completion_status": _public_completion_status(result_payload["completion_status"])}
+                   if "completion_status" in result_payload else {}),
             },
         )
 

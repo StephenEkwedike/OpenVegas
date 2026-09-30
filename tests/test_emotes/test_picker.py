@@ -93,6 +93,7 @@ def test_tty_equips_owned_choice_into_its_slot(
     assert library.closed == 1
     assert services.selection.read_slots()[slot] == expected
     assert "No renderer started" in result.output
+    assert "manual companion setup when available" in result.output
 
 
 @pytest.mark.parametrize("text", ["q\n", "Q\n", "\n", "invalid\nq\n", "0\nq\n"])
@@ -170,6 +171,9 @@ def test_setup_guide_is_informational_and_never_installs_or_launches(
     assert result.exit_code == 0, result.output
     assert "s. Setup guide (read-only)" in result.output
     assert "nothing installed, equipped, or launched" in result.output
+    assert "manual companion setup when available" in result.output
+    assert "no native surfaces are certified" in result.output
+    assert "experimental developer/native-review opt-in, not certification" in result.output
     assert "session discovery only (no task animation)" in result.output
     assert "Codex native hook installation is unsupported" in result.output
     assert "not each answer" in result.output

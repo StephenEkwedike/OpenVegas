@@ -27,6 +27,7 @@ from server.routes import inference as routes
 from server.services.file_uploads import FileUploadService
 from server.services.inference_replay import InferenceReplayService
 from server.services.provider_threads import ProviderThreadService
+from tests.integration.native_supplier_schema import tool_function
 from tests.integration.test_native_history_postgres import (
     new_run,
     projection,
@@ -80,9 +81,9 @@ async def owned(database_factory, monkeypatch):
                 return httpx.Response(200, json=ctx.provider_body)
             message = {"role": "assistant", "content": "Synthetic native answer"}
             if ctx.emit_calls:
-                message["tool_calls"] = [{"id": "call-" + str(i), "type": "function", "function": {
-                    "name": "call_local_tool", "arguments": json.dumps({"tool_name": "Read",
-                    "arguments": {"path": "notes.txt"}, "shell_mode": "read_only", "timeout_sec": 30})}} for i in range(2)]
+                message["tool_calls"] = [{"id": "call-" + str(i), "type": "function", "function":
+                    tool_function(payload, {"tool_name": "Read", "arguments": {"path": "notes.txt"},
+                                            "shell_mode": "read_only", "timeout_sec": 30})} for i in range(2)]
             return httpx.Response(200, json={"id": "gen-native-local", "model": command["model"],
                 "choices": [{"message": message, "finish_reason": "tool_calls" if ctx.emit_calls else "stop"}],
                 "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15, "cost": 0.00002}})

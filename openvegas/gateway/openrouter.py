@@ -20,6 +20,13 @@ from typing import Any
 import httpx
 
 from openvegas.contracts.errors import APIErrorCode, ContractError
+from openvegas.contracts.native_tool_schema import (
+    FLAT_V2,
+    GENERIC_V1,
+    GOOGLE_FLAT_V1,
+    flat_v2_definitions,
+    validate_operation,
+)
 from openvegas.gateway.openrouter_web import (
     PreparedWebSearch,
     WebValidationError,
@@ -172,9 +179,7 @@ def local_tool_definition() -> dict:
     }
 
 
-def local_tool_definitions(model: str) -> list[dict]:
-    if not model.startswith("google/"):
-        return [local_tool_definition()]
+def _google_flat_v1_definitions() -> list[dict]:
     # Gemini emits native functions more reliably with one flat, required schema
     # per operation than with a generic dispatcher and conditional nested fields.
     fields = local_tool_definition()["function"]["parameters"]["properties"]["arguments"]["properties"]
@@ -201,8 +206,77 @@ def local_tool_definitions(model: str) -> list[dict]:
     return definitions
 
 
-def _flat_tool(function: dict, model: str) -> dict:
-    definitions = {d["function"]["name"]: d["function"] for d in local_tool_definitions(model)}
+def local_tool_definitions(model: str) -> list[dict]:
+    """All fresh local-tool requests use the per-operation v2 contract."""
+    return flat_v2_definitions()
+
+
+def _versioned_tool_definitions(model: str, version: str) -> list[dict]:
+    if version == FLAT_V2:
+        return local_tool_definitions(model)
+    if version == GENERIC_V1 and not model.startswith("google/"):
+        return [local_tool_definition()]
+    if version == GOOGLE_FLAT_V1 and model.startswith("google/"):
+        return _google_flat_v1_definitions()
+    raise ContractError(APIErrorCode.INVALID_TRANSITION, "Unrecognized retained native tool schema.")
+
+
+def _schema_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+
+
+def _retained_tool_version(req: Any, payload: dict) -> str:
+    tools = payload.get("tools")
+    has_web = (type(tools) is list and bool(tools) and type(tools[0]) is dict
+               and tools[0].get("type") == "openrouter:web_search")
+    if bool(req.enable_web_search) != has_web:
+        raise ContractError(APIErrorCode.INVALID_TRANSITION, "Unrecognized retained native tool schema.")
+    return retained_tool_schema_version(payload, model=req.model)
+
+
+def retained_tool_schema_version(payload: dict, *, model: str) -> str:
+    """Classify exact local definitions from an already validated private request.
+
+    This recognizes the optional web prefix, not its execution authority. The
+    caller must retain the existing full-envelope ownership and settings checks.
+    """
+    if type(payload) is not dict or payload.get("model") != model or not valid_model(model):
+        raise ContractError(APIErrorCode.INVALID_TRANSITION, "Unrecognized retained native tool schema.")
+    tools = payload.get("tools")
+    if type(tools) is not list:
+        raise ContractError(APIErrorCode.INVALID_TRANSITION, "Unrecognized retained native tool schema.")
+    if tools and type(tools[0]) is dict and tools[0].get("type") == "openrouter:web_search":
+        # The full web prefix is revalidated against the current reviewed payload
+        # below. Only this separately bounded server tool may precede local tools.
+        tools = tools[1:]
+    versions = (FLAT_V2, GOOGLE_FLAT_V1 if model.startswith("google/") else GENERIC_V1)
+    for version in versions:
+        if _schema_json(tools) == _schema_json(_versioned_tool_definitions(model, version)):
+            return version
+    raise ContractError(APIErrorCode.INVALID_TRANSITION, "Unrecognized retained native tool schema.")
+
+
+def _native_payload(req: Any) -> dict | None:
+    from openvegas.agent.native_envelope import continuation_payload
+    from openvegas.agent.native_generation import NativeGenerationClaim
+
+    claim = getattr(req, "_native_generation_claim", None)
+    if claim is not None and type(claim) is not NativeGenerationClaim:
+        raise ContractError(APIErrorCode.INVALID_TRANSITION, "Invalid private native generation claim.")
+    return continuation_payload(req)
+
+
+def _request_tool_version(req: Any) -> str:
+
+    # continuation_payload accepts only the exact private NativeGenerationClaim
+    # type. Neither an HTTP option nor a response function name selects a version.
+    native = _native_payload(req)
+    return _retained_tool_version(req, native) if native is not None else FLAT_V2
+
+
+def _flat_tool(function: dict, model: str, *, schema_version: str = FLAT_V2) -> dict:
+    definitions = {d["function"]["name"]: d["function"]
+                   for d in _versioned_tool_definitions(model, schema_version)}
     definition = definitions.get(function.get("name"))
     if not definition or definition["name"] == "call_local_tool":
         raise ValueError("Unapproved tool")
@@ -225,21 +299,25 @@ def _flat_tool(function: dict, model: str) -> dict:
     name = definition["name"]
     mode = args.pop("shell_mode", "mutating" if name in {"Write", "FindAndReplace", "InsertAtEnd"} else "read_only")
     timeout = args.pop("timeout_sec", 30)
-    return {"tool_name": name, "arguments": args, "shell_mode": mode, "timeout_sec": timeout}
+    result = {"tool_name": name, "arguments": args, "shell_mode": mode, "timeout_sec": timeout}
+    validate_operation(result)
+    return result
 
 
 def input_token_bound(req: Any) -> int:
-    from openvegas.agent.native_envelope import continuation_payload
-
-    native = continuation_payload(req)
+    native = _native_payload(req)
     if native is not None:
         return _native_input_bound(req, native)
+    return _initial_input_token_bound(req, local_tool_definitions(req.model) if req.enable_tools else None)
+
+
+def _initial_input_token_bound(req: Any, tools: list[dict] | None) -> int:
     attachments = getattr(req, "_managed_attachment_context", None)
     if attachments is not None:
-        return _attachment_input_bound(req, local_tool_definitions(req.model) if req.enable_tools else None)
+        return _attachment_input_bound(req, tools)
     bound = len(json.dumps(req.messages, ensure_ascii=False).encode("utf-8")) + 256
     if req.enable_tools:
-        bound += len(json.dumps(local_tool_definitions(req.model)).encode("utf-8")) + 256
+        bound += len(json.dumps(tools).encode("utf-8")) + 256
     return bound
 
 
@@ -345,6 +423,10 @@ def _web_attachment_options(req: Any, model_config: dict, prepared: PreparedWebS
 
 def prepare_web_context(req: Any, model_config: dict, capabilities: dict) -> ManagedWebContext:
     """Route/gateway preflight. Reads server review itself; accepts no caller review."""
+    return _prepare_web_context(req, model_config, capabilities, _request_tool_version(req))
+
+
+def _prepare_web_context(req: Any, model_config: dict, capabilities: dict, tool_version: str) -> ManagedWebContext:
     from openvegas.gateway.providers import get_model_review
 
     if req.provider != "openrouter" or req.enable_web_search is not True:
@@ -376,7 +458,7 @@ def prepare_web_context(req: Any, model_config: dict, capabilities: dict) -> Man
                 p for p in payload["plugins"] if p["id"] != "file-parser"
             ] + options["plugins"]
     if req.enable_tools:
-        payload["tools"].extend(local_tool_definitions(req.model))
+        payload["tools"].extend(_versioned_tool_definitions(req.model, tool_version))
     payload.update(reasoning_payload(getattr(req, "reasoning_effort", None), capabilities))
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     extra_fields = {k: v for k, v in payload.items() if k not in {"messages", "tools"}}
@@ -393,11 +475,13 @@ def prepare_web_context(req: Any, model_config: dict, capabilities: dict) -> Man
 
 
 def build_payload(req: Any, model_config: dict, capabilities: dict) -> dict:
-    from openvegas.agent.native_envelope import continuation_payload
-
-    native = continuation_payload(req)
+    native = _native_payload(req)
     if native is not None:
         return _build_native_continuation(req, native, model_config, capabilities)
+    return _build_fresh_payload(req, model_config, capabilities, FLAT_V2)
+
+
+def _build_fresh_payload(req: Any, model_config: dict, capabilities: dict, tool_version: str) -> dict:
     if not valid_model(req.model):
         raise ContractError(
             APIErrorCode.INVALID_TRANSITION, "Choose an exact reviewed OpenRouter model ID."
@@ -406,10 +490,13 @@ def build_payload(req: Any, model_config: dict, capabilities: dict) -> dict:
         try:
             context = getattr(req, "_managed_web_context", None)
             if context is None:
-                context = prepare_web_context(req, model_config, capabilities)
+                context = _prepare_web_context(req, model_config, capabilities, tool_version)
             if not isinstance(context, ManagedWebContext):
                 raise WebValidationError("invalid_private_web_context")
-            return context.payload(req, model_config)
+            payload = context.payload(req, model_config)
+            if req.enable_tools and _retained_tool_version(req, payload) != tool_version:
+                raise WebValidationError("web_request_changed_after_preflight")
+            return payload
         except WebValidationError as error:
             raise ContractError(
                 APIErrorCode.INVALID_TRANSITION,
@@ -446,7 +533,8 @@ def build_payload(req: Any, model_config: dict, capabilities: dict) -> dict:
                 APIErrorCode.INVALID_TRANSITION,
                 "OpenRouter accepts text or server-authorized attachments, not caller-supplied media or private state.",
             )
-    input_bound = input_token_bound(req)
+    tools = _versioned_tool_definitions(req.model, tool_version) if req.enable_tools else None
+    input_bound = _initial_input_token_bound(req, tools)
     context_limit = capabilities.get("context_window_tokens")
     if (
         len(json.dumps(req.messages, ensure_ascii=False).encode("utf-8")) > MAX_REQUEST_BYTES
@@ -476,7 +564,7 @@ def build_payload(req: Any, model_config: dict, capabilities: dict) -> dict:
         },
     }
     if req.enable_tools:
-        payload.update(tools=local_tool_definitions(req.model), tool_choice="auto")
+        payload.update(tools=tools, tool_choice="auto")
     payload.update(attachment_options)
     payload.update(reasoning_payload(getattr(req, "reasoning_effort", None), capabilities))
     req._managed_openrouter_dispatch = DispatchMetering(input_bound, _web_binding(req, model_config))
@@ -485,12 +573,13 @@ def build_payload(req: Any, model_config: dict, capabilities: dict) -> dict:
 
 
 def _build_native_continuation(req: Any, native: dict, model_config: dict, capabilities: dict) -> dict:
+    tool_version = _retained_tool_version(req, native)
     projected = copy.copy(req)
     projected.messages = _native_metering_view(req)
     projected._native_generation_claim = None
     projected._native_history_required = False
     projected._managed_web_context = None
-    fresh = build_payload(projected, model_config, capabilities)
+    fresh = _build_fresh_payload(projected, model_config, capabilities, tool_version)
     if {k: v for k, v in native.items() if k != "messages"} != {k: v for k, v in fresh.items() if k != "messages"}:
         raise ContractError(APIErrorCode.INVALID_TRANSITION,
                             "Native provider settings changed; no altered continuation was sent.")
@@ -527,7 +616,7 @@ async def _client(client):
             yield owned
 
 
-def parse_response(body: Any, req: Any, model_config: dict, parse_tool) -> dict:
+def parse_response(body: Any, req: Any, model_config: dict, parse_tool, *, expected_tool_schema: str | None = None) -> dict:
     if not isinstance(body, dict) or body.get("error"):
         raise ValueError("Provider error response")
     # OpenRouter may return a dated canonical slug for an operator-approved ID.
@@ -623,6 +712,9 @@ def parse_response(body: Any, req: Any, model_config: dict, parse_tool) -> dict:
         ):
             raise ValueError("Missing, invalid or duplicate provider tool call ID")
         call_ids.add(call_id)
+    tool_version = _request_tool_version(req)
+    if expected_tool_schema is not None and tool_version != expected_tool_schema:
+        raise ValueError("Tool request violates the advertised schema")
     argument_properties = local_tool_definition()["function"]["parameters"]["properties"][
         "arguments"
     ]["properties"]
@@ -632,15 +724,17 @@ def parse_response(body: Any, req: Any, model_config: dict, parse_tool) -> dict:
         function = call["function"]
         if call.get("type") != "function" or not isinstance(function, dict):
             raise ValueError("Unapproved tool")
-        if req.model.startswith("google/"):
-            tool = _flat_tool(function, req.model)
-            arguments = json.dumps(tool)
+        if tool_version != GENERIC_V1:
+            tool = _flat_tool(function, req.model, schema_version=tool_version)
+            # _flat_tool bounds the original wire arguments. Internal dispatch
+            # wrapping must not shrink that allowance or expand Unicode escapes.
+            arguments = json.dumps(tool, ensure_ascii=False)
         else:
             if function.get("name") != "call_local_tool":
                 raise ValueError("Unapproved tool")
             arguments = function.get("arguments")
-        if not isinstance(arguments, str) or len(arguments.encode("utf-8")) > 32_000:
-            raise ValueError("Invalid tool arguments")
+            if not isinstance(arguments, str) or len(arguments.encode("utf-8")) > 32_000:
+                raise ValueError("Invalid tool arguments")
         tool = json.loads(arguments)
         if (
             not isinstance(tool, dict)
@@ -658,6 +752,7 @@ def parse_response(body: Any, req: Any, model_config: dict, parse_tool) -> dict:
             schema = argument_properties.get(name)
             if schema is None or type(value) is not primitive_types[schema["type"]]:
                 raise ValueError("Tool arguments violate the advertised primitive schema")
+        validate_operation(tool, legacy_read_alias=tool_version == GENERIC_V1)
         parsed = parse_tool(function_name="call_local_tool", raw_arguments=arguments)
         if not parsed:
             raise ValueError("Invalid local tool request")
@@ -691,6 +786,7 @@ async def complete(
     handoff_binding=None,
 ) -> dict:
     payload = build_payload(req, model_config, capabilities)
+    tool_schema_version = _request_tool_version(req)
     if handoff_binding is not None:
         from server.services.native_handoff_guard import (
             validate_bound_request,
@@ -754,7 +850,7 @@ async def complete(
             if candidate_id and api_key in candidate_id:
                 raise ValueError("Reflected credential")
             request_id = candidate_id
-            result = parse_response(body, req, model_config, parse_tool)
+            result = parse_response(body, req, model_config, parse_tool, expected_tool_schema=tool_schema_version)
             if api_key in json.dumps(result, default=str):
                 raise ValueError("Reflected credential")
             capture_response(req, native_dispatch, bytes(raw), result)

@@ -27,7 +27,7 @@ async def native_envelope_case(owned, monkeypatch):
     c.command["native_history"] = True
     message = {"role": "assistant", "content": None, "tool_calls": [
         {"id": "call-" + str(i), "type": "function", "function": {
-            "name": "call_local_tool", "arguments": '{ "tool_name":"Read", "arguments":{"path":"notes.txt"} }'},
+            "name": "Read", "arguments": '{ "path":"notes.txt" }'},
          "extra_content": {"google": {"thought_signature": PRIVATE + str(i)}}}
         for i in range(3)
     ], "reasoning_details": [{"type": "reasoning.encrypted", "data": PRIVATE, "index": 2},

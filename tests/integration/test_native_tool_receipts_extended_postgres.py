@@ -9,8 +9,10 @@ import pytest
 from openvegas.agent.native_history import expected_runtime_call, load_native_tool_results_tx
 from openvegas.agent.orchestration_service import AgentOrchestrationService
 from openvegas.contracts.errors import ContractError
+from openvegas.gateway.openrouter import local_tool_definition
 from tests.integration import test_native_history_postgres as native_fixtures
 from tests.integration.test_native_history_postgres import (
+    MODEL,
     callback,
     projection,
     scenario,
@@ -54,7 +56,8 @@ async def load(sandbox, run, source, original):
         locked_run = await tx.fetchrow("SELECT * FROM agent_runs WHERE id=$1::uuid FOR UPDATE", run.run_id)
         locked_source = await tx.fetchrow("SELECT * FROM inference_requests WHERE id=$1::uuid FOR UPDATE", source.request_id)
         return await load_native_tool_results_tx(tx, run=locked_run, source=locked_source,
-                                                request_id=source.request_id, assistant_message=original)
+            request_id=source.request_id, assistant_message=original,
+            request_payload={"model": MODEL, "tools": [local_tool_definition()]})
 
 
 @pytest.mark.parametrize("name,mode", [("Search", "read_only"), ("Bash", "read_only"), ("Bash", "mutating")])

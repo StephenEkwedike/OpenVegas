@@ -3988,7 +3988,7 @@ def _provider_call_identity(value: Any) -> dict[str, str]:
 
 
 def _local_tool_usage_prompt(provider: str, model: str) -> str:
-    if provider == "openrouter" and model.startswith("google/"):
+    if provider == "openrouter":
         from openvegas.gateway.openrouter import local_tool_definitions
 
         # Use the advertised native schema, not the generic dispatcher's aliases.
@@ -5341,7 +5341,7 @@ def _build_cli_sprite_renderer(*, dealer_sprite: bool, workspace_root: str):
 @click.option(
     "--dealer-sprite/--no-dealer-sprite",
     default=False,
-    help="Enable the same-window compositor; animations require equipped, verified emotes.",
+    help="Request experimental same-window developer/native-review mode, not certification; OPENVEGAS_CHAT_COMPOSITOR overrides this flag. Animations require verified equipment.",
 )
 def chat(provider: str | None, model: str | None, dealer_sprite: bool):
     """OpenVegas conversational shell with slash commands and /ui handoff."""
@@ -5497,10 +5497,11 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
     session_approval = SessionApprovalState()
     dealer_enabled = str(os.getenv("OPENVEGAS_CLI_DEALER_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"}
     # The old printer appended a complete sprite to scrollback on every status.
-    # Equipped emotes use the owned compositor, never a second scrollback writer.
+    # Explicit experimental mode uses the owned compositor, never a second writer.
+    # Auto keeps same-window emotes off until a native surface is certified.
     cli_sprite_renderer = None
     if dealer_sprite:
-        console.print("[dim]Use /emote for equipped same-window emotes.[/dim]")
+        console.print("[dim]Experimental same-window mode requested, not native-certified; OPENVEGAS_CHAT_COMPOSITOR may override it. Use /emote for actual status and manual companion setup.[/dim]")
     dealer_panel = DealerPanel(
         console=console,
         enabled=dealer_enabled,
@@ -6400,6 +6401,17 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
         if pending_native_handoff is not None and pending_native_handoff.blocks_other_actions:
             raise APIError(409, "Resolve the pending model switch with /handoff retry or /handoff cancel first.")
         emote_turn = emote_bridge.current_turn
+
+        def _emote_response_is_final(response: dict[str, Any]) -> bool:
+            # Missing/null status is legacy compatibility, not permission to
+            # celebrate an explicit nonfinal status or pending tool calls.
+            status = response.get("completion_status")
+            calls = response.get("tool_calls")
+            return (
+                (status is None or (type(status) is str and status == "complete"))
+                and (calls is None or (type(calls) is list and not calls))
+            )
+
         native_history_mode = bool(
             current_provider == "openrouter"
             and _env_flag("OPENVEGAS_CHAT_NATIVE_GENERATION_SCOPE", "0")
@@ -6440,7 +6452,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             render_assistant(console, final_text)
             last_assistant_text_for_turn = final_text
             _render_usage_summary(result)
-            emote_bridge.finish(success=bool(final_text) and not result.get("continuity_blocked"), turn=emote_turn)
+            emote_bridge.finish(success=bool(final_text) and not result.get("continuity_blocked")
+                                and _emote_response_is_final(result), turn=emote_turn)
             return bool(final_text)
 
         def _maybe_warn_context_disabled(result_payload: dict[str, Any]) -> None:
@@ -6751,7 +6764,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     workspace_root,
                 )
                 _render_usage_summary(final_res if isinstance(final_res, dict) else {})
-            emote_bridge.finish(success=bool(final_text) and reason in {"completed", "spurious_mutation_block_ignored", "duplicate_suppressed"}, turn=emote_turn)
+            emote_bridge.finish(success=bool(final_text) and _emote_response_is_final(final_res)
+                                and reason in {"completed", "spurious_mutation_block_ignored", "duplicate_suppressed"}, turn=emote_turn)
             return LoopAction.FINALIZED
 
         async def _execute_with_heartbeat(
@@ -7282,6 +7296,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
         native_mutation_approved: set[str] = set()
         max_tool_steps = max(4, min(40, int(os.getenv("OPENVEGAS_CHAT_MAX_TOOL_STEPS", "24"))))
         for step in range(max_tool_steps):
+            final_response_complete = False
             cleaned_text = ""
             model_text = ""
             candidate_tool_calls: list[dict[str, Any]] = []
@@ -7442,7 +7457,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         workspace_root,
                     )
                     _render_usage_summary(one_shot if isinstance(one_shot, dict) else {})
-                    emote_bridge.finish(success=bool(final_text), turn=emote_turn)
+                    emote_bridge.finish(success=bool(final_text) and _emote_response_is_final(one_shot), turn=emote_turn)
                     return True
 
                 prompt = _tool_protocol_prompt(
@@ -7463,6 +7478,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     enable_web_search=web_search_effective_turn,
                     attachments=attachment_file_ids_for_turn,
                 )
+                final_response_complete = _emote_response_is_final(result)
                 next_thread = result.get("thread_id")
                 if next_thread:
                     current_thread_id = str(next_thread)
@@ -7483,7 +7499,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         last_assistant_text_for_turn = cleaned_text
                         render_status_bar(console, _status_actor(), f"cost {result.get('v_cost', '?')} $V", workspace_root)
                         _render_usage_summary(result)
-                        emote_bridge.finish(success=bool(cleaned_text), turn=emote_turn)
+                        emote_bridge.finish(success=bool(cleaned_text) and final_response_complete, turn=emote_turn)
                         return bool(cleaned_text)
                 if (
                     not native_history_mode and web_search_effective_turn
@@ -7506,6 +7522,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         enable_web_search=True,
                         attachments=attachment_file_ids_for_turn,
                     )
+                    final_response_complete = _emote_response_is_final(retry_result)
                     retry_thread = retry_result.get("thread_id")
                     if retry_thread:
                         current_thread_id = str(retry_thread)
@@ -7588,7 +7605,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     _tool_debug("fallback synthesized fs_apply_patch after model produced no tool request")
                 else:
                     if step == 0 and not completion_criteria.active and not edit_intent and not tool_observations:
-                        emote_bridge.finish(success=bool(last_assistant_text_for_turn), turn=emote_turn)
+                        emote_bridge.finish(success=bool(last_assistant_text_for_turn)
+                                            and final_response_complete, turn=emote_turn)
                         return True
                     if completion_criteria.requires_mutation:
                         synth_skip_reason = _diagnose_synth_write_skip_reason(
@@ -9327,15 +9345,19 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     return "exit"
                 if cmd == "/help":
                     _show_help()
-                    console.print("[dim]/emote - same-window emote status and equipment instructions[/dim]")
+                    console.print("[dim]/emote - emote status, equipment and manual companion setup[/dim]")
                     continue
                 if cmd == "/emote":
                     if owned_compositor is not None:
-                        console.print("Same-window compositor active. History, input, voice and emotes share one terminal owner.")
+                        console.print("Experimental same-window compositor active; not native-certified. History, input, voice and emotes share one terminal owner.")
+                        console.print("For a companion instead, reopen chat with OPENVEGAS_CHAT_COMPOSITOR=auto or off, then run /emote for that new session's command.")
                     else:
-                        console.print("Same-window emotes activate automatically when an owned pack is equipped.")
-                    console.print("Choose equipment with `openvegas emote`, then reopen chat. Only server-verified equipped packs animate.")
-                    console.print("[dim]Optional empty compositor: OPENVEGAS_CHAT_COMPOSITOR=on openvegas chat. Use off for legacy input.[/dim]")
+                        console.print("Same-window emotes are off; auto mode has no certified native surfaces.")
+                        console.print("Optional: manually run in a separate terminal before starting the next turn:")
+                        console.print(f"openvegas emote watch --source openvegas --session {runtime_session_id}", markup=False)
+                        console.print("This watches only this chat session's future turns. No pane or watcher was launched.")
+                    console.print("Choose equipment with `openvegas emote`. Owned packs require server verification. Without an equipped companion, watch may show a labeled public preview; previewing does not grant ownership. Native UX certification remains pending.")
+                    console.print("[dim]Experimental developer/native-review opt-in: OPENVEGAS_CHAT_COMPOSITOR=on openvegas chat. This is not certification. Use auto or off for legacy input.[/dim]")
                     continue
                 if cmd == "/legend":
                     _show_legend()

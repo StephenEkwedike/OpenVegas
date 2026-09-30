@@ -26,6 +26,7 @@ from server.routes import inference as routes
 from server.services.file_uploads import FileUploadService
 from server.services.inference_replay import InferenceReplayService
 from server.services.provider_threads import ProviderThreadService
+from tests.integration.native_supplier_schema import tool_function
 from tests.integration.test_native_history_postgres import (
     new_run,
     projection,
@@ -78,9 +79,9 @@ async def continuation_db(database_factory, monkeypatch):
             message = {"role": "assistant", "content": "Synthetic native answer",
                        "reasoning_details": [{"type": "reasoning.encrypted", "data": "opaque-private-fixture", "format": "google-gemini-v1", "index": 0}]}
             if ctx.emit_calls:
-                message["tool_calls"] = [{"id": "call-" + str(i), "type": "function", "function": {
-                    "name": "call_local_tool", "arguments": json.dumps({"tool_name": "Read",
-                    "arguments": {"path": "notes.txt"}, "shell_mode": "read_only", "timeout_sec": 30})}} for i in range(2)]
+                message["tool_calls"] = [{"id": "call-" + str(i), "type": "function", "function":
+                    tool_function(payload, {"tool_name": "Read", "arguments": {"path": "notes.txt"},
+                                            "shell_mode": "read_only", "timeout_sec": 30})} for i in range(2)]
             return httpx.Response(200, json={"id": "gen-native-local", "model": command["model"],
                 "choices": [{"message": message, "finish_reason": "tool_calls" if ctx.emit_calls else "stop"}],
                 "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15, "cost": 0.00002}})
@@ -339,8 +340,7 @@ async def setup_media(c, monkeypatch, *, web, attachment):
         choice = c.provider_body["choices"][0]
         choice["finish_reason"] = "tool_calls"
         choice["message"]["tool_calls"] = [{"id": "media-read", "type": "function", "function": {
-            "name": "call_local_tool", "arguments": json.dumps({"tool_name": "Read",
-                "arguments": {"path": "notes.txt"}, "shell_mode": "read_only", "timeout_sec": 30})}}]
+            "name": "Read", "arguments": json.dumps({"path": "notes.txt", "timeout_sec": 30})}}]
         choice["message"]["reasoning_details"] = [{"type": "reasoning.encrypted", "data": "opaque-private-fixture"}]
     if attachment:
         uploads = FileUploadService(c.db)

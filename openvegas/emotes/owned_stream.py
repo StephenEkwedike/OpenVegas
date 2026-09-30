@@ -142,7 +142,8 @@ class OwnedCodexStream:
 
     Ordinals start at zero and are assigned by the owner to the selected metadata
     feed BEFORE buffering, not by arrival here. Gaps disable, old/duplicate records
-    drop. No replay/reconnect recovery or implicit approval resume. The owner may
+    drop. Completed turns have a private bounded replay guard across recreation;
+    this is not active-turn recovery or implicit approval resume. The owner may
     explicitly heartbeat a validated active turn on this same lifecycle thread;
     this object never creates a timer or a second writer.
     The spool bounds output to 256 events; any failed write disables this observer.
@@ -231,6 +232,8 @@ class OwnedCodexStream:
     def _publish(self, event: Event) -> bool:
         if not self.enabled:
             return False
+        if event.phase == Phase.COMPLETE and not self._completion_allowed(event.turn_id, claim=True):
+            return False
         try:
             delivered = self._spool.publish(event) is True
         except Exception:  # noqa: BLE001 - no cosmetic exception into the provider
@@ -240,6 +243,24 @@ class OwnedCodexStream:
             # followed by an apparent success. Existing controller leases go idle.
             self.reason = "publication_failed"
         return delivered
+
+    def _completion_allowed(self, turn_id: str, *, claim: bool = False) -> bool:
+        try:
+            if self._spool is None:
+                self._spool = EventSpool()
+            allowed = self._spool.completion_allowed(
+                source="codex", session_id=self._authorization.session_id,
+                turn_id=turn_id, claim=claim,
+            )
+        except Exception:  # noqa: BLE001 - replay authority failure is cosmetic
+            allowed = None
+        if type(allowed) is not bool:
+            allowed = None
+        if allowed is None:
+            self.close(reason="replay_guard_unavailable")
+        elif allowed is False and claim:
+            self.close(reason="completion_replayed")
+        return allowed is True
 
     def _remember(self, turn_id: str) -> bool:
         if turn_id in self._seen:
@@ -286,6 +307,8 @@ class OwnedCodexStream:
         if event.phase == Phase.START:
             if turn_id in self._seen or not self._remember(turn_id):
                 return False
+            if not self._completion_allowed(turn_id):
+                return False
             if self._bridge is not None and not self._terminal:
                 self._bridge.cancel()
             if not self.enabled:
@@ -311,6 +334,9 @@ class OwnedCodexStream:
             # A terminal/approval before START tombstones the turn, without
             # manufacturing a start or letting a delayed start revive it.
             self._remember(turn_id)
+            if (event.phase == Phase.COMPLETE and self.enabled
+                    and self._completion_allowed(turn_id)):
+                self._completion_allowed(turn_id, claim=True)
             return False
         if self._terminal:
             return False
@@ -345,7 +371,7 @@ class OwnedCodexStream:
         if type(reason) is not str or reason not in (
             "closed", "turn_limit", "invalid_record", "invalid_order", "stream_gap",
             "unknown_lifecycle", "generation_unavailable", "stream_error", "overflow",
-            "invalid_clock",
+            "invalid_clock", "replay_guard_unavailable", "completion_replayed",
         ):
             reason = "closed"
         if self.enabled:

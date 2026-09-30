@@ -40,7 +40,7 @@ def history_request(monkeypatch):
 def original_message():
     return {"role": "assistant", "content": None, "tool_calls": [
         {"id": "call-" + str(n), "type": "function", "vendor": {"signature": PRIVATE + str(n)},
-         "function": {"name": "call_local_tool", "arguments": '{  "tool_name": "Read", "arguments": {"path": "a.txt"}  }'}}
+         "function": {"name": "Read", "arguments": '{  "path": "a.txt"  }'}}
         for n in range(3)
     ], "reasoning_details": [
         {"type": "reasoning.encrypted", "data": PRIVATE, "format": "vendor-x", "index": 2},

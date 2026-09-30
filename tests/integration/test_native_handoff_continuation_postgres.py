@@ -34,6 +34,7 @@ from server.services.inference_replay import (
 from server.services.native_handoff_provenance import verify_consumed_handoff_tx
 from server.services.native_handoff_service import HandoffSelection
 from tests.integration import test_native_handoff_dispatch_postgres as initial
+from tests.integration.native_supplier_schema import tool_function
 from tests.integration.test_native_continuation_postgres import (
     complete_tools,
     payload,
@@ -74,12 +75,11 @@ async def tool_first(c, monkeypatch, *, accepted=2, **changes):
                 "format": "google-gemini-v1", "index": 0,
             }]
             choice["message"]["tool_calls"] = [{
-                "id": "handoff-read-" + str(index), "type": "function", "function": {
-                    "name": "call_local_tool", "arguments": json.dumps({
+                "id": "handoff-read-" + str(index), "type": "function", "function":
+                    tool_function(json.loads(request.content), {
                         "tool_name": "Read", "arguments": {"path": "notes.txt"},
                         "shell_mode": "read_only", "timeout_sec": 30,
                     }),
-                },
             } for index in range(2)]
             return httpx.Response(200, json=body)
 
