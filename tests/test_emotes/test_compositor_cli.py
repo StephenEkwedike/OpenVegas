@@ -186,15 +186,16 @@ def test_emote_guidance_matches_actual_session_transport(active):
                 "owned_compositor": object() if active else None,
                 "runtime_session_id": session_id})
     text = output.getvalue()
-    assert "not certification" in text and "Native UX certification remains pending" in text
+    assert "Native compatibility remains under review" in text
     assert "Owned packs require server verification" in text
-    assert "watch may show a labeled public preview" in text
-    assert "previewing does not grant ownership" in text
+    assert "Public previews are not purchases" in text
     if active:
         assert "not native-certified" in text
         assert "new session's command" in text
         assert "emote watch" not in text
     else:
+        assert f"openvegas emote setup --source openvegas --session {session_id} --watch" in text
+        assert "ready message" in text and "Ctrl+C" in text
         assert f"openvegas emote watch --source openvegas --session {session_id}" in text
         assert "No pane or watcher was launched" in text
         assert "auto mode has no certified native surfaces" in text

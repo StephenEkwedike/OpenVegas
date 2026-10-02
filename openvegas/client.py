@@ -858,6 +858,55 @@ class OpenVegasClient:
     async def get_mode(self) -> dict:
         return await self._request("GET", "/inference/mode")
 
+    async def get_profile_preferences(self) -> dict:
+        """Bounded status-only read; no auth refresh, retries or local state writes."""
+        from openvegas.profile_identity import PROFILE_TIMEOUT_SECONDS
+
+        token, base_url = self.token, self.base_url
+        if not isinstance(token, str) or not token.strip():
+            raise APIError(401, "Profile preferences unavailable.")
+        headers = {"Authorization": f"Bearer {token}", "Accept-Encoding": "identity"}
+        limit = 16 * 1024
+
+        def check_identity():
+            if self.token != token or self.base_url != base_url:
+                raise APIError(409, "Profile preferences unavailable.")
+
+        async def read_body():
+            async with self._http_client.stream(
+                "GET", f"{base_url}/ui/profile/preferences", headers=headers,
+                timeout=PROFILE_TIMEOUT_SECONDS, follow_redirects=False,
+            ) as response:
+                check_identity()
+                if response.status_code != 200:
+                    raise APIError(response.status_code, "Profile preferences unavailable.")
+                if response.headers.get("content-encoding", "identity").strip().lower() != "identity":
+                    raise ValueError("Encoded profile response")
+                length = response.headers.get("content-length")
+                if length is not None and (not length.isascii() or not length.isdecimal()
+                                           or len(length) > 10 or int(length) > limit):
+                    raise ValueError("Invalid profile response size")
+                body = bytearray()
+                async for chunk in response.aiter_raw():
+                    if len(chunk) > limit - len(body):
+                        raise ValueError("Profile response too large")
+                    body.extend(chunk)
+                check_identity()
+                return body
+
+        try:
+            body = await asyncio.wait_for(read_body(), timeout=PROFILE_TIMEOUT_SECONDS)
+            check_identity()
+            payload = json.loads(body.decode("utf-8"))
+        except (ValueError, UnicodeError, RecursionError):
+            raise APIError(502, "Invalid profile preferences response.") from None
+        except (httpx.HTTPError, TimeoutError):
+            raise APIError(503, "Profile preferences unavailable.") from None
+        if type(payload) is not dict:
+            raise APIError(502, "Invalid profile preferences response.")
+        check_identity()
+        return payload
+
     async def set_mode(
         self,
         *,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shlex
 import sys
 import time
 from collections.abc import Callable
@@ -96,7 +97,7 @@ def _list(services: EmoteServices, query: str = "") -> None:
 @click.group(invoke_without_command=True)
 @click.pass_context
 def emote(ctx):
-    """Choose owned emotes interactively, or list local previews when redirected."""
+    """Choose owned emotes, list previews, or use setup for a companion command."""
     if ctx.invoked_subcommand is None:
         services = _services(ctx)
         if sys.stdin.isatty() and sys.stdout.isatty():
@@ -124,6 +125,78 @@ def list_packs(ctx, search):
 def browse(ctx, query):
     """Search the local catalog (no network or purchases)."""
     _list(_services(ctx), query)
+
+
+@emote.command()
+@click.option("--source", required=True, help="Exact event source supplied by your producer.")
+@click.option("--session", "session_id", required=True, help="Exact opaque producer session ID.")
+@click.option("--pack", "pack_id", help="Public companion preview ID (not equipment).")
+@click.option("--completion-pack", "completion_pack_id", help="Public completion preview ID.")
+@click.option("--interactive/--no-interactive", default=None, help="Prompt on a terminal; otherwise list valid choices.")
+@click.option("--watch", "start_watch", is_flag=True, help="After choosing, watch in THIS user-opened companion terminal.")
+@click.pass_context
+def setup(ctx, source, session_id, pack_id, completion_pack_id, interactive, start_watch):
+    """Choose public previews for a user-opened companion terminal.
+
+    Print a command, or use --watch to watch here after choosing both slots.
+    No process launch, saved preferences, hook installation, or purchases.
+    For scripts, supply both --pack and --completion-pack with --no-interactive.
+    Source/session must match a real event producer; setup does not create one.
+    """
+    if not IDENTITY.fullmatch(source) or not IDENTITY.fullmatch(session_id):
+        raise click.BadParameter("source/session must be bounded opaque ASCII tokens")
+    if start_watch and (not sys.stdin.isatty() or not sys.stdout.isatty()):
+        click.echo("Companion disabled: setup --watch requires its own interactive terminal.")
+        return
+    services = _services(ctx)
+    choices = {"companion": [], "completion": []}
+    try:
+        for entry in sorted(services.catalog.entries.values(), key=lambda item: item.pack_id):
+            # Never consult entitlement authorization for a public setup preview.
+            if entry.access not in {"preview_only", "free"} and not entry.preview_resource:
+                continue
+            pack = _load(services, entry.pack_id, preview=True)
+            slot = "completion" if "completion" in pack.manifest.tags else "companion"
+            choices[slot].append(entry.pack_id)
+    except (OSError, ValueError) as exc:
+        _fail(exc)
+    for slot, value in (("companion", pack_id), ("completion", completion_pack_id)):
+        if value is not None and value not in choices[slot]:
+            raise click.BadParameter(f"Choose an installed public {slot} preview; run setup without pack options to list IDs")
+        if not choices[slot]:
+            raise click.ClickException(f"No public {slot} previews installed; run openvegas emote doctor")
+    click.echo("Public previews only: not equipment, ownership, art approval, or native certification.")
+    click.echo("No preferences saved or hooks installed. Use a separate companion terminal.")
+    if interactive is None:
+        interactive = sys.stdin.isatty() and sys.stdout.isatty()
+    selected = {"companion": pack_id, "completion": completion_pack_id}
+    for slot, value in selected.items():
+        if value is None:
+            click.echo(f"Public {slot} preview IDs: " + ", ".join(choices[slot]))
+            if interactive:
+                selected[slot] = click.prompt(
+                    f"Choose {slot} preview", type=click.Choice(choices[slot]), show_choices=False
+                )
+    if not all(selected.values()):
+        click.echo("Supply both --pack ID and --completion-pack ID with --no-interactive, or use --interactive.")
+        return
+    command = [
+        "openvegas", "emote", "watch", "--source", source, "--session", session_id,
+        "--pack", selected["companion"], "--completion-pack", selected["completion"],
+    ]
+    if not start_watch:
+        click.echo("Run in a SECOND terminal (POSIX shell; IDs are also shell-safe ASCII tokens):")
+        click.echo(shlex.join(command))
+    click.echo("Wait for watcher readiness, then start a NEW turn in the matching producer session.")
+    click.echo("Queued/running turns are not replayed. Completion plays only after a successful new turn.")
+    click.echo("Ctrl+C stops the watcher. No events means no task animation; setup installs no producer.")
+    if start_watch:
+        click.echo("Starting the watcher in THIS companion terminal; no pane or process launched.")
+        ctx.invoke(
+            watch, source=source, session_id=session_id,
+            pack_id=selected["companion"], completion_pack_id=selected["completion"],
+            reduced_motion=False,
+        )
 
 
 @emote.command()

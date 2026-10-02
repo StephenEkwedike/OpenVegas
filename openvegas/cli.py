@@ -9031,7 +9031,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                             loop = asyncio.get_event_loop()
 
                             def _insert_from_voice(transcript: str) -> None:
-                                if owned_compositor is not None:
+                                if owned_compositor is not None or not prompt_input_active:
                                     _insert_voice_transcript_text(transcript)
                                     return
                                 token = str(transcript or "").strip()
@@ -9353,11 +9353,13 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         console.print("For a companion instead, reopen chat with OPENVEGAS_CHAT_COMPOSITOR=auto or off, then run /emote for that new session's command.")
                     else:
                         console.print("Same-window emotes are off; auto mode has no certified native surfaces.")
-                        console.print("Optional: manually run in a separate terminal before starting the next turn:")
+                        console.print("Choose a public companion and celebration in a second terminal (no purchase):")
+                        console.print(f"openvegas emote setup --source openvegas --session {runtime_session_id} --watch", markup=False)
+                        console.print("Wait for the companion's ready message, then send your next prompt here. Ctrl+C in the companion terminal stops only the animation.")
+                        console.print("To use your already-equipped packs instead:")
                         console.print(f"openvegas emote watch --source openvegas --session {runtime_session_id}", markup=False)
                         console.print("This watches only this chat session's future turns. No pane or watcher was launched.")
-                    console.print("Choose equipment with `openvegas emote`. Owned packs require server verification. Without an equipped companion, watch may show a labeled public preview; previewing does not grant ownership. Native UX certification remains pending.")
-                    console.print("[dim]Experimental developer/native-review opt-in: OPENVEGAS_CHAT_COMPOSITOR=on openvegas chat. This is not certification. Use auto or off for legacy input.[/dim]")
+                    console.print("Manage owned equipment with `openvegas emote`. Owned packs require server verification. Public previews are not purchases. Native compatibility remains under review.")
                     continue
                 if cmd == "/legend":
                     _show_legend()
@@ -9370,7 +9372,10 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     except (APIError, ModelSelectionError) as exc:
                         console.print(f"Capabilities unavailable: {exc}", markup=False)
                 if cmd == "/status":
+                    from openvegas.profile_identity import profile_status
+
                     console.print(_reasoning_status(), markup=False)
+                    console.print(await profile_status(client), markup=False)
                     web_search_effective = bool(
                         web_search_requested
                         and _chat_capability("web_search")

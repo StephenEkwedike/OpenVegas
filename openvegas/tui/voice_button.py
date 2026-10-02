@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import threading
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -31,6 +32,7 @@ class VoiceButton:
         self._last_error: str | None = None
         self._last_transcript_chars: int = 0
         self._toggle_lock = asyncio.Lock()
+        self._generation = 0
         self._show_errors = str(os.getenv("OPENVEGAS_CHAT_VOICE_SHOW_ERRORS", "1")).strip().lower() in {
             "1",
             "true",
@@ -86,6 +88,7 @@ class VoiceButton:
             self.console.print("[dim]Voice is processing...[/dim]")
 
     def _start_recording(self) -> None:
+        self._generation += 1
         self.state = VoiceState.LISTENING
         self._last_error = None
         self._last_transcript_chars = 0
@@ -112,27 +115,85 @@ class VoiceButton:
             return
 
         self.state = VoiceState.PROCESSING
+        generation = self._generation
         emit_metric("voice_capture_phase_total", {"phase": "stop_requested"})
         self.console.print("[dim]Stopping microphone...[/dim]")
 
+        # Event-loop shutdown also cancels shielded tasks, not their threads.
+        # Publish the result before checking retirement so either side cleans it.
+        retired = threading.Event()
+        stop_results = []
+
+        def discard_path(path):
+            try:
+                if path:
+                    Path(path).unlink(missing_ok=True)
+            except OSError:
+                emit_metric("voice_capture_phase_total", {"phase": "retired_cleanup_failed"})
+
+        def stop_worker():
+            result = capture.stop_to_wav()
+            stop_results.append(result)
+            if retired.is_set():
+                discard_path(result[0])
+            return result
+
+        stop_task = asyncio.create_task(asyncio.to_thread(stop_worker))
+
+        def discard_stop_result(task):
+            retired.set()
+            if stop_results:
+                discard_path(stop_results[0][0])
+            try:
+                path, _, _ = task.result()
+                discard_path(path)
+            except asyncio.CancelledError:
+                return
+            except Exception:  # noqa: BLE001 - Retired worker failures cannot revive UI work.
+                emit_metric("voice_capture_phase_total", {"phase": "retired_cleanup_failed"})
+
         try:
             wav_path, duration_sec, err = await asyncio.wait_for(
-                asyncio.to_thread(capture.stop_to_wav),
+                asyncio.shield(stop_task),
                 timeout=_voice_stop_timeout_sec(),
             )
-        except asyncio.TimeoutError:
-            emit_metric("voice_capture_phase_total", {"phase": "stop_timeout"})
+        except (TimeoutError, asyncio.CancelledError) as exc:
+            retired.set()
+            if stop_results:
+                discard_path(stop_results[0][0])
+            stop_task.add_done_callback(discard_stop_result)
             try:
                 capture.abort()
             except Exception:
                 pass
             self._capture = None
+            self.state = VoiceState.IDLE
+            if isinstance(exc, asyncio.CancelledError):
+                raise
+            if generation != self._generation:
+                return
+            emit_metric("voice_capture_phase_total", {"phase": "stop_timeout"})
             self.state = VoiceState.ERROR
             self._emit_error("voice stop timeout; audio device busy")
             self.state = VoiceState.IDLE
             return
+        except Exception:  # noqa: BLE001 - Audio backends can raise arbitrary device errors.
+            self._capture = None
+            self.state = VoiceState.IDLE
+            self._last_transcript_chars = 0
+            try:
+                capture.abort()
+            except Exception:  # noqa: BLE001 - Preserve the neutral stop failure.
+                emit_metric("voice_capture_phase_total", {"phase": "abort_failed"})
+            if generation == self._generation:
+                self._emit_error("voice stop failed; audio device unavailable")
+                emit_metric("voice_capture_phase_total", {"phase": "stop_failed"})
+            return
 
         self._capture = None
+        if generation != self._generation:
+            discard_stop_result(stop_task)
+            return
         if err or not wav_path:
             emit_metric("voice_capture_phase_total", {"phase": "stop_failed"})
             self.state = VoiceState.ERROR
@@ -143,6 +204,8 @@ class VoiceButton:
         try:
             emit_metric("voice_capture_phase_total", {"phase": "transcribe_started"})
             transcript = str(await transcribe_wav(wav_path, float(duration_sec or 0.0)) or "").strip()
+            if generation != self._generation:
+                return
             self._last_transcript_chars = len(transcript)
             if transcript:
                 insert_text(transcript)
@@ -150,6 +213,8 @@ class VoiceButton:
                 emit_metric("voice_capture_phase_total", {"phase": "transcript_empty"})
             emit_metric("voice_capture_phase_total", {"phase": "transcribe_succeeded"})
         except Exception as exc:
+            if generation != self._generation:
+                return
             self._last_transcript_chars = 0
             emit_metric("voice_capture_phase_total", {"phase": "transcribe_failed"})
             self.state = VoiceState.ERROR
@@ -163,6 +228,8 @@ class VoiceButton:
 
     def stop_if_recording(self) -> None:
         """Best-effort stop during shutdown."""
+        self._generation += 1
+        self._last_transcript_chars = 0
         capture = self._capture
         if capture is None:
             self.state = VoiceState.IDLE

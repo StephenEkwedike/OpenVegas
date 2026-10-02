@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import ast
+from pathlib import Path
+
 from openvegas.cli import _insert_or_queue_voice_transcript
 
 
@@ -75,3 +78,27 @@ def test_voice_empty_transcript_noop() -> None:
     assert mode == "none"
     assert chars == 0
     assert session.default_buffer.text == "hello"
+
+
+def test_shortcut_transcript_after_prompt_closed_uses_pending_prefill() -> None:
+    source = Path(__file__).resolve().parents[2] / "openvegas/cli.py"
+    tree = ast.parse(source.read_text())
+    callbacks = [node for node in ast.walk(tree)
+                 if isinstance(node, ast.FunctionDef) and node.name == "_insert_from_voice"]
+    assert len(callbacks) == 1
+    session = _Session(text="already submitted")
+    queued = []
+
+    def insert(transcript):
+        queued.append(_insert_or_queue_voice_transcript(
+            transcript=transcript, chat_prompt_session=session,
+            prompt_active=False, pending_prefill=None,
+        ))
+
+    scope = {"owned_compositor": None, "prompt_input_active": False,
+             "_insert_voice_transcript_text": insert}
+    exec(compile(ast.Module(body=callbacks, type_ignores=[]), str(source), "exec"), scope)
+    scope["_insert_from_voice"]("dictated continuation")
+    assert queued == [("dictated continuation", "prefill", 21)]
+    assert session.default_buffer.text == "already submitted"
+    assert not session.app.invalidated
