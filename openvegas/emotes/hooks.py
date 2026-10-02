@@ -763,6 +763,8 @@ def status_command(settings):
 @_path_option
 def sessions_command(settings):
     """List opaque watch IDs only. No transcript discovery or terminal writes."""
+    from openvegas.cli_command import cli_command
+
     try:
         root = _root(_settings_path(_default_path(settings)))
         sessions = []
@@ -773,7 +775,8 @@ def sessions_command(settings):
                     if _provider(receipt) == "claude" and re.fullmatch(r"claude-[0-9a-f]{32}\.json", name):
                         state = _validate_state(_json(_read(fd, name, MAX_STATE), MAX_STATE), name[:-5])
                         sessions.append({"session": state["session_id"],
-                                         "watch": f"openvegas emote watch --source claude --session {state['session_id']}"})
+                                         "watch": cli_command("emote", "watch", "--source", "claude",
+                                                              "--session", state["session_id"])})
                     elif _provider(receipt) == "gemini" and re.fullmatch(r"gemini-[0-9a-f]{32}\.json", name):
                         state = _observation(_json(_read(fd, name, MAX_STATE), MAX_STATE), name[:-5])
                         sessions.append({"session": state["session_id"], "mode": "observation-only",

@@ -453,7 +453,12 @@ class OwnedChatCompositor:
         self._work_task = asyncio.ensure_future(work)
         self._cancel_work, self._user_cancelled = on_cancel, False
         try:
-            return await self._work_task
+            result = await self._work_task
+            # Device/provider cleanup may suppress task cancellation. The owner's
+            # interrupt decision still wins over any late successful return.
+            if self._user_cancelled:
+                raise TurnCancelled()
+            return result
         except asyncio.CancelledError:
             if self._user_cancelled:
                 raise TurnCancelled() from None

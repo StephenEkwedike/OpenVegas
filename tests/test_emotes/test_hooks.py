@@ -627,3 +627,29 @@ def test_generated_exec_invocation_runs_isolated_without_importing_cli(settings,
     broken_args = subprocess.run([str(python), "-I", "-m", "openvegas.emotes.hooks", "handle", "--bad"],
                                  cwd=cwd, env=env, capture_output=True, timeout=5, check=False)
     assert (broken_args.returncode, broken_args.stdout, broken_args.stderr) == (0, b"", b"")
+
+
+@pytest.mark.parametrize("frozen,platform", [(False, "linux"), (True, "linux"), (False, "win32"), (True, "win32")])
+def test_session_watch_guidance_pinned_without_changing_dispatch(settings, tmp_path, monkeypatch, frozen, platform):
+    from types import SimpleNamespace
+
+    from openvegas import cli_command as command_module
+
+    root, receipt = install(settings)
+    spool = EventSpool(tmp_path / "events")
+    assert h.handle_input(payload("UserPromptSubmit", str(uuid4())), installation=root,
+                          owner=receipt["id"], spool=spool)
+    before = settings.read_bytes()
+    receipt_before = h._receipt(root)
+    monkeypatch.setattr(command_module, "sys", SimpleNamespace(
+        executable="/installed path/owner's python", frozen=frozen, platform=platform,
+    ))
+    result = CliRunner().invoke(h.hooks, ["sessions", "--settings", str(settings)])
+    assert result.exit_code == 0, result.output
+    sessions = json.loads(result.output)["sessions"]
+    assert len(sessions) == 1
+    session = sessions[0]
+    assert session["watch"] == command_module.cli_command(
+        "emote", "watch", "--source", "claude", "--session", session["session"]
+    )
+    assert settings.read_bytes() == before and h._receipt(root) == receipt_before

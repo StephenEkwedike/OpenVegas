@@ -502,6 +502,44 @@ async def test_ctrl_c_cancels_owned_work_not_prompt_and_no_success(pack, clock):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("disconnect", [False, True])
+async def test_retired_work_cannot_return_success_after_suppressing_cancel(pack, clock, disconnect):
+    async with running(pack, clock) as (owner, pipe, _, _, _):
+        bridge = ChatEmoteBridge("local-test", publish=owner.publish)
+        turn = bridge.begin()
+        entered = asyncio.Event()
+        cancellations = []
+
+        async def work():
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                return "late result after cancellation"
+
+        def cancel():
+            cancellations.append(turn)
+            bridge.cancel(turn=turn)
+
+        task = asyncio.create_task(owner.run_turn(work(), on_cancel=cancel))
+        await entered.wait()
+        owner.default_buffer.text = "preserved draft"
+        if disconnect:
+            pipe.close()
+        else:
+            pipe.send_text("\x03")
+        with pytest.raises(TurnCancelled):
+            await task
+        assert cancellations == [turn]
+        assert owner.default_buffer.text == "preserved draft"
+        assert owner._work_task is None
+        assert not bridge.finish(success=True, turn=turn)
+        if not disconnect:
+            assert not owner._app_task.done()
+            assert await owner.run_turn(asyncio.sleep(0, result=42), on_cancel=cancel) == 42
+
+
+@pytest.mark.asyncio
 async def test_returned_work_never_infers_success_and_outer_cancel_propagates(pack, clock):
     async with running(pack, clock) as (owner, _, _, _, _):
         bridge = ChatEmoteBridge("local-test", publish=owner.publish)

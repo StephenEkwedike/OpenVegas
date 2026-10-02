@@ -122,6 +122,8 @@ def test_eof_closes_library_without_equipping(monkeypatch, picker_services):
     "failure", [PackError("synthetic account failure"), OSError("synthetic offline")]
 )
 def test_offline_still_allows_both_slots_off(monkeypatch, picker_services, failure):
+    from openvegas.cli_command import cli_command
+
     services, library = picker_services
     services.selection.write_slots({"companion": "fixture.c", "completion": "fixture.s"})
 
@@ -132,6 +134,8 @@ def test_offline_still_allows_both_slots_off(monkeypatch, picker_services, failu
     result = invoke(monkeypatch, services, "o\n")
     assert result.exit_code == 0, result.output
     assert "Owned library unavailable" in result.output and "Emotes off" in result.output
+    assert cli_command("login") in result.output
+    assert cli_command("emote", "owned") in result.output
     assert "synthetic" not in result.output
     assert services.selection.read_slots() == {"companion": None, "completion": None}
     assert library.closed == 1
@@ -256,3 +260,25 @@ def test_explicit_flows_bypass_picker_even_on_tty(monkeypatch, picker_services, 
     assert result.exit_code == 0, result.output
     assert library.calls == (["refresh"] if args == ["owned"] else [])
     assert "Choose" not in result.output
+
+
+@pytest.mark.parametrize("frozen,platform", [(False, "linux"), (True, "linux"), (False, "win32"), (True, "win32")])
+def test_setup_guidance_pinned_to_running_installation(monkeypatch, capsys, frozen, platform):
+    from types import SimpleNamespace
+
+    from openvegas import cli_command as command_module
+    from openvegas.emotes.picker import _setup_help
+
+    monkeypatch.setattr(command_module, "sys", SimpleNamespace(
+        executable="/installed path/owner's python", frozen=frozen, platform=platform,
+    ))
+    _setup_help()
+    output = capsys.readouterr().out
+    for args in [
+        ("emote", "doctor"),
+        ("emote", "hooks", "setup", "claude", "--settings", "/path/to/.claude/settings.local.json"),
+        ("emote", "hooks", "setup", "gemini", "--settings", "/path/to/.gemini/settings.json"),
+        ("emote", "run", "--help"),
+    ]:
+        assert command_module.cli_command(*args) in output
+    assert "  openvegas " not in output and ": openvegas " not in output

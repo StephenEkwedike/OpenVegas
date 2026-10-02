@@ -6,6 +6,8 @@ import asyncio
 
 import click
 
+from openvegas.cli_command import cli_command
+
 from .manifest import PackError, safe_token
 from .online import remote_library
 
@@ -54,7 +56,7 @@ def _previews(ctx, services):
     )
     click.echo("Public previews only; previewing does not equip or grant ownership.")
     if not entries:
-        click.echo("No public previews installed. Run: openvegas emote doctor")
+        click.echo("No public previews installed. Run: " + cli_command("emote", "doctor"))
         return
     for index, entry in enumerate(entries, 1):
         click.echo(f"  {index}. {entry.display_name} ({entry.pack_id})")
@@ -70,13 +72,13 @@ def _setup_help():
     click.echo("OpenVegas chat: /emote shows status and manual companion setup when available.")
     click.echo("Auto mode keeps same-window emotes off: no native surfaces are certified.")
     click.echo("Same-window mode on is an experimental developer/native-review opt-in, not certification.")
-    click.echo("Check local support: openvegas emote doctor")
+    click.echo("Check local support: " + cli_command("emote", "doctor"))
     click.echo("Claude activity-only pilot, dry-run first:")
-    click.echo("  openvegas emote hooks setup claude --settings /path/to/.claude/settings.local.json")
+    click.echo("  " + cli_command("emote", "hooks", "setup", "claude", "--settings", "/path/to/.claude/settings.local.json"))
     click.echo("Gemini session discovery only (no task animation), dry-run first:")
-    click.echo("  openvegas emote hooks setup gemini --settings /path/to/.gemini/settings.json")
+    click.echo("  " + cli_command("emote", "hooks", "setup", "gemini", "--settings", "/path/to/.gemini/settings.json"))
     click.echo("Codex native hook installation is unsupported; no settings will be changed.")
-    click.echo("Whole-process wrapper options: openvegas emote run --help")
+    click.echo("Whole-process wrapper options: " + cli_command("emote", "run", "--help"))
     click.echo("The wrapper observes process exit, not each answer inside a running LLM session.")
     click.echo("External-host lifecycle and native UX certification are still pending.")
 
@@ -99,7 +101,7 @@ def choose(ctx, services):
             # An unavailable account must not prevent offline previews or local off.
             choices = []
             click.echo(
-                "Owned library unavailable. Run: openvegas login, then openvegas emote owned. "
+                f"Owned library unavailable. Run: {cli_command('login')}, then {cli_command('emote', 'owned')}. "
                 "Cached packs do not grant offline access."
             )
         else:

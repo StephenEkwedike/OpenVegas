@@ -2208,8 +2208,31 @@ def _preflight_filter_attachments_for_capabilities(
     """Return the entire queue and a blocking count, never a text-only subset."""
     if not pending_attachments:
         return list(pending_attachments), 0, False
-    if provider == "openrouter" and not _model_capability(provider, model, "file_upload", remote_capabilities):
-        return list(pending_attachments), len(pending_attachments), True
+    if provider == "openrouter":
+        # Mirrors the backend attachment decoder, not a promise of model support.
+        allowed_mimes = {
+            "text/plain", "text/markdown", "text/csv", "text/tab-separated-values",
+            "text/x-python", "text/javascript", "text/html", "text/css", "text/xml",
+            "application/json", "application/xml", "application/javascript",
+            "application/x-yaml", "text/yaml", "image/png", "image/jpeg",
+            "image/webp", "application/pdf",
+        }
+        if any(_attachment_is_audio(att) for att in pending_attachments):
+            console.print(
+                "This OpenVegas OpenRouter route does not accept attached audio. Remove it with /detach; "
+                "use /voice to record new speech for dictation, or attach a text transcript. "
+                "/voice does not transcribe the attached file.",
+                markup=False,
+            )
+        image_supported = _model_capability(provider, model, "image_input", remote_capabilities)
+        if not _model_capability(provider, model, "file_upload", remote_capabilities):
+            return list(pending_attachments), len(pending_attachments), True
+        unsupported = sum(
+            str(att.mime_type or _sniff_mime_type(att.path)).strip().lower() not in allowed_mimes
+            or (_attachment_is_image(att) and not image_supported)
+            for att in pending_attachments
+        )
+        return list(pending_attachments), unsupported, unsupported > 0
     image_supported = _model_capability(provider, model, "image_input", remote_capabilities)
     if image_supported:
         return list(pending_attachments), 0, False
