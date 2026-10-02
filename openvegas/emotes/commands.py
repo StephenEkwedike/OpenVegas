@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import shlex
 import sys
 import time
 from collections.abc import Callable
@@ -14,6 +13,7 @@ from uuid import uuid4
 import click
 from rich.console import Console
 from rich.live import Live
+from openvegas.cli_command import cli_command
 
 from .artist import artist
 from .controller import EmoteController
@@ -181,12 +181,13 @@ def setup(ctx, source, session_id, pack_id, completion_pack_id, interactive, sta
         click.echo("Supply both --pack ID and --completion-pack ID with --no-interactive, or use --interactive.")
         return
     command = [
-        "openvegas", "emote", "watch", "--source", source, "--session", session_id,
+        "emote", "watch", "--source", source, "--session", session_id,
         "--pack", selected["companion"], "--completion-pack", selected["completion"],
     ]
     if not start_watch:
-        click.echo("Run in a SECOND terminal (POSIX shell; IDs are also shell-safe ASCII tokens):")
-        click.echo(shlex.join(command))
+        shell = "PowerShell" if sys.platform == "win32" else "POSIX shell"
+        click.echo(f"Run in a SECOND terminal ({shell}; same OpenVegas installation):")
+        click.echo(cli_command(*command))
     click.echo("Wait for watcher readiness, then start a NEW turn in the matching producer session.")
     click.echo("Queued/running turns are not replayed. Completion plays only after a successful new turn.")
     click.echo("Ctrl+C stops the watcher. No events means no task animation; setup installs no producer.")

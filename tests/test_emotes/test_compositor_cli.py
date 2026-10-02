@@ -194,9 +194,9 @@ def test_emote_guidance_matches_actual_session_transport(active):
         assert "new session's command" in text
         assert "emote watch" not in text
     else:
-        assert f"openvegas emote setup --source openvegas --session {session_id} --watch" in text
+        assert f"emote setup --source openvegas --session {session_id} --watch" in text
         assert "ready message" in text and "Ctrl+C" in text
-        assert f"openvegas emote watch --source openvegas --session {session_id}" in text
+        assert f"emote watch --source openvegas --session {session_id}" in text
         assert "No pane or watcher was launched" in text
         assert "auto mode has no certified native surfaces" in text
 
@@ -395,7 +395,7 @@ def test_real_legacy_chat_watch_identity_and_readiness(monkeypatch, tmp_path, mo
         if prompt_count == 2:
             return "/emote"
         if prompt_count == 3:
-            match = re.search(r"openvegas emote watch --source (\S+) --session\s+([A-Za-z0-9-]+)",
+            match = re.search(r"emote watch --source (\S+) --session\s+([A-Za-z0-9-]+)",
                               console.file.getvalue())
             assert match is not None, repr(console.file.getvalue())
             identity = match.groups()

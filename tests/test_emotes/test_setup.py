@@ -5,6 +5,7 @@ from unittest.mock import Mock
 import pytest
 from click.testing import CliRunner
 
+from openvegas.cli_command import cli_argv
 from openvegas.emotes import commands
 from openvegas.emotes.commands import EmoteServices, emote
 from openvegas.emotes.resources import Catalog, CatalogEntry, PackRepository, preview_catalog
@@ -38,11 +39,11 @@ def test_script_lists_then_prints_exact_validated_command(services):
     result = runner.invoke(emote, args() + ["--no-interactive"], obj=services)
     assert result.exit_code == 0, result.output
     assert companion in result.output and completion in result.output
-    assert "openvegas emote watch --source" not in result.output
+    assert "emote watch --source" not in result.output
     result = runner.invoke(emote, args() + ["--pack", companion, "--completion-pack", completion], obj=services)
     assert result.exit_code == 0, result.output
-    line = next(line for line in result.output.splitlines() if line.startswith("openvegas emote watch"))
-    assert shlex.split(line) == ["openvegas", "emote", "watch", "--source", "openvegas",
+    line = next(line for line in result.output.splitlines() if "emote watch --source" in line)
+    assert shlex.split(line) == [*cli_argv(), "emote", "watch", "--source", "openvegas",
                                  "--session", "session-1:opaque.uuid", "--pack", companion,
                                  "--completion-pack", completion]
     assert "not equipment" in result.output and "NEW turn" in result.output
@@ -82,7 +83,7 @@ def test_invalid_pack_rejected(services, bad):
     _, completion = ids(services)
     result = CliRunner().invoke(emote, args() + ["--pack", bad, "--completion-pack", completion], obj=services)
     assert result.exit_code != 0
-    assert "openvegas emote watch --source" not in result.output
+    assert "emote watch --source" not in result.output
 
 
 def test_wrong_slots_and_unsafe_session_rejected(services):

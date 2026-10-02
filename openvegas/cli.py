@@ -9348,16 +9348,17 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     console.print("[dim]/emote - emote status, equipment and manual companion setup[/dim]")
                     continue
                 if cmd == "/emote":
+                    from openvegas.cli_command import cli_command
                     if owned_compositor is not None:
                         console.print("Experimental same-window compositor active; not native-certified. History, input, voice and emotes share one terminal owner.")
                         console.print("For a companion instead, reopen chat with OPENVEGAS_CHAT_COMPOSITOR=auto or off, then run /emote for that new session's command.")
                     else:
                         console.print("Same-window emotes are off; auto mode has no certified native surfaces.")
                         console.print("Choose a public companion and celebration in a second terminal (no purchase):")
-                        console.print(f"openvegas emote setup --source openvegas --session {runtime_session_id} --watch", markup=False)
+                        console.print(cli_command("emote", "setup", "--source", "openvegas", "--session", runtime_session_id, "--watch"), markup=False, soft_wrap=True)
                         console.print("Wait for the companion's ready message, then send your next prompt here. Ctrl+C in the companion terminal stops only the animation.")
                         console.print("To use your already-equipped packs instead:")
-                        console.print(f"openvegas emote watch --source openvegas --session {runtime_session_id}", markup=False)
+                        console.print(cli_command("emote", "watch", "--source", "openvegas", "--session", runtime_session_id), markup=False, soft_wrap=True)
                         console.print("This watches only this chat session's future turns. No pane or watcher was launched.")
                     console.print("Manage owned equipment with `openvegas emote`. Owned packs require server verification. Public previews are not purchases. Native compatibility remains under review.")
                     continue
