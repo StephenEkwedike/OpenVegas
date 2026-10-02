@@ -60,3 +60,27 @@ def test_candidate_source_digest_tracks_code_and_resources(monkeypatch, tmp_path
     before = candidate.source_digest()
     (tmp_path / ".env").write_text("ignored secret")
     assert candidate.source_digest() == before
+
+
+@pytest.mark.parametrize("system", ["Darwin", "Linux", "Windows"])
+def test_framework_collection_only_on_macos(monkeypatch, tmp_path, system):
+    monkeypatch.setattr(candidate.platform, "system", lambda: system)
+    monkeypatch.setattr(candidate.platform, "machine", lambda: "arm64")
+    monkeypatch.setattr(candidate, "source_digest", lambda: "fixture")
+    captured = []
+
+    class BuildNotExecuted(Exception):
+        pass
+
+    def capture(args, **kwargs):
+        captured.extend(args)
+        raise BuildNotExecuted
+
+    monkeypatch.setattr(candidate, "run", capture)
+    with pytest.raises(BuildNotExecuted):
+        candidate.main(["--output", str(tmp_path / "candidate")])
+    for framework in ("objc", "Foundation", "Security", "LocalAuthentication"):
+        assert (framework in captured) == (system == "Darwin")
+        if system == "Darwin":
+            assert captured[captured.index(framework) - 1] == "--collect-all"
+    assert captured[-1] == str(ROOT / "scripts/frozen_entry.py")

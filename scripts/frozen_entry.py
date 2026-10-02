@@ -13,6 +13,19 @@ def verify_bundle():
 
     from openvegas.emotes.resources import PackRepository
 
+    local_authentication_imported = None
+    if sys.platform == "darwin":
+        # Import the bridge and framework symbols only; never instantiate LAContext.
+        import objc  # noqa: F401
+        import Security  # noqa: F401
+        from Foundation import NSObject  # noqa: F401
+        from LocalAuthentication import (  # noqa: F401
+            LAContext,
+            LAPolicyDeviceOwnerAuthenticationWithBiometrics,
+        )
+
+        local_authentication_imported = True
+
     repository = PackRepository()
     names = repository.names()
     if len(names) != 6:
@@ -26,6 +39,7 @@ def verify_bundle():
         "numpy": numpy.__version__,
         "portaudio_loaded": bool(sounddevice.get_portaudio_version()[0]),
         "keyring_backend": type(backend).__module__ + "." + type(backend).__name__,
+        "local_authentication_imported": local_authentication_imported,
         "scope": "bundle dependency check, not microphone/biometric/native UX approval",
     }
     if not report["frozen"] or not report["portaudio_loaded"]:

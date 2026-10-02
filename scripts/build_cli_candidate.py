@@ -116,6 +116,14 @@ def main(argv=None):
         "openvegas",
         str(ROOT / "scripts/frozen_entry.py"),
     ]
+    if operating_system == "darwin":
+        # collect-all includes submodules/data/binaries for lazy PyObjC frameworks.
+        command[-1:-1] = [
+            "--collect-all", "objc",
+            "--collect-all", "Foundation",
+            "--collect-all", "Security",
+            "--collect-all", "LocalAuthentication",
+        ]
     with tempfile.TemporaryDirectory(prefix="openvegas-build-home-") as build_home:
         run(command, cwd=ROOT, env=clean_environment(build_home))
     binary = output / "bin" / (name + (".exe" if operating_system == "win32" else ""))

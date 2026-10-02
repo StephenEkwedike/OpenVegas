@@ -242,7 +242,7 @@ def _touchid_prompt_via_local_auth(reason: str = "Unlock OpenVegas session") -> 
     if sys.platform != "darwin":
         return False
     try:
-        # Optional dependency: pyobjc-framework-LocalAuthentication
+        # Declared macOS runtime dependency; still fail safely if damaged/missing.
         from LocalAuthentication import (  # type: ignore
             LAContext,
             LAPolicyDeviceOwnerAuthenticationWithBiometrics,

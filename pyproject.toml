@@ -13,6 +13,7 @@ dependencies = [
     "rich>=13.0",
     "prompt-toolkit>=3.0",
     "keyring>=25.0",
+    "pyobjc-framework-LocalAuthentication>=12.2.2,<13; sys_platform == 'darwin'",
     "Pillow>=10.0",
     "qrcode[pil]>=7.4",
     "textual>=0.50",

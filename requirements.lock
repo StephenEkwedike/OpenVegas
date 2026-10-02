@@ -1,6 +1,11 @@
 # Tested Python 3.11 runtime + dev constraints, generated 2026-09-11.
 # Install with: pip install -c requirements.lock -e ".[server,dev]"
-# Optional audio extras and OS/build tooling are not locked by this file.
+# Optional audio extras and build tooling are not locked by this file.
+# macOS authentication runtime; ignored on Linux and Windows.
+pyobjc-core==12.2.2; sys_platform == "darwin"
+pyobjc-framework-Cocoa==12.2.2; sys_platform == "darwin"
+pyobjc-framework-Security==12.2.2; sys_platform == "darwin"
+pyobjc-framework-LocalAuthentication==12.2.2; sys_platform == "darwin"
 pypdf==6.19.0
 amqp==5.3.1
 annotated-doc==0.0.5
