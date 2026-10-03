@@ -20,7 +20,7 @@ from prompt_toolkit.output.vt100 import Vt100_Output
 from rich.console import Console
 
 from openvegas.emotes.bridge import ChatEmoteBridge
-from openvegas.emotes.compositor import OwnedChatCompositor, TurnCancelled
+from openvegas.emotes.compositor import OwnedChatCompositor, TurnCancelled, _SafeAnsi
 from openvegas.emotes.controller import State
 from openvegas.emotes.events import Event, Phase
 from openvegas.emotes.render import fit_frame
@@ -56,6 +56,38 @@ async def running(pack, clock, **kwargs):
 
 def mouse(kind, y=0):
     return MouseEvent(Point(x=0, y=y), kind, MouseButton.LEFT, frozenset())
+
+
+@pytest.mark.parametrize("control", [
+    "\x9d52;c;hidden\x9c", "\x90hidden\x1b\\", "\x98hidden\x9c",
+    "\x9ehidden\x9c", "\x9fhidden\x9c", "\x1b]52;c;hidden\x9c",
+    "\x9b2J", "\x1b[12\x18", "\x1b]hidden\x1a", "\x1bXhidden\x1b\\",
+])
+def test_control_sequences_across_every_write_boundary(control):
+    text = "before" + control + "after"
+    for split in range(len(text) + 1):
+        sanitizer = _SafeAnsi()
+        assert sanitizer.feed(text[:split]) + sanitizer.feed(text[split:]) == "beforeafter"
+
+
+def test_c1_color_is_normalized_for_history_parser():
+    sanitizer = _SafeAnsi()
+    assert sanitizer.feed("\x9b31mred\x9b0m") == "\x1b[31mred\x1b[0m"
+
+
+@pytest.mark.parametrize("start", ["\x90", "\x98", "\x9e", "\x9f", "\x1bP", "\x1bX", "\x1b^", "\x1b_"])
+@pytest.mark.parametrize("end", ["\x9c", "\x1b\\"])
+def test_non_osc_strings_ignore_embedded_bell(start, end):
+    text = "before" + start + "hidden\x07still-hidden" + end + "after"
+    for split in range(len(text) + 1):
+        sanitizer = _SafeAnsi()
+        assert sanitizer.feed(text[:split]) + sanitizer.feed(text[split:]) == "beforeafter"
+
+
+@pytest.mark.parametrize("start", ["\x9d", "\x1b]"])
+def test_osc_accepts_bell_termination(start):
+    sanitizer = _SafeAnsi()
+    assert sanitizer.feed("before" + start + "hidden\x07after") == "beforeafter"
 
 
 @pytest.mark.asyncio
@@ -428,11 +460,16 @@ async def test_single_owner_output_sanitization_replay_and_restore(pack, clock):
         owner.append_output("\x07\x1b[1A\x1b[31mred\ncontinued\x1b[0m normal\n")
         owner.append_output("\x1b[3")
         owner.append_output("2mgreen\x1b[0m\n")
+        owner.append_output("\x9d52;c;hidden-c1")
+        owner.append_output("\x9c\x9b31mvisible-c1\x9b0m\n")
         await asyncio.sleep(0.03)
         assert "secret" not in owner.history_buffer.text
+        assert "hidden-c1" not in owner.history_buffer.text
+        assert "visible-c1" in owner.history_buffer.text
         rows = owner._rows
         red_chars = [value for row in rows for style, value in row if "ansired" in style]
         assert "continued" in "".join(red_chars)
+        assert "visible-c1" in "".join(red_chars)
         assert any("bg:#333333" in style for row in rows for style, _ in row)
         await owner.close()
         assert owner.console.file is transcript
@@ -440,6 +477,7 @@ async def test_single_owner_output_sanitization_replay_and_restore(pack, clock):
         result = transcript.getvalue()
         assert "\x1b[2J" not in result and "\x1b]52" not in result and "\x1b[1A" not in result
         assert result.count("user prompt") == 1
+        assert "hidden-c1" not in result and result.count("visible-c1") == 1
         await owner.close()
         assert transcript.getvalue() == result
 

@@ -79,12 +79,16 @@ class _SafeAnsi:
     def __init__(self):
         self.mode = "text"
         self.pending = ""
+        self.bell_terminated = False
 
     def feed(self, text: str) -> str:
         out = []
         for char in text:
-            if self.mode == "osc":
-                if char == "\x07":
+            if char in "\x18\x1a\x9c":
+                # CAN/SUB cancel incomplete sequences; ST also has a C1 form.
+                self.mode, self.pending = "text", ""
+            elif self.mode == "osc":
+                if char == "\x07" and self.bell_terminated:
                     self.mode = "text"
                 elif char == "\x1b":
                     self.mode = "osc_end"
@@ -93,8 +97,9 @@ class _SafeAnsi:
             elif self.mode == "escape":
                 if char == "[":
                     self.mode, self.pending = "csi", ""
-                elif char in "]P_^":
+                elif char in "]PX_^":
                     self.mode = "osc"
+                    self.bell_terminated = char == "]"
                 else:
                     self.mode = "text"
             elif self.mode == "csi":
@@ -111,6 +116,11 @@ class _SafeAnsi:
                     self.mode = "text"
             elif char == "\x1b":
                 self.mode = "escape"
+            elif char == "\x9b":
+                self.mode, self.pending = "csi", ""
+            elif char in "\x90\x98\x9d\x9e\x9f":
+                self.mode = "osc"
+                self.bell_terminated = char == "\x9d"
             elif char == "\n" or char == "\t" or (char >= " " and not "\x7f" <= char <= "\x9f"):
                 out.append(char)
         return "".join(out)

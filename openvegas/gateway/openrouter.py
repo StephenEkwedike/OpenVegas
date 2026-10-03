@@ -274,6 +274,19 @@ def _request_tool_version(req: Any) -> str:
     return _retained_tool_version(req, native) if native is not None else FLAT_V2
 
 
+def _decode_tool_arguments(raw: str) -> Any:
+    def unique_object(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                # Never reflect file paths or other provider argument contents.
+                raise ValueError("Duplicate tool argument key")
+            result[key] = value
+        return result
+
+    return json.loads(raw, object_pairs_hook=unique_object)
+
+
 def _flat_tool(function: dict, model: str, *, schema_version: str = FLAT_V2) -> dict:
     definitions = {d["function"]["name"]: d["function"]
                    for d in _versioned_tool_definitions(model, schema_version)}
@@ -283,7 +296,7 @@ def _flat_tool(function: dict, model: str, *, schema_version: str = FLAT_V2) -> 
     raw = function.get("arguments")
     if not isinstance(raw, str) or len(raw.encode("utf-8")) > 32_000:
         raise ValueError("Invalid tool arguments")
-    args = json.loads(raw)
+    args = _decode_tool_arguments(raw)
     schema = definition["parameters"]
     if (not isinstance(args, dict) or set(args) - schema["properties"].keys()
             or not set(schema["required"]) <= args.keys()):
@@ -735,7 +748,7 @@ def parse_response(body: Any, req: Any, model_config: dict, parse_tool, *, expec
             arguments = function.get("arguments")
             if not isinstance(arguments, str) or len(arguments.encode("utf-8")) > 32_000:
                 raise ValueError("Invalid tool arguments")
-        tool = json.loads(arguments)
+        tool = _decode_tool_arguments(arguments)
         if (
             not isinstance(tool, dict)
             or set(tool) - {"tool_name", "arguments", "shell_mode", "timeout_sec"}

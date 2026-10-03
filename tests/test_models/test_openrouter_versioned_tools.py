@@ -26,6 +26,52 @@ FAMILIES = ("openai", "anthropic", "google", "mistralai")
 OPERATIONS = ("Read", "Search", "Write", "FindAndReplace", "InsertAtEnd", "Bash", "List")
 
 
+@pytest.mark.parametrize("version", [GENERIC_V1, FLAT_V2, GOOGLE_FLAT_V1])
+@pytest.mark.parametrize("escaped", [False, True])
+def test_duplicate_tool_argument_keys_fail_without_rewriting_private_response(version, escaped):
+    req, _ = continuation(version, "google/schema-fixture" if version == GOOGLE_FLAT_V1 else "openai/schema-fixture")
+    message = assistant(version)
+    key = r"p\u0061th" if escaped else "path"
+    arguments = '{"path":"first.txt","' + key + '":"second.txt"}'
+    if version == GENERIC_V1:
+        arguments = '{"tool_name":"Read","arguments":' + arguments + '}'
+    message["tool_calls"][0]["function"]["arguments"] = arguments
+    original = copy.deepcopy(message)
+    parsed = []
+
+    def parse_tool(*args, **kwargs):
+        parsed.append(args)
+        return AIGateway._parse_local_tool_call(*args, **kwargs)
+
+    with pytest.raises(ValueError, match="Duplicate tool argument key"):
+        openrouter.parse_response(response(req, message), req, CONFIG, parse_tool)
+    assert parsed == []
+    assert message == original
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_tool_response_fails_once_without_native_capture():
+    req = request(native=True)
+    message = assistant(FLAT_V2)
+    message["tool_calls"][0]["function"]["arguments"] = '{"path":"first.txt","path":"second.txt"}'
+    original = copy.deepcopy(message)
+    sent = []
+
+    def supplier(wire):
+        sent.append(wire)
+        return httpx.Response(200, json=response(req, message))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(supplier), trust_env=False) as client:
+        with pytest.raises(openrouter.OpenRouterFailure) as exc:
+            await openrouter.complete(
+                req, KEY, model_config=CONFIG, capabilities=CAPS,
+                parse_tool=AIGateway._parse_local_tool_call, client=client,
+            )
+    assert len(sent) == 1 and message == original
+    assert getattr(req, "_native_envelope_capture", None) is None
+    assert PRIVATE not in str(exc.value) and "second.txt" not in str(exc.value)
+
+
 def request(model="openai/schema-fixture", *, native=False):
     req = InferenceRequest("user:" + str(uuid4()), "openrouter", model,
                            [{"role": "user", "content": "Read fixture.txt"}],
