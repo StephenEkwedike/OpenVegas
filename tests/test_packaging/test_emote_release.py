@@ -291,15 +291,17 @@ def test_offline_guard_allows_local_hostname_query(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
-def test_installed_cli_loads_without_optional_curses(installed):
+def test_installed_cli_loads_without_optional_curses(installed, tmp_path):
     python, _, root = installed
+    home = tmp_path / "fresh-home"
+    home.mkdir()
     code = (
         "import sys, runpy, json; sys.modules['curses'] = None; "
         "m = runpy.run_path(" + repr(str(SCRIPT)) + "); "
         "print(json.dumps(m['probe']()))"
     )
     result = subprocess.run([str(python), "-I", "-B", "-c", code], cwd=root,
-                            env=verifier.clean_environment(root), capture_output=True,
+                            env=verifier.clean_environment(home), capture_output=True,
                             text=True, timeout=30, check=False)
     assert result.returncode == 0, result.stderr
     report = json.loads(result.stdout)
