@@ -9,7 +9,7 @@ import signal
 import subprocess
 
 from .bridge import ChatEmoteBridge
-from .events import IDENTITY
+from .events import IDENTITY, Phase
 from .manifest import parse_json
 from .spool import EventSpool, _locked, _names, _read, atomic_write
 
@@ -77,15 +77,42 @@ def run_command(
         raise ValueError("Invalid source/session identity")
     spool = spool if spool is not None else EventSpool()
     generation = reserve_generation(spool, source=source, session_id=session_id)
+    interrupted = False
+    publishing = False
+    completion_published = False
+    turn = None
+
+    def retire():
+        bridge.cancel(turn=turn)
+        if completion_published:
+            # A signal can interrupt the success write after finish has already
+            # made the turn terminal. EXIT also retires that pending effect.
+            bridge.close()
+
+    def publish(event):
+        nonlocal publishing, completion_published
+        if event.phase == Phase.COMPLETE and interrupted:
+            # finish() marks the bridge terminal before publication. Cancellation
+            # in that gap needs EXIT, not a success event followed by cleanup.
+            bridge.close()
+            return False
+        publishing = True
+        try:
+            if event.phase == Phase.COMPLETE:
+                completion_published = True
+            return spool.publish(event) if generation else False
+        finally:
+            publishing = False
+            if interrupted and event.phase not in {Phase.CANCEL, Phase.EXIT}:
+                retire()
+
     bridge = ChatEmoteBridge(
         session_id,
-        publish=spool.publish if generation else lambda _: False,
+        publish=publish,
         source=source,
         initial_generation=(generation or 1) - 1,
     )
-    turn = bridge.begin()
     child = None
-    interrupted = False
     pending_signal = None
     previous = {}
     try:
@@ -96,6 +123,12 @@ def run_command(
     def receive(signum, _frame):
         nonlocal interrupted, pending_signal
         interrupted = True
+        # Retire cosmetics immediately, even if the child handles the signal
+        # and keeps running. A later zero exit must not celebrate this turn.
+        # Do not reenter the spool while its nonblocking lock is held: that
+        # would drop CANCEL while permanently marking the bridge terminal.
+        if not publishing:
+            retire()
         # SIGINT from the terminal already reaches the inherited foreground
         # group. Do not send a duplicate interrupt to the child. Other signals
         # commonly target the wrapper PID and are forwarded to its direct child.
@@ -114,6 +147,10 @@ def run_command(
         if pending_signal is not None:
             bridge.cancel(turn=turn)
             return -pending_signal
+        turn = bridge.begin()
+        if pending_signal is not None:
+            bridge.cancel(turn=turn)
+            return -pending_signal
         try:
             child = subprocess.Popen(
                 list(command),
@@ -129,7 +166,11 @@ def run_command(
         except OSError:
             bridge.finish(False, turn=turn)
             return 126
-        if pending_signal is not None and child.poll() is None:
+        if (
+            pending_signal is not None
+            and (pending_signal != signal.SIGINT or not terminal_group)
+            and child.poll() is None
+        ):
             try:
                 child.send_signal(pending_signal)
             except ProcessLookupError:
@@ -149,5 +190,8 @@ def run_command(
         # does not sleep or remain alive for cosmetics.
         return code
     finally:
+        # Unexpected setup/wait exceptions must not leave a live busy lease.
+        # Completed turns are already terminal, so their authored effect stays.
+        bridge.cancel(turn=turn)
         for sig, handler in previous.items():
             signal.signal(sig, handler)

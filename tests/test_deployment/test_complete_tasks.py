@@ -39,6 +39,93 @@ def test_preview_never_invokes_agent(project, monkeypatch):
     assert runner.main(["--manifest", str(project)]) == 1
 
 
+def block_requirement(project, *, valid=True):
+    data = json.loads(project.read_text())
+    task_id = next(iter(data["requirements"]))
+    data["requirements"][task_id].update(
+        status="blocked", reason="Operator acceptance deferred", owner="Operator",
+        next_step="Provide native acceptance" if valid else "",
+    )
+    project.write_text(json.dumps(data))
+
+
+def test_decision_is_read_only_and_requires_reconciliation(project, monkeypatch, capsys):
+    before = project.read_bytes()
+    capsys.readouterr()
+    monkeypatch.setattr(runner, "run_agent", lambda *a: pytest.fail("decision executed"))
+    assert runner.main(["--manifest", str(project), "--decision"]) == 0
+    decision = json.loads(capsys.readouterr().out)
+    assert decision["action"] == "run"
+    assert len(decision["actionable_ids"]) == 1
+    assert project.read_bytes() == before
+    assert not project.with_name("state.json.runner.lock").exists()
+
+
+def test_all_blocked_needs_no_agent_or_cli(project, monkeypatch, capsys):
+    block_requirement(project)
+    capsys.readouterr()
+    monkeypatch.setattr(runner.shutil, "which", lambda *a: pytest.fail("looked for CLI"))
+    monkeypatch.setattr(runner, "run_agent", lambda *a: pytest.fail("blocked executed"))
+    assert runner.main(["--manifest", str(project), "--decision"]) == 0
+    assert json.loads(capsys.readouterr().out)["action"] == "blocked"
+    assert runner.main(["--manifest", str(project), "--run"]) == 1
+    assert not project.with_name("state.json.runner.lock").exists()
+
+
+def test_incomplete_blocker_metadata_cannot_suppress_work(project, capsys):
+    block_requirement(project, valid=False)
+    capsys.readouterr()
+    assert runner.main(["--manifest", str(project), "--decision"]) == 0
+    assert json.loads(capsys.readouterr().out)["action"] == "run"
+
+
+def test_mixed_queue_still_launches(project, monkeypatch):
+    import task_completion as gate
+    block_requirement(project)
+    with (project.parent / "plan.md").open("a") as f:
+        f.write("- [ ] Independent local fix\n")
+    calls = []
+    monkeypatch.setattr(runner.shutil, "which", lambda *a: "/safe/codex")
+    def agent(argv, prompt, timeout):
+        calls.append(argv)
+        response(argv, "blocked")
+        return 0
+    monkeypatch.setattr(runner, "run_agent", agent)
+    assert runner.main(["--manifest", str(project), "--run", "--max-rounds", "1"]) == 1
+    assert len(calls) == 1
+    root, data = gate.load_manifest(project)
+    assert gate.execution_queue(root, data)["actionable"]
+
+
+def test_blanket_blocked_response_does_not_stop_first_cycle(project, monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr(runner.shutil, "which", lambda *a: "/safe/codex")
+    def agent(argv, prompt, timeout):
+        calls.append(argv)
+        response(argv, "blocked")
+        return 0
+    monkeypatch.setattr(runner, "run_agent", agent)
+    assert runner.main(["--manifest", str(project), "--run"]) == 1
+    assert len(calls) == 2
+    output = capsys.readouterr().out
+    assert "rejected blanket blocker claim" in output
+    assert "STALLED" in output
+
+
+def test_decision_respects_existing_lock(project, capsys):
+    lock = project.with_name("state.json.runner.lock")
+    lock.write_text("interactive coordinator")
+    capsys.readouterr()
+    assert runner.main(["--manifest", str(project), "--decision"]) == 0
+    assert json.loads(capsys.readouterr().out)["action"] == "locked"
+    assert lock.read_text() == "interactive coordinator"
+
+
+def test_decision_and_run_are_mutually_exclusive(project):
+    with pytest.raises(SystemExit):
+        runner.main(["--manifest", str(project), "--decision", "--run"])
+
+
 def test_actual_loop_advances_automatically_and_rejects_false_completion(project, monkeypatch):
     calls = []
     monkeypatch.setattr(runner.shutil, "which", lambda name: "/safe/codex")

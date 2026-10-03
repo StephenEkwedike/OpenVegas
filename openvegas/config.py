@@ -110,7 +110,8 @@ def ensure_config_dir() -> None:
 
 
 def load_config() -> dict:
-    ensure_config_dir()
+    # Reading defaults must work before a user has saved any local state.
+    # Persistence creates and secures the directory in save_config_atomic().
     current_default_backend_url = _current_default_backend_url()
     if CONFIG_FILE.exists():
         with open(CONFIG_FILE, encoding="utf-8") as f:

@@ -226,6 +226,203 @@ def test_long_child_wait_renews_lease_without_threads_or_capture(
     assert capsys.readouterr() == ("", "")
 
 
+@pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGTERM])
+@pytest.mark.parametrize("exit_code", [0, 37])
+def test_interrupt_retires_animation_before_child_finishes(
+    tmp_path, monkeypatch, pack, clock, sig, exit_code
+):
+    from openvegas.emotes import EmoteController, State, runner
+
+    events = []
+    spool = EventSpool(tmp_path / "events")
+    consumer = EmoteController(pack, source="openvegas", session_id="s", clock=clock)
+    monkeypatch.setattr(spool, "publish", lambda e: events.append(e) or consumer.handle(e))
+    monkeypatch.setattr(runner.os, "isatty", lambda _fd: False)
+    forwarded = []
+
+    class Child:
+        waits = 0
+
+        def poll(self):
+            return None
+
+        def send_signal(self, signum):
+            forwarded.append(signum)
+            # The child can ignore cancellation; cosmetics must already stop.
+            assert consumer.current_state == State.CANCELLED
+
+        def wait(self, *, timeout):
+            self.waits += 1
+            if self.waits == 1:
+                assert consumer.current_state == State.ACTIVE
+                signal.getsignal(sig)(sig, None)
+                assert [e.phase for e in events] == [Phase.START, Phase.CANCEL]
+            assert consumer.current_state == State.CANCELLED
+            if self.waits <= 2:
+                clock.advance(timeout)
+                raise subprocess.TimeoutExpired("synthetic-child", timeout)
+            return exit_code
+
+    monkeypatch.setattr(runner.subprocess, "Popen", lambda *args, **kwargs: Child())
+    before = signal.getsignal(sig)
+    assert run_command(["synthetic-child"], session_id="s", spool=spool) == exit_code
+    assert forwarded == [sig]
+    assert [e.phase for e in events] == [Phase.START, Phase.CANCEL]
+    assert signal.getsignal(sig) == before
+
+
+@pytest.mark.parametrize("phase", [Phase.START, Phase.BUSY, Phase.COMPLETE])
+def test_interrupt_during_spool_write_retires_after_lock_release(tmp_path, monkeypatch, phase):
+    from openvegas.emotes import runner
+    from openvegas.emotes import spool as spool_module
+
+    spool = EventSpool(tmp_path / "events")
+    atomic_write = spool_module.atomic_write
+    interrupted = False
+    forwarded = []
+
+    def write(fd, name, data):
+        nonlocal interrupted
+        if json.loads(data).get("phase") == phase.value and not interrupted:
+            interrupted = True
+            signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+        return atomic_write(fd, name, data)
+
+    class Child:
+        waits = 0
+
+        def poll(self):
+            return 0 if self.waits > 1 else None
+
+        def send_signal(self, signum):
+            forwarded.append(signum)
+
+        def wait(self, *, timeout):
+            self.waits += 1
+            if self.waits == 1:
+                raise subprocess.TimeoutExpired("synthetic-child", timeout)
+            return 0
+
+    launched = []
+    monkeypatch.setattr(spool_module, "atomic_write", write)
+    monkeypatch.setattr(runner.subprocess, "Popen", lambda *a, **k: launched.append(True) or Child())
+    before = signal.getsignal(signal.SIGTERM)
+    # Use an inert preexisting handler so the startup regression stays in-process.
+    signal.signal(signal.SIGTERM, lambda *_: None)
+    try:
+        result = run_command(["synthetic-child"], session_id="s", spool=spool)
+        events = spool.drain(source="openvegas", session_id="s")
+        assert interrupted
+        assert events[-1].phase == (Phase.EXIT if phase == Phase.COMPLETE else Phase.CANCEL)
+        assert [e.sequence for e in events] == list(range(len(events)))
+        assert result == (-signal.SIGTERM if phase == Phase.START else 0)
+        assert bool(launched) == (phase != Phase.START)
+        assert forwarded == ([signal.SIGTERM] if phase == Phase.BUSY else [])
+    finally:
+        signal.signal(signal.SIGTERM, before)
+
+
+@pytest.mark.parametrize("error", [RuntimeError, KeyboardInterrupt])
+def test_unexpected_wait_error_cancels_and_restores_handlers(tmp_path, monkeypatch, error):
+    from openvegas.emotes import runner
+
+    spool = EventSpool(tmp_path / "events")
+    before = signal.getsignal(signal.SIGINT)
+
+    class Child:
+        def wait(self, *, timeout):
+            raise error("synthetic wait failure")
+
+    monkeypatch.setattr(runner.subprocess, "Popen", lambda *a, **k: Child())
+    with pytest.raises(error, match="synthetic wait failure"):
+        run_command(["synthetic-child"], session_id="s", spool=spool)
+    assert signal.getsignal(signal.SIGINT) == before
+    events = spool.drain(source="openvegas", session_id="s")
+    assert [e.phase for e in events] == [Phase.START, Phase.CANCEL]
+
+
+def test_interrupt_during_handler_setup_does_not_start_turn_or_child(tmp_path, monkeypatch):
+    from openvegas.emotes import runner
+
+    spool = EventSpool(tmp_path / "events")
+    install = signal.signal
+    before = signal.getsignal(signal.SIGTERM)
+
+    def signal_during_install(sig, handler):
+        previous = install(sig, handler)
+        if sig == signal.SIGTERM and handler is not before:
+            handler(sig, None)
+        return previous
+
+    monkeypatch.setattr(runner.signal, "signal", signal_during_install)
+    monkeypatch.setattr(runner.subprocess, "Popen", lambda *a, **k: pytest.fail("child launched"))
+    assert run_command(["synthetic-child"], session_id="s", spool=spool) == -signal.SIGTERM
+    assert signal.getsignal(signal.SIGTERM) == before
+    assert spool.drain(source="openvegas", session_id="s") == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX foreground process groups")
+@pytest.mark.parametrize("foreground", [False, True])
+@pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGTERM])
+def test_interrupt_during_child_creation_respects_foreground_group(tmp_path, monkeypatch, foreground, sig):
+    from openvegas.emotes import runner
+
+    spool = EventSpool(tmp_path / "events")
+    monkeypatch.setattr(runner.os, "isatty", lambda _fd: foreground)
+    monkeypatch.setattr(runner.os, "tcgetpgrp", lambda _fd: 42)
+    monkeypatch.setattr(runner.os, "getpgrp", lambda: 42)
+    forwarded = []
+
+    class Child:
+        def poll(self):
+            return None
+
+        def send_signal(self, signum):
+            forwarded.append(signum)
+
+        def wait(self, *, timeout):
+            return 0
+
+    def popen(*args, **kwargs):
+        signal.getsignal(sig)(sig, None)
+        return Child()
+
+    monkeypatch.setattr(runner.subprocess, "Popen", popen)
+    before = signal.getsignal(sig)
+    assert run_command(["synthetic-child"], session_id="s", spool=spool) == 0
+    assert forwarded == ([] if foreground and sig == signal.SIGINT else [sig])
+    assert signal.getsignal(sig) == before
+    assert [e.phase for e in spool.drain(source="openvegas", session_id="s")] == [Phase.START, Phase.CANCEL]
+
+
+@pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGTERM])
+def test_interrupt_before_success_publication_never_celebrates(tmp_path, monkeypatch, sig):
+    from openvegas.emotes import runner
+
+    spool = EventSpool(tmp_path / "events")
+    emit = runner.ChatEmoteBridge._emit
+
+    def interrupted_emit(bridge, phase):
+        if phase == Phase.COMPLETE:
+            signal.getsignal(sig)(sig, None)
+        return emit(bridge, phase)
+
+    class Child:
+        def poll(self):
+            return 0
+
+        def wait(self, *, timeout):
+            return 0
+
+    monkeypatch.setattr(runner.ChatEmoteBridge, "_emit", interrupted_emit)
+    monkeypatch.setattr(runner.subprocess, "Popen", lambda *a, **k: Child())
+    before = signal.getsignal(sig)
+    assert run_command(["synthetic-child"], session_id="s", spool=spool) == 0
+    assert signal.getsignal(sig) == before
+    events = spool.drain(source="openvegas", session_id="s")
+    assert [e.phase for e in events] == [Phase.START, Phase.EXIT]
+
+
 def test_257_distinct_sessions_use_one_monotonic_global_counter(tmp_path):
     spool = EventSpool(tmp_path / "events")
     for index in range(257):

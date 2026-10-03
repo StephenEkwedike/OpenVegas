@@ -14,6 +14,21 @@ def _bind_temp_config(monkeypatch: pytest.MonkeyPatch, tmp_path):
     monkeypatch.setattr(cfg, "CONFIG_FILE", tmp_path / "config.json")
 
 
+def test_fresh_config_read_does_not_create_state(monkeypatch, tmp_path):
+    directory = tmp_path / "new-profile" / ".openvegas"
+    _bind_temp_config(monkeypatch, directory)
+    with monkeypatch.context() as guarded:
+        guarded.setattr(cfg, "ensure_config_dir", lambda: pytest.fail("read attempted persistence"))
+        loaded = cfg.load_config()
+        assert loaded["session"] == {}
+        assert not directory.exists()
+    cfg.save_config(loaded)
+    assert cfg.CONFIG_FILE.is_file()
+    if os.name == "posix":
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+        assert stat.S_IMODE(cfg.CONFIG_FILE.stat().st_mode) == 0o600
+
+
 def test_save_session_force_config_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path):
     _bind_temp_config(monkeypatch, tmp_path)
     monkeypatch.setenv("OPENVEGAS_FORCE_CONFIG_REFRESH_STORAGE", "1")

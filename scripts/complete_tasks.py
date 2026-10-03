@@ -52,6 +52,29 @@ SCHEMA = {
 }
 
 
+def launch_decision(queue: dict, lock: Path) -> dict:
+    """Derive scheduling from audited records, never a prose status summary.
+
+    A run decision requests bounded reconciliation/implementation, not permission
+    to cross native, spending or release gates within an unfinished requirement.
+    """
+    if lock.exists() or lock.is_symlink():
+        action, reason = "locked", "Another owner holds the runner lock"
+    elif queue["complete"]:
+        action, reason = "complete", "Every acceptance record passes"
+    elif queue["actionable"]:
+        action, reason = "run", "Unfinished requirements lack complete external-blocker records"
+    else:
+        action, reason = "blocked", "Every unfinished requirement has an explicit external blocker"
+    return {
+        "action": action,
+        "reason": reason,
+        "counts": queue["counts"],
+        "actionable_ids": [item["id"] for item in queue["actionable"]],
+        "blocked_ids": [item["id"] for item in queue["blocked"]],
+    }
+
+
 def command(executable: str, root: Path, schema: Path, result: Path) -> list[str]:
     return [executable, "exec", "--ephemeral", "--ignore-user-config",
             "--sandbox", "workspace-write", "-c", 'approval_policy="never"',
@@ -119,7 +142,9 @@ def progress_fingerprint(root: Path, manifest: Path) -> str:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, required=True)
-    parser.add_argument("--run", action="store_true", help="Actually invoke Codex; otherwise preview only")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--run", action="store_true", help="Actually invoke Codex; otherwise preview only")
+    mode.add_argument("--decision", action="store_true", help="Print audited launch decision; no execution")
     parser.add_argument("--max-rounds", type=int, default=12)
     parser.add_argument("--round-timeout", type=int, default=900)
     args = parser.parse_args(argv)
@@ -131,12 +156,22 @@ def main(argv=None) -> int:
     try:
         root, data = load_manifest(path)
         queue = execution_queue(root, data)
+        decision = launch_decision(queue, lock)
+        if args.decision:
+            print(json.dumps(decision, indent=2))
+            return 0
         if queue["complete"]:
             print("COMPLETE - all acceptance records pass")
             return 0
         if not args.run:
             print(json.dumps({"mode": "preview", "rounds": args.max_rounds,
                               "queue": queue}, indent=2))
+            return 1
+        if decision["action"] == "locked":
+            print("LOCKED - another coordinator owns the checkout; no execution")
+            return 2
+        if decision["action"] == "blocked":
+            print("BLOCKED - all remaining requirements have explicit external blockers")
             return 1
         executable = shutil.which("codex")
         if executable is None:
@@ -181,12 +216,14 @@ def main(argv=None) -> int:
                     return 0
                 if response["status"] == "complete":
                     print("INCOMPLETE - rejected agent completion claim; gate still has unfinished items")
+                if response["status"] == "blocked" and after["actionable"]:
+                    print("INCOMPLETE - rejected blanket blocker claim; reconcile remaining queued items")
                 if response["status"] == "blocked" and not after["actionable"]:
                     print("BLOCKED - remaining requirements need recorded external actions")
                     return 1
                 stalled = stalled + 1 if before == progress_fingerprint(root, path) else 0
                 if stalled >= 2:
-                    print("BLOCKED - two cycles without recorded progress; coordinator intervention required")
+                    print("STALLED - two cycles without recorded progress; not an external-blocker finding")
                     return 1
             print("INCOMPLETE - batch limit reached; scheduled continuation may resume")
             return 1

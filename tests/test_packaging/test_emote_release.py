@@ -71,7 +71,11 @@ def test_real_installed_wheel_and_cli_dispatch(installed):
     code, report = verify(installed)
     assert code == 0, report
     assert report["status"] == "pass"
-    assert len(report["checks"]) == 22
+    assert len(report["checks"]) == 23
+    auth = next(item for item in report["checks"]
+                if item["name"] == "clean-home-public-auth-discovery")
+    assert auth["detail"]["real_supabase_client_constructor"] is True
+    assert report["auth_write_violations"] == []
     assert report["guard_violations"] == []
     assert {item["detail"]["pack_id"] for item in report["checks"]
             if item["name"].startswith("pack:")} == {f"openvegas.{name}" for name in verifier.PACKS}
@@ -190,6 +194,47 @@ def test_environment_does_not_inherit_credentials_or_pythonpath(tmp_path, monkey
     env = verifier.clean_environment(tmp_path)
     assert "MUST_NOT_PROPAGATE" not in env.values()
     assert env["HOME"] == env["USERPROFILE"] == str(tmp_path)
+
+
+def test_clean_environment_survives_interpreter_startup(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    code = (
+        "import runpy, os, pathlib; "
+        "m = runpy.run_path(" + repr(str(SCRIPT)) + "); "
+        "home = pathlib.Path.home().resolve(); "
+        "assert dict(os.environ) == m['clean_environment'](home); "
+        "assert not any(home.iterdir())"
+    )
+    result = subprocess.run([sys.executable, "-I", "-B", "-c", code], cwd=home,
+                            env=verifier.clean_environment(home / ".." / "home"),
+                            capture_output=True, text=True, timeout=10, check=False)
+    assert result.returncode == 0, result.stderr
+
+
+def test_auth_write_guard_rejects_swallowed_write(tmp_path):
+    code = f"""
+import runpy
+from pathlib import Path
+m = runpy.run_path({str(SCRIPT)!r})
+violations = []
+try:
+    with m['forbid_auth_writes'](violations):
+        try:
+            Path('forbidden').mkdir()
+        except RuntimeError:
+            pass
+except RuntimeError:
+    assert violations == ['os.mkdir']
+else:
+    raise AssertionError('Swallowed write was accepted')
+assert not Path('forbidden').exists()
+Path('allowed-after-scope').mkdir()
+"""
+    result = subprocess.run([sys.executable, "-I", "-B", "-c", code], cwd=tmp_path,
+                            env=verifier.clean_environment(tmp_path), capture_output=True,
+                            text=True, timeout=10, check=False)
+    assert result.returncode == 0, result.stderr
 
 
 @pytest.mark.parametrize("operation", [

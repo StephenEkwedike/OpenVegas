@@ -11,6 +11,7 @@ import argparse
 import base64
 import contextlib
 import hashlib
+import importlib
 import importlib.metadata
 import io
 import json
@@ -28,13 +29,18 @@ PACKS = (
 ASSETS = ("manifest.json", "sheet.png", "provenance.json")
 LIMITATION = (
     "Installed Python distribution only; not shipping frozen/npm binaries, "
-    "native terminal UX, external host hooks, art approval, or commerce certification."
+    "native terminal UX, external host hooks, art approval, or commerce certification. "
+    "Auth discovery uses synthetic public HTTP data, not live discovery or login/signup."
 )
 
 
 def clean_environment(home: Path) -> dict[str, str]:
     # Do not forward provider credentials, dotenv selectors, or Python path overrides.
+    home = home.resolve()
     env = {key: os.environ[key] for key in ("SYSTEMROOT", "WINDIR") if key in os.environ}
+    if sys.platform == "darwin":
+        # CoreFoundation otherwise injects this at startup, breaking exact equality.
+        env["__CF_USER_TEXT_ENCODING"] = f"0x{os.getuid():X}:0x0:0x0"
     env.update({
         "HOME": str(home), "USERPROFILE": str(home),
         "APPDATA": str(home / "appdata"), "LOCALAPPDATA": str(home / "localappdata"),
@@ -85,6 +91,93 @@ def check_record(dist, relative: str) -> Path:
     if digest != entry.hash.value or len(data) != entry.size:
         raise ValueError(f"Installed RECORD mismatch: {relative}")
     return path
+
+
+@contextlib.contextmanager
+def forbid_auth_writes(violations: list[str]):
+    # Scoped because later CLI checks may legitimately create temporary state.
+    active = True
+
+    def audit(event, args):
+        if not active:
+            return
+        forbidden = event in {
+            "os.mkdir", "os.remove", "os.rmdir", "os.rename", "os.chmod",
+            "os.chown", "os.link", "os.symlink", "os.truncate", "os.utime",
+        }
+        if event == "open":
+            mode, flags = args[1:3]
+            forbidden |= bool(mode and any(flag in mode for flag in "wax+"))
+            forbidden |= bool(flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT |
+                                       os.O_TRUNC | os.O_APPEND))
+        if forbidden:
+            violations.append(event)
+            raise RuntimeError("Auth discovery must not write HOME or configuration")
+
+    sys.addaudithook(audit)
+    try:
+        yield
+        if violations:
+            raise RuntimeError("Auth discovery swallowed a forbidden write")
+    finally:
+        active = False
+
+
+def check_auth_discovery(dist, write_violations: list[str]) -> dict:
+    home = Path.home().resolve()
+    if any(home.iterdir()):
+        raise ValueError("Auth discovery requires an empty HOME")
+    if os.environ != clean_environment(home):
+        raise ValueError("Auth discovery requires the credential-free environment allowlist")
+    with forbid_auth_writes(write_violations):
+        modules = {}
+        for name in ("auth", "auth_config", "config", "telemetry"):
+            expected = check_record(dist, f"openvegas/{name}.py").resolve()
+            module = importlib.import_module(f"openvegas.{name}")
+            if Path(module.__file__).resolve() != expected:
+                raise ValueError("Source shadowing an installed authentication module")
+            modules[name] = module
+        auth, config = modules["auth"], modules["config"]
+        if config.CONFIG_FILE != home / ".openvegas" / "config.json":
+            raise ValueError("Authentication config escaped the isolated HOME")
+        import httpx
+
+        from supabase import Client, create_client
+
+        if auth.create_client is not create_client:
+            raise ValueError("Authentication must use the real Supabase client constructor")
+        public_url = "https://auth.example.test"
+        public_key = "sb_publishable_synthetic_offline_fixture"
+        calls = []
+
+        def public_fixture(url, **kwargs):
+            calls.append(url)
+            if url != config.FALLBACK_DEFAULT_BACKEND_URL.rstrip("/") + "/auth/config":
+                raise ValueError("Discovery did not use the default public backend")
+            if kwargs != {"timeout": 10, "follow_redirects": False}:
+                raise ValueError("Unexpected discovery request options")
+            return httpx.Response(200, request=httpx.Request("GET", url), json={
+                "supabase_url": public_url, "supabase_anon_key": public_key,
+            })
+
+        original_get = auth.httpx.get
+        try:
+            auth.httpx.get = public_fixture
+            instance = auth.SupabaseAuth()
+        finally:
+            auth.httpx.get = original_get
+        if len(calls) != 1 or not isinstance(instance.client, Client):
+            raise ValueError("Discovery must construct one real Supabase client")
+        if (str(instance.client.supabase_url).rstrip("/") != public_url or
+                instance.client.supabase_key != public_key):
+            raise ValueError("Client did not use the discovered public settings")
+        if any(home.iterdir()):
+            raise ValueError("Auth discovery changed the empty HOME")
+    return {
+        "synthetic_http_fixture": True, "real_supabase_client_constructor": True,
+        "discovery_requests": 1, "manual_configuration": False,
+        "home_unchanged": True, "installed_modules": sorted(modules),
+    }
 
 
 def run_dispatch(dist, kind: str, args: list[str]) -> tuple[int, str]:
@@ -147,6 +240,9 @@ def probe() -> dict:
     if not check("installed-origin", installed):
         return result
     dist = importlib.metadata.distribution("openvegas")
+    result["auth_write_violations"] = []
+    check("clean-home-public-auth-discovery",
+          lambda: check_auth_discovery(dist, result["auth_write_violations"]))
 
     def inventory():
         from openvegas.emotes.resources import PackRepository
