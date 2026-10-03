@@ -13,6 +13,7 @@ import sys
 import sysconfig
 import venv
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -235,6 +236,21 @@ Path('allowed-after-scope').mkdir()
                             env=verifier.clean_environment(tmp_path), capture_output=True,
                             text=True, timeout=10, check=False)
     assert result.returncode == 0, result.stderr
+
+
+def test_windows_os_headers_use_api_and_restore_even_on_failure(monkeypatch):
+    original_system, original_release = verifier.platform.system, verifier.platform.release
+    monkeypatch.setattr(verifier.sys, "platform", "win32")
+    monkeypatch.setattr(verifier.sys, "getwindowsversion",
+                        lambda: SimpleNamespace(major=10, minor=0, build=26100), raising=False)
+    monkeypatch.setattr(verifier.platform, "_syscmd_ver",
+                        lambda *a, **k: pytest.fail("OS headers launched a shell"))
+    with pytest.raises(RuntimeError, match="fixture"), verifier.offline_platform_headers():
+        assert verifier.platform.system() == "Windows"
+        assert verifier.platform.release() == "10.0.26100"
+        raise RuntimeError("fixture")
+    assert verifier.platform.system is original_system
+    assert verifier.platform.release is original_release
 
 
 @pytest.mark.parametrize("operation", [

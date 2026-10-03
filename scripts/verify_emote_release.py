@@ -16,6 +16,7 @@ import importlib.metadata
 import io
 import json
 import os
+import platform
 import runpy
 import subprocess
 import sys
@@ -32,6 +33,23 @@ LIMITATION = (
     "native terminal UX, external host hooks, art approval, or commerce certification. "
     "Auth discovery uses synthetic public HTTP data, not live discovery or login/signup."
 )
+
+
+@contextlib.contextmanager
+def offline_platform_headers():
+    # Python 3.11 platform.win32_ver shells out to `ver`. Supply only the SDK's
+    # informational OS headers from the Windows API; keep all IO guards active.
+    if sys.platform != "win32":
+        yield
+        return
+    version = sys.getwindowsversion()
+    original_system, original_release = platform.system, platform.release
+    platform.system = lambda: "Windows"
+    platform.release = lambda: f"{version.major}.{version.minor}.{version.build}"
+    try:
+        yield
+    finally:
+        platform.system, platform.release = original_system, original_release
 
 
 def clean_environment(home: Path) -> dict[str, str]:
@@ -129,7 +147,7 @@ def check_auth_discovery(dist, write_violations: list[str]) -> dict:
         raise ValueError("Auth discovery requires an empty HOME")
     if os.environ != clean_environment(home):
         raise ValueError("Auth discovery requires the credential-free environment allowlist")
-    with forbid_auth_writes(write_violations):
+    with offline_platform_headers(), forbid_auth_writes(write_violations):
         modules = {}
         for name in ("auth", "auth_config", "config", "telemetry"):
             expected = check_record(dist, f"openvegas/{name}.py").resolve()
@@ -177,6 +195,7 @@ def check_auth_discovery(dist, write_violations: list[str]) -> dict:
         "synthetic_http_fixture": True, "real_supabase_client_constructor": True,
         "discovery_requests": 1, "manual_configuration": False,
         "home_unchanged": True, "installed_modules": sorted(modules),
+        "windows_os_headers_from_api": sys.platform == "win32",
     }
 
 
