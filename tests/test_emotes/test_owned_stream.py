@@ -530,3 +530,100 @@ async def test_metadata_feed_eof_disallows_late_heartbeat(spool, clock):
     assert not stream.heartbeat(turn=tokens[0])
     assert stream.active_turn is None
     assert phases(spool) == [Phase.START, Phase.CANCEL, Phase.EXIT]
+
+
+def test_owner_resume_restores_controller_and_heartbeat(spool, pack, clock):
+    stream = owned.OwnedCodexStream(authorization(), enabled=True, spool=spool, clock=clock)
+    controller = EmoteController(pack, source="codex", session_id="watch-session", clock=clock)
+    assert stream.deliver(record(0))
+    turn = stream.active_turn
+    assert stream.deliver(record(1, "item/tool/requestUserInput"))
+    pause = stream.paused_turn
+    assert pause.turn == turn and pause.pause_generation == 1
+    for event in drain(spool):
+        controller.handle(event)
+    clock.advance(60)
+    assert controller.current_state == State.PAUSED
+    assert stream.resume(pause=pause)
+    assert not stream.resume(pause=pause)
+    assert stream.paused_turn is None and stream.active_turn == turn
+    assert not stream.heartbeat(turn=turn)
+    resumed = drain(spool)
+    assert [e.phase for e in resumed] == [Phase.RESUME]
+    controller.handle(resumed[0])
+    assert controller.current_state == State.ACTIVE
+    clock.advance(5)
+    assert stream.heartbeat(turn=turn)
+    controller.handle(drain(spool)[0])
+    assert stream.deliver(record(2, "turn/completed", status="completed"))
+    final = drain(spool)
+    assert [e.phase for e in final] == [Phase.COMPLETE]
+    assert final[0].sequence == 4
+
+
+def test_resume_requires_exact_latest_observer_pause(stream, spool):
+    assert not stream.resume(pause=None)
+    stream.deliver(record(0))
+    stream.deliver(record(1, "item/tool/requestUserInput"))
+    first = stream.paused_turn
+    assert not stream.resume(pause=replace(first))
+    # A second outstanding barrier invalidates the first even without another
+    # visual PAUSE. Retried native ordinals do not change the current capability.
+    assert not stream.deliver(record(2, "item/commandExecution/requestApproval"))
+    second = stream.paused_turn
+    assert second.pause_generation == 2
+    assert not stream.deliver(record(2, "item/commandExecution/requestApproval"))
+    assert stream.paused_turn is second
+    assert not stream.resume(pause=first)
+    assert stream.resume(pause=second)
+    stream.deliver(record(3, "item/tool/requestUserInput"))
+    third = stream.paused_turn
+    assert not stream.resume(pause=second)
+    assert stream.resume(pause=third)
+    assert phases(spool) == [Phase.START, Phase.PAUSE, Phase.RESUME, Phase.PAUSE, Phase.RESUME]
+
+
+@pytest.mark.parametrize("barrier", ["cancel", "completed", "failed", "interrupted", "close", "new_turn", "gap"])
+def test_resume_never_crosses_retirement(stream, spool, barrier):
+    stream.deliver(record(0))
+    stream.deliver(record(1, "item/tool/requestUserInput"))
+    pause = stream.paused_turn
+    if barrier == "cancel":
+        stream.cancel("turn-1")
+    elif barrier == "close":
+        stream.close()
+    elif barrier == "new_turn":
+        stream.deliver(record(2, turn="turn-2"))
+        stream.deliver(record(3, "item/tool/requestUserInput", turn="turn-2"))
+    elif barrier == "gap":
+        stream.deliver(record(4))
+    else:
+        stream.deliver(record(2, "turn/completed", status=barrier))
+    drain(spool)
+    assert not stream.resume(pause=pause)
+    assert drain(spool) == []
+
+
+@pytest.mark.parametrize("failure", ["false", "exception", "rollback"])
+def test_resume_failure_cannot_revive(stream, spool, clock, monkeypatch, failure):
+    stream = owned.OwnedCodexStream(authorization(), enabled=True, spool=spool, clock=clock)
+    stream.deliver(record(0))
+    stream.deliver(record(1, "item/tool/requestUserInput"))
+    pause = stream.paused_turn
+    drain(spool)
+    original = spool.publish
+    if failure == "rollback":
+        monkeypatch.setattr(stream, "_clock", lambda: -1)
+    elif failure == "exception":
+        def failed_publish(event):
+            raise OSError("synthetic publication failure")
+        monkeypatch.setattr(spool, "publish", failed_publish)
+    else:
+        monkeypatch.setattr(spool, "publish", lambda event: False)
+    assert not stream.resume(pause=pause)
+    assert not stream.enabled
+    monkeypatch.setattr(spool, "publish", original)
+    assert not stream.resume(pause=pause)
+    assert stream.active_turn is None
+    assert not stream.deliver(record(2, "turn/completed", status="completed"))
+    assert Phase.RESUME not in phases(spool)

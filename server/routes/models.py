@@ -36,6 +36,9 @@ def _effective_descriptor(model: dict, user_id: str) -> dict:
     # gate defaults off independently of per-model capability overrides.
     if not current_flags().files_enabled:
         caps["file_upload"] = caps["image_input"] = False
+    # OpenRouter images are delivered only through managed file uploads. An
+    # independent image rollout cannot enable that path while uploads are off.
+    caps["image_input"] = caps["image_input"] and caps["file_upload"]
     if not caps["reasoning_controls"]:
         caps["reasoning_efforts"] = []
     return {**model, "capabilities": caps}

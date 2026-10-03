@@ -137,6 +137,14 @@ class OwnedStreamRecord:
     metadata: CodexLifecycleMetadata
 
 
+@dataclass(frozen=True, slots=True)
+class PauseToken:
+    """Observer-issued capability for one turn's latest ordered pause barrier."""
+
+    turn: TurnToken
+    pause_generation: int
+
+
 class OwnedCodexStream:
     """One opt-in observer per stream/thread; deliver before downstream fan-out.
 
@@ -162,6 +170,7 @@ class OwnedCodexStream:
         self._ordinal = -1
         self._terminal = True
         self._paused = False
+        self._pause_token: PauseToken | None = None
         self._clock = clock
         self._last_heartbeat_at: float | None = None
         self._consuming = False
@@ -209,6 +218,33 @@ class OwnedCodexStream:
             self.close(reason="invalid_clock")
             return None
         return float(now)
+
+    @property
+    def paused_turn(self) -> PauseToken | None:
+        """Capture on the owning lifecycle thread after receiving a pause."""
+        if not self.enabled or self._terminal or not self._paused:
+            return None
+        return self._pause_token
+
+    def resume(self, *, pause: PauseToken) -> bool:
+        """Owner-only assertion of authoritative execution resumption.
+
+        Call serially only after the owner verifies execution resumed for this
+        exact pause with all outstanding approval/input barriers resolved. Sending
+        an approval, tool output, retries and duplicate START are not that proof.
+        The token must be this observer's issued object, not reconstructed metadata.
+        This publishes no success and changes neither native ordinal nor generation.
+        """
+        if (type(pause) is not PauseToken or pause is not self.paused_turn
+                or self._bridge is None or pause.turn != self._bridge.current_turn):
+            return False
+        now = self._heartbeat_time()
+        if now is None or not self._bridge.resume(turn=pause.turn):
+            return False
+        self._paused = False
+        self._pause_token = None
+        self._last_heartbeat_at = now
+        return True
 
     def heartbeat(self, *, turn: TurnToken) -> bool:
         """Renew only a validated active turn, at most once per five seconds.
@@ -327,6 +363,7 @@ class OwnedCodexStream:
             )
             self._terminal = False
             self._paused = False
+            self._pause_token = None
             self._last_heartbeat_at = now
             self._bridge.begin(turn_id)
             return self.enabled
@@ -342,6 +379,9 @@ class OwnedCodexStream:
             return False
         if event.phase == Phase.PAUSE:
             self._paused = True
+            # Every newly ordered barrier invalidates an earlier owner's snapshot,
+            # even when the bridge is already paused and emits no second PAUSE.
+            self._pause_token = PauseToken(self._bridge.current_turn, ordinal)
             return self._bridge.pause()
         self._terminal = True
         if event.phase == Phase.CANCEL:
@@ -381,6 +421,7 @@ class OwnedCodexStream:
                 self.reason = reason
         self._terminal = True
         self._paused = False
+        self._pause_token = None
         self._last_heartbeat_at = None
         self._bridge = None
         self._seen.clear()

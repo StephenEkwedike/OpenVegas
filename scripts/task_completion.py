@@ -218,21 +218,29 @@ def audit(root: Path, manifest: dict) -> dict:
                 and record.get("evidence")
             ):
                 valid = True
+                changed = []
                 for evidence in record["evidence"]:
                     try:
-                        valid &= file_hash(local_file(root, evidence["path"])) == evidence["sha256"]
+                        matches = file_hash(local_file(root, evidence["path"])) == evidence["sha256"]
                     except (OSError, ValueError, KeyError):
-                        valid = False
+                        matches = False
+                    if not matches:
+                        changed.append({"kind": "evidence", "path": evidence["path"]})
+                    valid &= matches
                 for subject in record.get("subjects", []):
                     try:
-                        valid &= file_hash(local_file(root, subject["path"])) == subject["sha256"]
+                        matches = file_hash(local_file(root, subject["path"])) == subject["sha256"]
                     except (OSError, ValueError, KeyError):
-                        valid = False
+                        matches = False
+                    if not matches:
+                        changed.append({"kind": "subject", "path": subject["path"]})
+                    valid &= matches
                 row.update(
                     status="passed" if valid else "stale",
                     reason="Evidence hashes verified"
                     if valid
                     else "Evidence is missing or changed; rerun verification",
+                    changed=changed,
                 )
         rows.append(row)
     counts = dict(Counter(row["status"] for row in rows))
@@ -245,10 +253,42 @@ def audit(root: Path, manifest: dict) -> dict:
     }
 
 
+def execution_queue(root: Path, manifest: dict) -> dict:
+    """Return every outstanding action, without executing instructions or granting access."""
+    report = audit(root, manifest)
+    actionable, blocked = [], []
+    defaults = {
+        "stale": "Review the listed changed files; refresh only affected verification, preserving old receipts.",
+        "unverified": "Find genuine acceptance evidence; if absent, perform the missing work before recording a pass.",
+        "untracked": "Sync the new requirement into the manifest without removing existing scope.",
+        "scope_missing": "Restore or explicitly reconcile the missing original requirement; do not silently discard it.",
+        "invalid": "Repair incomplete blocker metadata without claiming completion.",
+        "open": "Read the linked acceptance criterion, implement the next bounded step, and verify only affected behavior.",
+    }
+    for row in report["requirements"]:
+        if row["status"] == "passed":
+            continue
+        record = manifest["requirements"].get(row["id"], {})
+        item = dict(row)
+        item["owner"] = record.get("owner") or "coordinator"
+        item["next_step"] = record.get("next_step") or defaults.get(row["status"], row["reason"])
+        (blocked if row["status"] == "blocked" else actionable).append(item)
+    return {
+        "complete": report["complete"],
+        "counts": report["counts"],
+        "actionable": actionable,
+        "blocked": blocked,
+        "next": (actionable or blocked or [None])[0],
+        "instruction": "Execute the next authorized action, record evidence, and run queue again. "
+        "Do not stop merely because one task passed. Explicit blockers need owner/reason/next step. "
+        "This queue does not launch agents, approve spending/deployment, or override permissions.",
+    }
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("init", "sync", "record", "audit"):
+    for name in ("init", "sync", "record", "audit", "queue", "plan"):
         command = sub.add_parser(name)
         command.add_argument("--manifest", type=Path, required=True)
         if name == "init":
@@ -268,7 +308,11 @@ def main(argv=None) -> int:
             command.add_argument("--reason", default="")
             command.add_argument("--owner", default="")
             command.add_argument("--next-step", default="")
-        if name == "audit":
+        if name == "plan":
+            command.add_argument("--id", action="append", required=True)
+            command.add_argument("--owner", required=True)
+            command.add_argument("--next-step", required=True)
+        if name in {"audit", "queue"}:
             command.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     try:
@@ -288,6 +332,22 @@ def main(argv=None) -> int:
         else:
             original = file_hash(path)
             root, data = load_manifest(path)
+            if args.command == "queue":
+                report = execution_queue(root, data)
+                if args.json:
+                    print(json.dumps(report, indent=2))
+                else:
+                    print("COMPLETE" if report["complete"] else "INCOMPLETE - execute next authorized action")
+                    print(" | ".join(f"{k}={v}" for k, v in sorted(report["counts"].items())))
+                    print(report["instruction"])
+                    for group in ("actionable", "blocked"):
+                        print(f"\n{group.upper()} ({len(report[group])})")
+                        for row in report[group]:
+                            print(f"{row['id']} [{row['status']}] {row.get('file')}:{row.get('line')} {row.get('text')}")
+                            print(f"  Next: {row['next_step']} ({row['owner']})")
+                            for changed in row.get("changed", []):
+                                print(f"  Changed {changed['kind']}: {changed['path']}")
+                return 0 if report["complete"] else 1
             if args.command == "audit":
                 report = audit(root, data)
                 if args.json:
@@ -310,6 +370,15 @@ def main(argv=None) -> int:
                 for task in collect(root, data["checklists"]):
                     data["requirements"].setdefault(
                         task["id"], {"requirement": task, "status": "open"}
+                    )
+            elif args.command == "plan":
+                if not args.owner.strip() or not args.next_step.strip():
+                    raise ValueError("Planning requires owner and next step")
+                if any(task_id not in data["requirements"] for task_id in args.id):
+                    raise ValueError("Unknown requirement ID")
+                for task_id in args.id:
+                    data["requirements"][task_id].update(
+                        owner=args.owner.strip(), next_step=args.next_step.strip()
                     )
             elif args.command == "record":
                 if any(task_id not in data["requirements"] for task_id in args.id):

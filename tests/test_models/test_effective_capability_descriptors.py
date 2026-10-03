@@ -97,6 +97,7 @@ def real_file_gate_routes(monkeypatch):
     ("unset", False), ("explicit_off", False), ("direct_override", False),
     ("enabled", True), ("global_off", False), ("rollout_off", False),
     ("cached_off", False),
+    ("upload_only_off", False), ("upload_rollout_off", False),
 ])
 async def test_real_file_gate_matches_descriptor_and_required_validation(real_file_gate_routes, monkeypatch, configuration, allowed):
     import httpx
@@ -116,6 +117,10 @@ async def test_real_file_gate_matches_descriptor_and_required_validation(real_fi
     elif configuration == "rollout_off":
         monkeypatch.setenv("OPENVEGAS_ROLLOUT_FILE_UPLOAD_PCT", "0")
         monkeypatch.setenv("OPENVEGAS_ROLLOUT_IMAGE_INPUT_PCT", "0")
+    elif configuration == "upload_only_off":
+        monkeypatch.setenv("OPENVEGAS_ENABLE_FILE_UPLOAD", "0")
+    elif configuration == "upload_rollout_off":
+        monkeypatch.setenv("OPENVEGAS_ROLLOUT_FILE_UPLOAD_PCT", "0")
     elif configuration == "cached_off":
         assert not current_flags().files_enabled
         monkeypatch.setenv("OPENVEGAS_ENABLE_FILES", "1")

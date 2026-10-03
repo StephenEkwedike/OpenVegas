@@ -237,3 +237,65 @@ def test_record_requires_explicit_evidence(project):
         gate.main(["record", "--manifest", str(path), "--id", task_id, "--status", "passed"]) == 2
     )
     assert json.loads(path.read_text())["requirements"][task_id]["status"] == "open"
+
+
+def test_queue_lists_all_outstanding_without_mutation(project, capsys):
+    path = project[1]
+    before = path.read_bytes()
+    assert gate.main(["queue", "--manifest", str(path), "--json"]) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert len(result["actionable"]) == 2
+    assert result["next"] == result["actionable"][0]
+    assert not result["complete"]
+    assert path.read_bytes() == before
+
+
+def test_queue_reports_changed_source_and_missing_evidence(project):
+    assert record(project) == 0
+    (project[0] / "code.py").write_text("changed")
+    (project[0] / "proof.txt").unlink()
+    root, data = gate.load_manifest(project[1])
+    row = gate.execution_queue(root, data)["actionable"][1]
+    assert row["status"] == "stale"
+    assert row["changed"] == [
+        {"kind": "evidence", "path": "proof.txt"},
+        {"kind": "subject", "path": "code.py"},
+    ]
+
+
+def test_plan_preserves_proof_and_status(project):
+    assert record(project) == 0
+    root, path = project
+    task_id = gate.parse_checklist(root, "plan.md")[1]["id"]
+    before = json.loads(path.read_text())["requirements"][task_id]
+    assert gate.main(["plan", "--manifest", str(path), "--id", task_id,
+                      "--owner", "worker", "--next-step", "Review changed module"]) == 0
+    after = json.loads(path.read_text())["requirements"][task_id]
+    assert {k: after[k] for k in before if k not in {"owner", "next_step"}} == {
+        k: v for k, v in before.items() if k not in {"owner", "next_step"}
+    }
+    assert after["next_step"] == "Review changed module"
+
+
+def test_queue_keeps_external_blockers_incomplete(project):
+    root, path = project
+    for task in gate.parse_checklist(root, "plan.md"):
+        assert gate.main(["record", "--manifest", str(path), "--id", task["id"],
+                          "--status", "blocked", "--reason", "Explicitly deferred",
+                          "--owner", "operator", "--next-step", "Run native acceptance"]) == 0
+    _, data = gate.load_manifest(path)
+    result = gate.execution_queue(root, data)
+    assert not result["actionable"]
+    assert len(result["blocked"]) == 2
+    assert result["next"] == result["blocked"][0]
+    assert not result["complete"]
+
+
+def test_queue_complete_requires_all_actual_passes(project):
+    root, path = project
+    (root / "plan.md").write_text("# Plan\n- [x] Build\n- [x] Test\n")
+    assert record(project, 0) == record(project, 1) == 0
+    _, data = gate.load_manifest(path)
+    result = gate.execution_queue(root, data)
+    assert result["complete"] and result["next"] is None
+    assert gate.main(["queue", "--manifest", str(path)]) == 0

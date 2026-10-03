@@ -9775,10 +9775,18 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     if parts[1] == "on" and conversation_mode != "persistent":
                         console.print("Canonical continuity requires explicit persistent conversation mode.")
                         continue
-                    if pending_attachments or any(job.process.returncode is None for job in model_switch_local_tools._BACKGROUND_JOBS.values()):
-                        console.print("Finish/cancel tools and remove pending attachments first.")
+                    if any(job.process.returncode is None for job in model_switch_local_tools._BACKGROUND_JOBS.values()):
+                        console.print("Finish/cancel tools before starting a fresh conversation.")
                         continue
-                    if not await _chat_modal(lambda: Confirm.ask("Start a fresh conversation? Text-only mode disables tools, attachments and web search; existing context will not transfer.", default=False)):
+                    if parts[1] == "on" and pending_attachments:
+                        console.print("Text-only continuity does not support attachments; remove pending attachments first.")
+                        continue
+                    continuity_prompt = (
+                        "Start a fresh text-only conversation? Tools, attachments and web search are disabled; existing context will not transfer."
+                        if parts[1] == "on" else
+                        "Start a fresh coding conversation? Existing context will not transfer; pending attachments will be retained."
+                    )
+                    if not await _chat_modal(lambda: Confirm.ask(continuity_prompt, default=False)):
                         continue
                     try:
                         if startup_bootstrap_task is not None:
@@ -9945,7 +9953,11 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             if isinstance(getattr(client, "_canonical_chat", None), dict) and (
                 pending_attachments or _message_requests_attachment_analysis(message)
             ):
-                console.print("Attachment continuity is unsupported; use /continuity off for a fresh coding conversation.")
+                console.print(
+                    "Text-only continuity cannot consume attachments. Nothing uploaded or sent; "
+                    "attachments retained. Use /continuity off to explicitly start a fresh coding "
+                    "conversation with these attachments.", markup=False,
+                )
                 continue
             turn_is_workspace_intent = _has_workspace_tooling_intent(message)
             auto_paths: list[str] = []
@@ -10019,6 +10031,14 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             try:
                 if startup_bootstrap_task is not None:
                     await asyncio.shield(startup_bootstrap_task)
+                if isinstance(getattr(client, "_canonical_chat", None), dict) and pending_attachments:
+                    console.print(
+                        "Text-only continuity cannot consume attachments. Nothing uploaded or sent; "
+                        "attachments retained. Use /continuity off to explicitly start a fresh coding "
+                        "conversation with these attachments.",
+                        markup=False,
+                    )
+                    continue
                 await _validate_openrouter_request(reasoning_effort=current_reasoning_effort)
             except (APIError, ModelSelectionError) as exc:
                 console.print(f"Request not sent; attachments retained: {exc}", markup=False)
