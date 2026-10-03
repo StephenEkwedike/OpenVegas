@@ -4,6 +4,13 @@ import asyncio
 
 import pytest
 
+from tests.collection_safety import install
+
+try:
+    install()
+except ValueError as exc:
+    raise pytest.UsageError(str(exc)) from None
+
 import openvegas.agent.local_tools as local_tools
 
 

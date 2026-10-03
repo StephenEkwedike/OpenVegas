@@ -36,6 +36,7 @@ from .adapters import supports_codex_app_server
 from .events import IDENTITY
 from .owned_stream import (
     METHODS,
+    PAUSE_METHODS,
     OwnedCodexStream,
     OwnedStreamAuthorization,
     OwnedStreamRecord,
@@ -135,6 +136,10 @@ class _Lifecycle:
         self.observer = None
         self.ordinal = 0
         self.reason = ""
+        self._barrier_turn = None
+        self._barriers = set()
+        self._request_ids = set()
+        self._ready_pause = None
         if thread_id is not None:
             self.bind(thread_id)
 
@@ -180,7 +185,7 @@ class _Lifecycle:
         if self.reason or self.observer is None:
             return
         method = message.get("method")
-        if type(method) is not str or method not in METHODS:
+        if type(method) is not str or method not in (*METHODS, "thread/status/changed", "serverRequest/resolved"):
             return
         params = message.get("params")
         if type(params) is not dict:
@@ -192,6 +197,9 @@ class _Lifecycle:
             return
         if thread_id != self.thread_id:
             return  # Subagents and other foreground tabs never animate this pane.
+        if method in ("thread/status/changed", "serverRequest/resolved"):
+            self._resume_metadata(message)
+            return
         metadata = project_codex_lifecycle(message, host_version=self.version)
         if metadata is None:
             self.disable("invalid_server_lifecycle")
@@ -202,8 +210,89 @@ class _Lifecycle:
         self.ordinal += 1
         if not self.observer.enabled:
             self.disable(self.observer.reason)
+            return
+        current = self.observer.active_turn or (
+            self.observer.paused_turn.turn if self.observer.paused_turn else None
+        )
+        if current != self._barrier_turn:
+            self._barrier_turn = current
+            self._barriers.clear()
+            self._ready_pause = None
+        if method in PAUSE_METHODS and current is not None and metadata.turn_id == current.turn_id:
+            key = self._request_key(message.get("id"))
+            if key is None or key in self._request_ids or len(self._request_ids) >= 4096:
+                self.disable("invalid_resume_barrier")
+                return
+            self._request_ids.add(key)
+            self._barriers.add(key)
+            self._ready_pause = None
+
+    @staticmethod
+    def _request_key(value):
+        # JSON-RPC string and integer IDs are distinct; bool must not alias 1.
+        if type(value) is int and -(2**63) <= value < 2**63:
+            return (int, value)
+        if type(value) is str and 0 < len(value) <= 256:
+            return (str, value)
+        return None
+
+    def _resume_metadata(self, message):
+        params, method = message["params"], message["method"]
+        allowed = {"threadId", "status" if method == "thread/status/changed" else "requestId"}
+        if (set(message) - {"jsonrpc", "method", "params"} or set(params) != allowed
+                or ("jsonrpc" in message and message["jsonrpc"] != "2.0")):
+            self.disable("invalid_resume_metadata")
+            return
+        if method == "serverRequest/resolved":
+            key = self._request_key(params["requestId"])
+            if key is None:
+                self.disable("invalid_resume_metadata")
+                return
+            # Unknown/old resolutions cannot pre-clear a future barrier.
+            self._barriers.discard(key)
+        else:
+            status = params["status"]
+            if type(status) is not dict or type(status.get("type")) is not str:
+                self.disable("invalid_resume_metadata")
+                return
+            kind = status["type"]
+            if kind in ("idle", "notLoaded", "systemError") and set(status) == {"type"}:
+                self._ready_pause = None
+                pause = self.observer.paused_turn
+                turn = self.observer.active_turn or (pause.turn if pause else None)
+                if turn is not None:
+                    self.observer.cancel(turn.turn_id)
+                self._barriers.clear()
+                self._barrier_turn = None
+                return
+            flags = status.get("activeFlags")
+            if (kind != "active" or set(status) != {"type", "activeFlags"}
+                    or type(flags) is not list or len(flags) > 2
+                    or any(type(flag) is not str or flag not in
+                           ("waitingOnApproval", "waitingOnUserInput") for flag in flags)
+                    or len(set(flags)) != len(flags)):
+                self.disable("invalid_resume_metadata")
+                return
+            self._ready_pause = self.observer.paused_turn if not flags else None
+            if flags and self.observer.paused_turn is None:
+                # Thread flags lack request/turn identity. If no correlated pause
+                # exists, retire this visual turn rather than invent a barrier.
+                turn = self.observer.active_turn
+                if turn is not None:
+                    self.observer.cancel(turn.turn_id)
+                self._barriers.clear()
+                self._barrier_turn = None
+        pause = self.observer.paused_turn
+        if (pause is not None and pause is self._ready_pause
+                and pause.turn == self._barrier_turn and not self._barriers):
+            self.observer.resume(pause=pause)
+            self._ready_pause = None
+            if not self.observer.enabled:
+                self.disable(self.observer.reason)
 
     def close(self):
+        self._barriers.clear()
+        self._ready_pause = None
         if self.observer is not None:
             self.observer.close()
 

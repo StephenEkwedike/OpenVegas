@@ -218,7 +218,10 @@ def test_early_interrupt_tombstones_before_start(executable, spool):
 
 
 def test_other_threads_do_not_animate_and_duplicate_success_once(executable, spool):
-    output = (line(thread="other") + line() + line() + line("item/tool/requestUserInput")
+    approval = json.loads(line("item/tool/requestUserInput", isBlocking=True,
+                               itemId="input-1", questions=[]))
+    approval["id"] = "approval-1"
+    output = (line(thread="other") + line() + line() + json.dumps(approval).encode() + b"\n"
               + line("turn/completed", thread="other", status="completed")
               + line("turn/completed", status="completed") * 2)
     command = executable(f"sys.stdin.buffer.read()\nos.write(1, {output!r})\n")
@@ -701,3 +704,173 @@ def test_known_server_eof_suppresses_heartbeat_even_with_slow_output_sink(execut
         ), timeout=5)
     assert asyncio.run(run()).reason == "shutdown_timeout"
     assert [e.phase for e in events] == [Phase.START, Phase.CANCEL, Phase.EXIT]
+
+
+def resume_message(method="thread/status/changed", **params):
+    return {"method": method, "params": {"threadId": "thread-1", **params}}
+
+
+def resume_barrier(request_id=1, turn="turn-1"):
+    return {"id": request_id, **resume_message(
+        "item/tool/requestUserInput", turnId=turn,
+    )}
+
+
+def resume_lifecycle(spool):
+    lifecycle = transport._Lifecycle("watch-session", (0, 153, 4), spool, "thread-1")
+    lifecycle.server(json.loads(line()))
+    return lifecycle
+
+
+@pytest.mark.parametrize("status_first", [False, True])
+def test_server_resume_requires_both_barriers_and_fresh_status(spool, status_first):
+    lifecycle = resume_lifecycle(spool)
+    ready = resume_message(status={"type": "active", "activeFlags": []})
+    lifecycle.server(ready)  # Before PAUSE is not resumption evidence.
+    lifecycle.server(resume_barrier(1))
+    lifecycle.server(resume_barrier("1"))  # Concurrent same-category, distinct typed IDs.
+    lifecycle.client({"id": 1, "result": {"answers": {}}})
+    lifecycle.server(json.loads(line("item/completed")))
+    if status_first:
+        lifecycle.server(ready)
+    lifecycle.server(resume_message("serverRequest/resolved", requestId=1))
+    assert lifecycle.observer.paused_turn is not None
+    lifecycle.server(resume_message("serverRequest/resolved", requestId="1"))
+    if not status_first:
+        assert lifecycle.observer.paused_turn is not None
+        lifecycle.server(ready)
+    assert lifecycle.observer.active_turn is not None
+    lifecycle.server(ready)
+    assert phases(spool) == [Phase.START, Phase.PAUSE, Phase.RESUME]
+
+
+def test_server_resume_latest_pause_and_unknown_resolution(spool):
+    lifecycle = resume_lifecycle(spool)
+    ready = resume_message(status={"type": "active", "activeFlags": []})
+    lifecycle.server(resume_barrier(1))
+    lifecycle.server(ready)
+    lifecycle.server(resume_message("serverRequest/resolved", requestId=2))
+    lifecycle.server(resume_barrier(2))
+    for ident in (1, 2):
+        lifecycle.server(resume_message("serverRequest/resolved", requestId=ident))
+    assert lifecycle.observer.paused_turn is not None  # New pause invalidates old ready status.
+    lifecycle.server(resume_message(status={"type": "active", "activeFlags": ["waitingOnApproval"]}))
+    assert lifecycle.observer.paused_turn is not None
+    lifecycle.server(ready)
+    assert phases(spool) == [Phase.START, Phase.PAUSE, Phase.RESUME]
+
+
+@pytest.mark.parametrize("bad", [
+    resume_message(status={"type": "active", "activeFlags": ["futureFlag"]}),
+    resume_message(status={"type": "active", "activeFlags": [], "future": True}),
+    resume_message(status={"type": "active", "activeFlags": []}, future=True),
+    resume_message(status={"type": "active", "activeFlags": [False]}),
+    resume_message(status={"type": "active", "activeFlags": None}),
+    resume_message("serverRequest/resolved", requestId=True),
+    resume_message("serverRequest/resolved", requestId=[]),
+    {"id": 42, **resume_message(status={"type": "active", "activeFlags": []})},
+])
+def test_server_resume_unknown_metadata_fails_neutral(spool, bad):
+    lifecycle = resume_lifecycle(spool)
+    lifecycle.server(resume_barrier())
+    lifecycle.server(bad)
+    lifecycle.server(resume_message("serverRequest/resolved", requestId=1))
+    lifecycle.server(resume_message(status={"type": "active", "activeFlags": []}))
+    assert lifecycle.reason == "invalid_resume_metadata"
+    assert Phase.RESUME not in phases(spool)
+
+
+@pytest.mark.parametrize("end", ["failed", "interrupted", "completed", "cancel", "disconnect", "replace"])
+def test_server_resume_never_crosses_turn_or_retirement(spool, end):
+    lifecycle = resume_lifecycle(spool)
+    lifecycle.server(resume_barrier())
+    if end == "cancel":
+        lifecycle.client(json.loads(request("turn/interrupt", turnId="turn-1")))
+    elif end == "disconnect":
+        lifecycle.close()
+    elif end == "replace":
+        lifecycle.server(json.loads(line(turn="turn-2")))
+        lifecycle.server(resume_barrier(2, turn="turn-2"))
+    else:
+        lifecycle.server(json.loads(line("turn/completed", status=end)))
+    before = phases(spool)
+    lifecycle.server(resume_message("serverRequest/resolved", requestId=1))
+    lifecycle.server(resume_message(status={"type": "active", "activeFlags": []}))
+    assert phases(spool) == []
+    assert (Phase.COMPLETE in before) == (end == "completed")
+
+
+def test_server_resume_reused_request_id_fails_neutral(spool):
+    lifecycle = resume_lifecycle(spool)
+    lifecycle.server(resume_barrier())
+    lifecycle.server(resume_message("serverRequest/resolved", requestId=1))
+    lifecycle.server(resume_message(status={"type": "active", "activeFlags": []}))
+    phases(spool)
+    lifecycle.server(resume_barrier())
+    assert lifecycle.reason == "invalid_resume_barrier"
+    assert Phase.RESUME not in phases(spool)
+
+
+def test_server_resume_missing_request_id_fails_neutral(spool):
+    lifecycle = resume_lifecycle(spool)
+    lifecycle.server(json.loads(line("item/tool/requestUserInput", isBlocking=True,
+                                     itemId="input-1", questions=[])))
+    assert lifecycle.reason == "invalid_resume_barrier"
+    lifecycle.server(resume_message("serverRequest/resolved", requestId="approval-1"))
+    lifecycle.server(resume_message(status={"type": "active", "activeFlags": []}))
+    lifecycle.server(json.loads(line("turn/completed", status="completed")))
+    assert phases(spool) == [Phase.START, Phase.PAUSE, Phase.CANCEL, Phase.EXIT]
+
+
+def test_server_resume_real_transport_preserves_protocol(executable, spool):
+    messages = [json.loads(line()), resume_barrier(),
+                resume_message(status={"type": "active", "activeFlags": []}),
+                resume_message("serverRequest/resolved", requestId=1)]
+    output = b"".join(json.dumps(value).encode() + b"\n" for value in messages)
+    command = executable(f"sys.stdin.buffer.read()\nos.write(1, {output!r})\n")
+    result, out, err = asyncio.run(relay(command, spool))
+    assert result.returncode == 0 and out == output and err == b""
+    assert phases(spool) == [Phase.START, Phase.PAUSE, Phase.RESUME, Phase.CANCEL, Phase.EXIT]
+
+
+@pytest.mark.parametrize("kind", ["idle", "notLoaded", "systemError"])
+def test_server_resume_inactive_status_retires_without_poisoning_next_turn(spool, kind):
+    lifecycle = resume_lifecycle(spool)
+    lifecycle.server(resume_barrier())
+    lifecycle.server(resume_message(status={"type": kind}))
+    lifecycle.server(resume_message("serverRequest/resolved", requestId=1))
+    lifecycle.server(resume_message(status={"type": "active", "activeFlags": []}))
+    assert Phase.RESUME not in phases(spool)
+    lifecycle.server(json.loads(line(turn="turn-2")))
+    assert phases(spool) == [Phase.START]
+
+
+def test_server_resume_idle_before_start_does_not_disable_transport(spool):
+    lifecycle = transport._Lifecycle("watch-session", (0, 153, 4), spool, "thread-1")
+    lifecycle.server(resume_message(status={"type": "idle"}))
+    lifecycle.server(json.loads(line()))
+    assert not lifecycle.reason and phases(spool) == [Phase.START]
+
+
+def test_server_resume_completed_idle_preserves_next_start(spool):
+    lifecycle = resume_lifecycle(spool)
+    lifecycle.server(json.loads(line("turn/completed", status="completed")))
+    lifecycle.server(resume_message(status={"type": "idle"}))
+    lifecycle.server(json.loads(line(turn="turn-2")))
+    assert not lifecycle.reason
+    assert phases(spool) == [Phase.START, Phase.COMPLETE, Phase.START]
+
+
+@pytest.mark.parametrize("flags", [["waitingOnApproval"], ["waitingOnUserInput"],
+                                   ["waitingOnApproval", "waitingOnUserInput"]])
+def test_server_resume_uncorrelated_waiting_flags_retire_not_revive(spool, flags):
+    lifecycle = resume_lifecycle(spool)
+    lifecycle.server(resume_message(status={"type": "active", "activeFlags": flags}))
+    assert lifecycle.observer.active_turn is None
+    lifecycle.server(resume_barrier())
+    lifecycle.server(resume_message("serverRequest/resolved", requestId=1))
+    lifecycle.server(resume_message(status={"type": "active", "activeFlags": []}))
+    lifecycle.server(json.loads(line("turn/completed", status="completed")))
+    assert phases(spool) == [Phase.START, Phase.CANCEL]
+    lifecycle.server(json.loads(line(turn="turn-2")))
+    assert phases(spool) == [Phase.START]
