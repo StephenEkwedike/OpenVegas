@@ -8856,10 +8856,24 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
         try:
             pending = pending_native_handoff
             if pending is None:
+                if pending_attachments:
+                    console.print("Send or remove pending attachments before changing models. Nothing was switched.", markup=False)
+                    return False
                 if (next_provider != "openrouter" or current_provider != "openrouter"
                         or not native_generation_session.finalized
                         or any(job.process.returncode is None for job in model_switch_local_tools._BACKGROUND_JOBS.values())):
                     raise ValueError("Finish the native task and its tools before transferring to a reviewed OpenRouter model.")
+                capabilities = reviewed_capabilities(target, next_provider, next_model)
+                if not capabilities.supports(next_provider, next_model, "tools"):
+                    console.print("Target model does not support native task tools; choose another model. Nothing was switched.", markup=False)
+                    return False
+                if (current_reasoning_effort is not None
+                        and current_reasoning_effort not in capabilities.reasoning_efforts):
+                    console.print("Target model does not support the current reasoning effort. Use /reasoning default or choose a supported effort, then switch again. Nothing was switched.", markup=False)
+                    return False
+                if web_search_requested and not capabilities.supports(next_provider, next_model, "web_search"):
+                    console.print("Target model does not support the requested web search. Choose a web-capable model to retain this task's settings. Nothing was switched.", markup=False)
+                    return False
                 snapshot = await client.agent_run_get(current_run_id)
                 selection = NativeHandoffSelection(model=next_model, enable_web_search=web_search_requested,
                     reasoning_effort=current_reasoning_effort, max_tokens=min(1024, target["max_tokens"]))

@@ -315,6 +315,7 @@ class OwnedChatCompositor:
         )
         self.controller: EmoteController | None = None
         self._enabled = False
+        self._render_failed = False
         self._has_pack = pack is not None
         self.set_packs(pack, completion_pack, access_guard=access_guard)
         self.default_buffer.accept_handler = self._accept
@@ -534,6 +535,7 @@ class OwnedChatCompositor:
                 reduced_motion=self._reduced_motion, completion_pack=completion_pack,
             )
         self._access_guard = access_guard
+        self._render_failed = False
         self._has_pack = pack is not None
         self._enabled = pack is not None and self._allowed()
         if self.controller is not None:
@@ -541,7 +543,7 @@ class OwnedChatCompositor:
         self.app.invalidate()
 
     def _sync_access(self) -> bool:
-        enabled = self._has_pack and self._allowed()
+        enabled = self._has_pack and not self._render_failed and self._allowed()
         if enabled != self._enabled and self.controller is not None:
             self._enabled = enabled
             self.controller.set_enabled(enabled)
@@ -581,7 +583,7 @@ class OwnedChatCompositor:
         get a legible status line rather than severely downsampled moving art.
         """
         size = self.app.output.get_size()
-        if self.controller is None or self.controller.current_state == State.OFF or size.rows < 16:
+        if self._render_failed or self.controller is None or self.controller.current_state == State.OFF or size.rows < 16:
             return 0
         if not self._companion_enabled and self.controller.current_state != State.COMPLETE:
             return 0
@@ -605,19 +607,41 @@ class OwnedChatCompositor:
         return pack.manifest.display_name, label
 
     def _dock_fragments(self):
+        if self._render_failed:
+            return []
+        try:
+            return self._render_dock_fragments()
+        except Exception:  # noqa: BLE001 - a cosmetic failure must not exit chat
+            # Latch until an explicit pack change; retries on every repaint can
+            # otherwise break input/output or repeatedly expose diagnostics.
+            self._render_failed = True
+            self._enabled = False
+            if self.controller is not None:
+                with contextlib.suppress(Exception):
+                    self.controller.set_enabled(False)
+            self.app.invalidate()
+            return []
+
+    def _render_dock_fragments(self):
         if not self.dock_height or not self._allowed():
             return []
         name, status = self._dock_label()
         if self.dock_mode == "compact":
             return [("fg:#c7d0da", f" {name} | {status} (compact)")]
         columns, rows = self.app.output.get_size().columns, self.dock_height
-        frame = fit_frame(
-            self.controller.current_frame(), max_columns=max(1, columns - 2),
-            max_rows=rows,
-        )
-        if frame is None:
-            return []
-        lines = list(split_lines(prompt_toolkit_fragments(frame, background=(21, 25, 30))))
+        source = self.controller.current_frame()
+        frame = None
+        try:
+            frame = fit_frame(source, max_columns=max(1, columns - 2), max_rows=rows)
+            if frame is None:
+                return []
+            frame_width = frame.width
+            lines = list(split_lines(prompt_toolkit_fragments(frame, background=(21, 25, 30))))
+        finally:
+            if frame is not None:
+                frame.close()
+            if source is not None:
+                source.close()
         # Keep the authored canvas/aspect ratio, anchor its feet at the bottom,
         # and use surplus horizontal space for a readable name/state caption.
         top = rows - len(lines)
@@ -631,9 +655,9 @@ class OwnedChatCompositor:
             if row >= top:
                 result.extend(lines[row - top])
             else:
-                result.append(("", " " * frame.width))
+                result.append(("", " " * frame_width))
             label = labels.get(row, "")
-            if label and len(label) <= columns - frame.width - 4:
+            if label and len(label) <= columns - frame_width - 4:
                 result.append(("fg:#c7d0da bold" if row == label_row else "fg:#9aabbc", "  " + label))
             if row < rows - 1:
                 result.append(("", "\n"))
@@ -738,9 +762,13 @@ class OwnedChatCompositor:
         self.app.invalidate()
 
     def _history_status(self):
+        if self._render_failed and not self.follow_tail:
+            return [("bold", " Jump to latest ", self._jump_click),
+                    ("fg:#e9c46a", "| Emotes unavailable")]
+        warning = [("fg:#e9c46a", " Emotes unavailable; chat still active. | ")] if self._render_failed else []
         if self.follow_tail:
-            return [("dim", " History: wheel / PgUp to read; select and Ctrl+C to copy")]
-        return [("bold", " Reading history | Jump to latest ", self._jump_click)]
+            return warning + [("dim", " History: wheel / PgUp to read; select and Ctrl+C to copy")]
+        return warning + [("bold", " Reading history | Jump to latest ", self._jump_click)]
 
     def _jump_click(self, event):
         if event.event_type == MouseEventType.MOUSE_UP:

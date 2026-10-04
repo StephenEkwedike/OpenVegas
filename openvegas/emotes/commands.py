@@ -13,6 +13,7 @@ from uuid import uuid4
 import click
 from rich.console import Console
 from rich.live import Live
+
 from openvegas.cli_command import cli_command
 
 from .artist import artist
@@ -318,9 +319,26 @@ def _animated(console: Console) -> bool:
 
 
 def _render(console, frame):
-    return rich_frame(
-        fit_frame(frame, max_columns=console.width, max_rows=max(0, console.height - 4))
-    )
+    """Consume an owned frame copy, never the repository's cached sheet."""
+    fitted = None
+    try:
+        fitted = fit_frame(frame, max_columns=console.width, max_rows=max(0, console.height - 4))
+        return rich_frame(fitted)
+    except Exception:  # noqa: BLE001 - contain cosmetic failures without exposing diagnostics
+        raise PackError("Emote renderer unavailable; close or restart this companion.") from None
+    finally:
+        if fitted is not None and fitted is not frame:
+            fitted.close()
+        if frame is not None:
+            frame.close()
+
+
+def _render_current(console, controller):
+    try:
+        frame = controller.current_frame()
+    except Exception:  # noqa: BLE001 - same boundary includes frame decoding
+        raise PackError("Emote renderer unavailable; close or restart this companion.") from None
+    return _render(console, frame)
 
 
 @emote.command()
@@ -348,14 +366,14 @@ def preview(ctx, pack_id, reduced_motion):
         click.echo("Local visual preview only; this does not equip or grant ownership.")
         try:
             with Live(
-                _render(console, controller.current_frame()),
+                _render_current(console, controller),
                 console=console,
                 auto_refresh=False,
                 transient=True,
                 screen=False,
             ) as live:
                 while controller.current_state == "complete":
-                    live.update(_render(console, controller.current_frame()), refresh=True)
+                    live.update(_render_current(console, controller), refresh=True)
                     time.sleep(1 / 30)
         finally:
             controller.close()
@@ -462,7 +480,7 @@ def watch(ctx, source, session_id, pack_id, reduced_motion, completion_pack_id=N
             if services.selection.revision() != preference_revision:
                 raise PackError("Local emote selection changed; restart watch if intended")
             with Live(
-                _render(console, controller.current_frame()),
+                _render_current(console, controller),
                 console=console,
                 auto_refresh=False,
                 transient=True,
@@ -493,7 +511,7 @@ def watch(ctx, source, session_id, pack_id, reduced_motion, completion_pack_id=N
                     if signature != getattr(controller, "_watch_signature", None):
                         if services.selection.revision() != preference_revision:
                             break
-                        live.update(_render(console, controller.current_frame()), refresh=True)
+                        live.update(_render_current(console, controller), refresh=True)
                         controller._watch_signature = signature
                     time.sleep(1 / 30)
         finally:

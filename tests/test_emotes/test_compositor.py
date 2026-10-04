@@ -58,6 +58,115 @@ def mouse(kind, y=0):
     return MouseEvent(Point(x=0, y=y), kind, MouseButton.LEFT, frozenset())
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["current_frame", "fit_frame", "prompt_toolkit_fragments"])
+async def test_render_failure_is_cosmetic_and_does_not_retry_or_lose_input(pack, clock, monkeypatch, failure):
+    from openvegas.emotes import compositor
+
+    async with running(pack, clock) as (owner, pipe, _, _, _):
+        owner.default_buffer.document = Document("hello world", 5)
+        owner.append_output("retained history\n" * 40)
+        owner.scroll(-4)
+        draft = owner.default_buffer.document
+        history = owner.history_buffer.text
+        calls = []
+
+        def broken(*args, **kwargs):
+            calls.append(True)
+            raise RuntimeError("private renderer diagnostic")
+
+        target = owner.controller if failure == "current_frame" else compositor
+        with monkeypatch.context() as patch:
+            patch.setattr(target, failure, broken)
+            assert owner._dock_fragments() == []
+            for _ in range(3):
+                owner.tick()
+                assert owner._dock_fragments() == []
+            assert len(calls) == 1
+            assert owner.default_buffer.document == draft
+            assert owner.history_buffer.text == history
+            assert not owner.follow_tail
+            status = "".join(fragment[1] for fragment in owner._history_status())
+            assert "Emotes unavailable" in status
+            assert "private renderer diagnostic" not in status
+            assert not owner._app_task.done()
+            assert not owner._tick_task.done()
+            assert owner.insert_voice("spoken")
+            assert owner.default_buffer.text == "hello spoken world"
+            prompt = asyncio.create_task(owner.prompt_async())
+            await until(lambda: owner._pending is not None)
+            pipe.send_text("\r")
+            assert await prompt == "hello spoken world"
+        owner.set_packs(pack, access_guard=lambda: True)
+        assert owner._dock_fragments()
+        assert "Emotes unavailable" not in "".join(f[1] for f in owner._history_status())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail", [None, "fit", "render"])
+async def test_actual_repaint_releases_temporary_images(pack, clock, monkeypatch, fail):
+    from openvegas.emotes import compositor
+
+    async with running(pack, clock) as (owner, _, _, _, _):
+        images = []
+        original_fit = compositor.fit_frame
+        original_render = compositor.prompt_toolkit_fragments
+
+        def capture_fit(source, **kwargs):
+            images.append(source)
+            if fail == "fit":
+                raise RuntimeError("synthetic fitting failure")
+            fitted = original_fit(source, **kwargs)
+            images.append(fitted)
+            return fitted
+
+        def render(frame, **kwargs):
+            if fail == "render":
+                raise RuntimeError("synthetic rendering failure")
+            return original_render(frame, **kwargs)
+
+        monkeypatch.setattr(compositor, "fit_frame", capture_fit)
+        monkeypatch.setattr(compositor, "prompt_toolkit_fragments", render)
+        owner.app.invalidate()
+        await until(lambda: bool(images))
+        assert owner._render_failed is bool(fail)
+        assert not owner._app_task.done()
+        for image in images:
+            with pytest.raises(ValueError, match="closed image"):
+                image.getpixel((0, 0))
+        # Rendering closes copies, never the repository's cached source.
+        assert pack.frame(0).getpixel((0, 0)) == (255, 0, 0, 255)
+
+
+@pytest.mark.asyncio
+async def test_render_failure_keeps_narrow_history_action_and_cancellation(pack, clock):
+    async with running(pack, clock) as (owner, _, _, _, size):
+        started = asyncio.Event()
+        cancelled = []
+
+        async def work():
+            started.set()
+            await asyncio.Event().wait()
+
+        turn = asyncio.create_task(owner.run_turn(work(), on_cancel=lambda: cancelled.append(True)))
+        await started.wait()
+        owner._render_failed = True
+        owner.append_output("retained history\n" * 80)
+        owner.scroll(-10)
+        size[0] = Size(rows=24, columns=40)
+        fragments = owner._history_status()
+        assert "Jump to latest" in fragments[0][1]
+        assert fragments[0][2] == owner._jump_click
+        assert len("".join(f[1] for f in fragments)) <= 40
+        assert owner.cancel_turn()
+        with pytest.raises(TurnCancelled):
+            await turn
+        assert cancelled == [True]
+        assert not owner._app_task.done()
+        fragments[0][2](mouse(MouseEventType.MOUSE_UP))
+        assert owner.follow_tail
+
+
 @pytest.mark.parametrize("control", [
     "\x9d52;c;hidden\x9c", "\x90hidden\x1b\\", "\x98hidden\x9c",
     "\x9ehidden\x9c", "\x9fhidden\x9c", "\x1b]52;c;hidden\x9c",

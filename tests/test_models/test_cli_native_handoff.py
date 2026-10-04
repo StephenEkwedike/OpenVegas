@@ -442,6 +442,52 @@ BOUND_PHASES = ["pending_first", "handoff_history", "native_history"]
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("unsupported,hint", [
+    ("reasoning", "/reasoning default"),
+    ("web", "Choose a web-capable model"),
+    ("tools", "choose another model"),
+    ("attachments", "Send or remove pending attachments"),
+])
+async def test_handoff_preflight_retains_state_without_creating_pending_operation(shell, monkeypatch, unsupported, hint):
+    monkeypatch.setenv("OPENVEGAS_CHAT_NATIVE_TASK_HANDOFF", "1")
+    if unsupported == "reasoning":
+        shell.helpers.set_state(current_reasoning_effort="high")
+    elif unsupported == "web":
+        shell.helpers.set_state(web_search_requested=True)
+    elif unsupported == "tools":
+        shell.target["capabilities"]["tools"] = False
+    else:
+        shell.namespace["pending_attachments"].append({"path": "queued-fixture.png"})
+    before = shell.state()
+    queued = deepcopy(shell.namespace["pending_attachments"])
+    await shell.helpers.command(["/model " + NEW])
+    assert shell.state() == before
+    assert shell.namespace["pending_attachments"] == queued
+    assert shell.state()["pending_native_handoff"] is None
+    assert any(hint in note and "switched" in note for note in shell.notes)
+    shell.client.agent_run_get.assert_not_awaited()
+    shell.client.agent_run_create.assert_not_awaited()
+    shell.client.native_handoff_prepare.assert_not_awaited()
+    shell.client.native_handoff_confirm.assert_not_awaited()
+    assert not shell.inference_bodies
+
+
+@pytest.mark.asyncio
+async def test_unsupported_reasoning_can_be_reset_then_handoff_without_cancel(shell, monkeypatch):
+    monkeypatch.setenv("OPENVEGAS_CHAT_NATIVE_TASK_HANDOFF", "1")
+    shell.helpers.set_state(current_reasoning_effort="high")
+    await shell.helpers.command(["/model " + NEW])
+    assert shell.state()["pending_native_handoff"] is None
+    await shell.helpers.command(["/reasoning default", "/model " + NEW])
+    assert shell.state()["current_model"] == NEW
+    assert shell.state()["current_reasoning_effort"] is None
+    assert shell.state()["pending_native_handoff"] is None
+    shell.client.native_handoff_prepare.assert_awaited_once()
+    shell.client.native_handoff_confirm.assert_awaited_once()
+    assert not shell.inference_bodies
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("phase", BOUND_PHASES)
 @pytest.mark.parametrize("flag", NATIVE_FLAGS)
 async def test_dropped_native_flag_at_task_entry_retains_session(shell, monkeypatch, phase, flag):
