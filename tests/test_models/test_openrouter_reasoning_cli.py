@@ -12,6 +12,7 @@ import test_cli_stream_completion as streaming
 from openvegas.tui.model_picker import ModelSelectionError, plan_switch, reviewed_capabilities, validate_selection
 
 SOURCE = Path(__file__).resolve().parents[2] / "openvegas/cli.py"
+consumer = streaming.consumer
 
 
 def reasoning_shell(overrides=None):
@@ -107,8 +108,7 @@ async def test_provider_change_explicitly_resets_effort():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream_mode", ["native", "disabled", "unavailable"])
-async def test_real_stream_consumer_propagates_effort_without_emitting_reasoning(stream_mode):
-    consumer = streaming.consumer.__wrapped__()
+async def test_real_stream_consumer_propagates_effort_without_emitting_reasoning(stream_mode, consumer):
     sent = []
     async def stream(*args, **kwargs):
         sent.append(kwargs)

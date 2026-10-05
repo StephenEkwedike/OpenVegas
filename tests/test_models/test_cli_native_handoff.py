@@ -21,6 +21,7 @@ import pytest
 from openvegas.agent.native_scope_client import NativeGenerationSession
 from openvegas.client import APIError
 from openvegas.contracts.native_handoff import NativeHandoffResponse
+from openvegas.emotes.bridge import ChatEmoteBridge
 from openvegas.tui.model_picker import (
     ModelSelectionError,
     ReviewedModelCapabilities,
@@ -228,6 +229,8 @@ class Shell:
                                      command_branch("/continuity")]
         factory.body[-1:-1] = [*nodes.values(), entry, web]
         ast.fix_missing_locations(wrapper)
+        bridge = ChatEmoteBridge("handoff-test", publish=lambda _event: True)
+        turn = bridge.begin("turn")
         namespace = {"initial": initial, "SimpleNamespace": SimpleNamespace, "Any": Any,
             "asyncio": asyncio, "os": os, "re": re, "uuid": uuid, "APIError": APIError,
             "NativeGenerationSession": NativeGenerationSession,
@@ -241,7 +244,8 @@ class Shell:
             "workspace_root": "/synthetic/workspace", "workspace_git_root": "/synthetic/workspace",
             "workspace_fp": "sha256:" + "c" * 64, "pending_attachments": [], "chat_transcript": [],
             "allow_model_switch": True, "conversation_mode": "persistent", "show_stream_status": False,
-            "native_history_mode": True, "user_message": "Exact new task", "emote_bridge": SimpleNamespace(current_turn="turn"),
+            "native_history_mode": True, "user_message": "Exact new task",
+            "emote_bridge": bridge, "emote_turn": turn,
             "PendingAttachment": SimpleNamespace,
             "attachment_file_ids_for_turn": [],
         }

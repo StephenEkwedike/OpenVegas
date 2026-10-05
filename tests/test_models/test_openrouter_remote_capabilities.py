@@ -13,6 +13,7 @@ import pytest
 import openvegas.cli as cli
 from openvegas.agent.native_scope_client import NativeGenerationSession
 from openvegas.client import APIError
+from openvegas.emotes.bridge import ChatEmoteBridge
 from openvegas.tui.model_picker import (
     ModelSelectionError,
     reviewed_capabilities,
@@ -112,6 +113,8 @@ def chat_shell(client, pending=(), effort=None):
     attachment_preview_max_chars = 1000
     native_generation_session = NativeGenerationSession()
     native_history_mode = False
+    emote_bridge = ChatEmoteBridge('remote-caps-test', publish=lambda _event: True)
+    emote_turn = emote_bridge.begin('turn-1')
 """
     code += "\n".join("    " + line for node in helpers for line in ast.unparse(node).splitlines())
     code += """
@@ -134,6 +137,7 @@ def chat_shell(client, pending=(), effort=None):
     namespace = vars(cli).copy()
     namespace.update({"MODEL": MODEL, "APIError": APIError, "SimpleNamespace": SimpleNamespace,
                       "NativeGenerationSession": NativeGenerationSession,
+                      "ChatEmoteBridge": ChatEmoteBridge,
                       "validate_selection": validate_selection, "ModelSelectionError": ModelSelectionError,
                       "reviewed_capabilities": reviewed_capabilities,
                       "console": SimpleNamespace(print=lambda *a, **k: output.append(str(a))),

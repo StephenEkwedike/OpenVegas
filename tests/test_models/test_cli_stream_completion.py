@@ -10,6 +10,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from openvegas.emotes.bridge import ChatEmoteBridge
+
 
 class APIError(Exception):
     def __init__(self, status, detail, data=None):
@@ -48,7 +50,10 @@ def consumer():
     requests = []
     client = SimpleNamespace(ask=AsyncMock(return_value={"text": "non-stream"}))
     from openvegas.agent.native_scope_client import NativeGenerationSession
+    bridge = ChatEmoteBridge("stream-test", publish=lambda _event: True)
     namespace = {
+        "emote_bridge": bridge,
+        "emote_turn": bridge.begin("turn-1"),
         "native_generation_session": NativeGenerationSession(),
         "Any": Any,
         "ReviewedModelCapabilities": __import__("openvegas.tui.model_picker", fromlist=["ReviewedModelCapabilities"]).ReviewedModelCapabilities,
@@ -81,7 +86,8 @@ def consumer():
             ), timeout=1,
         ))
 
-    return SimpleNamespace(run=run, client=client, requests=requests, namespace=namespace)
+    yield SimpleNamespace(run=run, client=client, requests=requests, namespace=namespace)
+    bridge.close()
 
 
 @pytest.mark.parametrize("events", [
