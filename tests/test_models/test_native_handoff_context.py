@@ -112,6 +112,22 @@ async def test_public_history_data_fresh_tools_reasoning_and_full_bound(case):
 
 
 @pytest.mark.asyncio
+async def test_completed_user_requests_are_context_not_new_actions(case):
+    original = deepcopy(case.tasks)
+    result = await prepare(case)
+    notice = result.messages[1]
+    assert notice["role"] == "system"
+    assert "Earlier user requests in this history are completed tasks" in notice["content"]
+    assert "do not restart them or repeat their actions" in notice["content"]
+    assert "Answer the final, current user request" in notice["content"]
+    assert result.messages[2]["content"][0]["text"] == original[0]["user_text"]
+    assert result.messages[-1] == case.request.messages[-1]
+    assert case.tasks == original
+    # Clarifying task boundaries must not disable tools needed by the new request.
+    assert build_payload(result, case.config, case.capabilities)["tools"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("change", ["tools", "reasoning", "context", "message_count", "wire_bytes"])
 async def test_unsupported_or_oversize_input_rejected_without_mutating_request(case, change, monkeypatch):
     original = deepcopy(case.request.messages)
