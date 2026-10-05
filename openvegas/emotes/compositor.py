@@ -494,26 +494,34 @@ class OwnedChatCompositor:
         await self.start()
         if self._suspended:
             raise RuntimeError("A terminal handoff is already active")
+        # Claim before scheduling: two callers can otherwise pass the guard
+        # before either handoff task starts.
+        self._suspended = True
 
         async def suspended():
-            self._suspended = True
-            try:
-                async with in_terminal():
-                    self._drain_output()
-                    sink = self.console.file
-                    self.console.file = self._original_file
-                    try:
-                        return function()
-                    finally:
-                        self.console.file = sink
-            finally:
-                self._suspended = False
-                self.app.invalidate()
+            async with in_terminal():
+                self._drain_output()
+                sink = self.console.file
+                self.console.file = self._original_file
+                try:
+                    return function()
+                finally:
+                    self.console.file = sink
 
         # in_terminal must execute in this Application's context, not whichever
         # unrelated prompt last happened to be current in the caller's task.
-        task = self.app.context.run(asyncio.create_task, suspended())
-        return await task
+        handoff = suspended()
+        try:
+            try:
+                task = self.app.context.run(asyncio.create_task, handoff)
+            except BaseException:
+                handoff.close()
+                raise
+            return await task
+        finally:
+            # Also release when the child is cancelled before its first step.
+            self._suspended = False
+            self.app.invalidate()
 
     def _allowed(self):
         try:

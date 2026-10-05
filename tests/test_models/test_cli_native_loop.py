@@ -416,6 +416,82 @@ async def test_denied_native_bash_never_proposes_executes_or_sends_replacement(l
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["accept", "decline", "cancel", "error"])
+async def test_approval_resumes_emote_only_when_execution_really_continues(loop_driver, ending):
+    from openvegas.client import APIError
+    from openvegas.emotes.bridge import ChatEmoteBridge
+
+    driver = loop_driver(
+        batches=[[tool("Bash", {"command": "printf synthetic"})], []],
+        deny_approval=ending == "decline",
+    )
+    phases = []
+    bridge = ChatEmoteBridge("approval-regression", lambda event: phases.append(event.phase.value))
+    turn = bridge.begin("approval-turn")
+    driver.namespace["emote_bridge"] = bridge
+    if ending in {"error", "cancel"}:
+        driver.namespace["_chat_modal"] = AsyncMock(side_effect=(
+            asyncio.CancelledError() if ending == "cancel" else APIError(503, "synthetic modal failure")
+        ))
+    try:
+        if ending == "accept":
+            assert await driver.run() is True
+            assert phases.count("execution_resumed") == 1
+            assert phases.index("awaiting_user") < phases.index("execution_resumed")
+            assert phases[-1] == "turn_completed"
+            assert len(driver.executions) == 1
+        else:
+            with pytest.raises(asyncio.CancelledError if ending == "cancel" else APIError):
+                await driver.run()
+            assert "awaiting_user" in phases
+            assert "execution_resumed" not in phases
+            assert not driver.proposals and not driver.executions
+    finally:
+        bridge.cancel(turn=turn)
+
+
+@pytest.mark.asyncio
+async def test_legacy_denial_resumes_emote_for_direct_finalizer(loop_driver, monkeypatch):
+    from openvegas.emotes.bridge import ChatEmoteBridge
+
+    monkeypatch.setenv("OPENVEGAS_CHAT_NATIVE_GENERATION_SCOPE", "0")
+    monkeypatch.setenv("OPENVEGAS_CHAT_NATIVE_GENERATION_HISTORY", "0")
+    driver = loop_driver(batches=[], deny_approval=True)
+    phases, requests = [], []
+    bridge = ChatEmoteBridge("legacy-approval-regression", lambda event: phases.append(event.phase.value))
+    turn = bridge.begin("approval-turn")
+    driver.namespace["emote_bridge"] = bridge
+
+    async def ask(_prompt, *_args, **kwargs):
+        requests.append(kwargs)
+        assert not bridge._paused
+        if len(requests) == 1:
+            assert kwargs["enable_tools"] is True
+            return {
+                "text": "", "completion_status": "incomplete", "v_cost": "0",
+                "tool_calls": [tool("shell_run", {"command": "pytest"}, mode="mutating")],
+            }
+        assert len(requests) == 2
+        assert kwargs["idempotency_key"].startswith("chat-finalize-")
+        assert kwargs["enable_tools"] is False
+        assert len(driver.approvals) == 1
+        assert phases == ["turn_started", "awaiting_user", "execution_resumed"]
+        return {
+            "text": "Declined tool; no shell execution.", "completion_status": "complete",
+            "v_cost": "0", "tool_calls": [],
+        }
+
+    monkeypatch.setattr(driver.client, "ask", ask)
+    try:
+        assert await driver.run("Run tests in this repository") is True
+        assert len(requests) == 2
+        assert phases == ["turn_started", "awaiting_user", "execution_resumed", "turn_failed"]
+        assert not driver.proposals and not driver.starts and not driver.executions and not driver.callbacks
+    finally:
+        bridge.cancel(turn=turn)
+
+
+@pytest.mark.asyncio
 async def test_finalized_followup_with_disabled_handoff_retains_complete_source(loop_driver):
     from openvegas.client import APIError
 

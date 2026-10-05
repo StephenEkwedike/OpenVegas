@@ -306,7 +306,9 @@ class AIGateway:
                 request_id, replay = await self._begin_inference_request(
                     user_id=user_id, idempotency_key=req.idempotency_key,
                     payload_hash=payload_hash, tx=tx,
-                    **({"allow_retry": False} if managed_web or native_claim is not None else {}),
+                    # A failed managed request may still have been billed upstream.
+                    # Reusing its key must not erase evidence and dispatch it again.
+                    **({"allow_retry": False} if req.provider == "openrouter" or managed_web or native_claim is not None else {}),
                 )
                 if native_claim is not None:
                     if replay is not None:
@@ -695,6 +697,7 @@ class AIGateway:
             await self._mark_request_failed(
                 request_id=ctx.request_id, tx=tx,
                 **({"web_failure": failure_fields} if failure_fields else {}),
+                provider_request_id=getattr(ctx, "provider_request_id", None),
             )
 
     async def _replay_web_request(self, req: InferenceRequest) -> InferenceResult | None:
@@ -820,7 +823,11 @@ class AIGateway:
                 return rid, None
             return request_id, None
 
-    async def _mark_request_failed(self, request_id: str, *, tx=None, web_failure: dict | None = None) -> None:
+    async def _mark_request_failed(
+        self, request_id: str, *, tx=None, web_failure: dict | None = None,
+        provider_request_id: str | None = None,
+    ) -> None:
+        provider_request_id = provider_request_id or (web_failure or {}).get("provider_request_id")
         async with self._transaction(tx) as tx:
             await tx.execute(
                 """
@@ -835,14 +842,15 @@ class AIGateway:
                 request_id,
                 json.dumps(
                     {"error": APIErrorCode.PROVIDER_UNAVAILABLE.value, "detail": "Inference provider call failed",
-                     **(web_failure or {})},
+                     **(web_failure or {}),
+                     **({"provider_request_id": provider_request_id} if provider_request_id else {})},
                     separators=(",", ":"),
                 ),
             )
-            if web_failure and web_failure.get("provider_request_id"):
+            if provider_request_id:
                 await tx.execute(
                     "UPDATE inference_requests SET provider_request_id=$2 WHERE id=$1 AND status='failed'",
-                    request_id, web_failure["provider_request_id"],
+                    request_id, provider_request_id,
                 )
 
     async def _estimate_grant_cover_v(

@@ -6613,6 +6613,9 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 return result
 
             require_native_mode()
+            # Finalizers can dispatch directly after a denied legacy tool,
+            # without returning through the next tool-loop iteration.
+            emote_bridge.resume(turn=emote_turn)
             stream_enabled = bool(
                 _env_flag("OPENVEGAS_CHAT_STREAM_EVENTS", "1")
                 and _chat_capability("stream_events")
@@ -7382,6 +7385,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     _tool_debug("injected synthetic fs_apply_patch on step 0")
 
             if not candidate_tool_calls:
+                emote_bridge.resume(turn=emote_turn)
                 ide_context_json: str | None = None
                 if current_run_id:
                     try:
@@ -7986,9 +7990,6 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                             ide_fallback_reason = "ide_bridge_unavailable"
                             if _ide_bridge_trace_enabled():
                                 _ide_bridge_debug(f"interactive diff bridge error={type(e).__name__}: {e}")
-                        finally:
-                            emote_bridge.resume(turn=emote_turn)
-
                     if raw_diff_result is None and patch_text.strip() and _terminal_diff_fallback_enabled():
                         parsed_original = parse_unified_patch_terminal(patch_text)
                         if parsed_original.parse_error:
@@ -8028,15 +8029,12 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         emit_metric("tool_terminal_diff_invoked_total", {"tool": "write"})
                         _chat_drain_stdin()
                         emote_bridge.pause(turn=emote_turn)
-                        try:
-                            raw_diff_result = await _chat_modal(lambda write_path=write_path, patch_text=patch_text: review_patch_terminal(
-                                path=write_path,
-                                patch_text=patch_text,
-                                allow_partial_accept=True,
-                                console=console,
-                            ))
-                        finally:
-                            emote_bridge.resume(turn=emote_turn)
+                        raw_diff_result = await _chat_modal(lambda write_path=write_path, patch_text=patch_text: review_patch_terminal(
+                            path=write_path,
+                            patch_text=patch_text,
+                            allow_partial_accept=True,
+                            console=console,
+                        ))
                         _chat_drain_stdin()
                         diff_surface = "terminal"
                     elif raw_diff_result is None and patch_text.strip():
@@ -8169,10 +8167,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 if native_plan is not None and native_call_key not in native_mutation_approved:
                     console.print(str(arguments["patch"]) or "No content change.", markup=False, highlight=False)
                     emote_bridge.pause(turn=emote_turn)
-                    try:
-                        approved = await _chat_modal(lambda: click.confirm("Apply this exact file edit?", default=False))
-                    finally:
-                        emote_bridge.resume(turn=emote_turn)
+                    approved = await _chat_modal(lambda: click.confirm("Apply this exact file edit?", default=False))
                     if not approved:
                         raise APIError(409, "Native file edit declined. No edit or replacement inference was performed.")
                 if policy == ToolPolicyDecision.ASK and native_plan is None:
@@ -8182,15 +8177,12 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         action_label = describe_tool_action(tool_name, arguments)
                         _chat_drain_stdin()
                         emote_bridge.pause(turn=emote_turn)
-                        try:
-                            decision = await _chat_modal(lambda tool_name=tool_name, arguments=arguments, action_label=action_label: choose_approval(
-                                tool_name=tool_name,
-                                arguments=arguments if isinstance(arguments, dict) else {},
-                                action_label=action_label,
-                                console=console,
-                            ))
-                        finally:
-                            emote_bridge.resume(turn=emote_turn)
+                        decision = await _chat_modal(lambda tool_name=tool_name, arguments=arguments, action_label=action_label: choose_approval(
+                            tool_name=tool_name,
+                            arguments=arguments if isinstance(arguments, dict) else {},
+                            action_label=action_label,
+                            console=console,
+                        ))
                         _chat_drain_stdin()
                         apply_approval_decision(session_approval, action_scope, decision)
                         if decision == ApprovalDecision.DENY_AND_REPLAN:
@@ -8206,6 +8198,9 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                             )
                             continue
 
+                # Approval exits are not execution events. Resume only after all
+                # permission/diff checks accept work, not from a modal's finally.
+                emote_bridge.resume(turn=emote_turn)
                 native_call_key = f"{tool_req.get('native_inference_request_id')}:{tool_req.get('provider_call_id')}"
                 propose_key = native_propose_keys.setdefault(native_call_key, f"tool-propose-{uuid.uuid4()}") if native_history_mode else None
                 start_key = native_start_keys.setdefault(native_call_key, f"tool-start-{uuid.uuid4()}") if native_history_mode else None

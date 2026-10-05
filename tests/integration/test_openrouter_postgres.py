@@ -1,5 +1,6 @@
 """Real local database/wallet/model switches; supplier HTTP is always mocked."""
 
+import asyncio
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -8,6 +9,7 @@ from decimal import Decimal
 import httpx
 import pytest
 
+from openvegas.contracts.errors import APIErrorCode, ContractError
 from openvegas.gateway.catalog import ProviderCatalog
 from openvegas.gateway.inference import AIGateway, InferenceRequest
 from openvegas.wallet.ledger import WalletService
@@ -197,3 +199,60 @@ async def test_openrouter_actual_supplier_cost_retail_charge_and_idempotency(
             )
             == 0
         )
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("failure", ["malformed_response", "timeout", "cancel"])
+async def test_failed_managed_attempt_preserves_receipt_and_never_redispatches(
+    database_factory, monkeypatch, stream, failure
+):
+    async with database_factory(through=41) as sandbox:
+        db = sandbox.db
+        user = await provision(db, monkeypatch)
+        wallet = WalletService(db)
+        await wallet.fund_from_card("user:" + user, Decimal(100), "fixture:" + user)
+        calls = []
+
+        def supplier(request):
+            calls.append(1)
+            if failure == "timeout":
+                raise httpx.ReadTimeout("synthetic timeout", request=request)
+            if failure == "cancel":
+                raise asyncio.CancelledError()
+            return httpx.Response(200, json={
+                "id": "gen-failed-managed-receipt", "model": MODELS[0],
+                "choices": [],
+            })
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(supplier)) as http:
+            gateway = AIGateway(db, wallet, ProviderCatalog(db), http_client=http)
+            req = InferenceRequest(
+                "user:" + user, "openrouter", MODELS[0],
+                [{"role": "user", "content": "Synthetic failed request"}],
+                max_tokens=32, idempotency_key=str(uuid.uuid4()),
+            )
+
+            async def invoke():
+                if stream:
+                    return [event async for event in gateway.stream_infer(req)]
+                return await gateway.infer(req)
+
+            with pytest.raises(asyncio.CancelledError if failure == "cancel" else ContractError):
+                await invoke()
+            before = dict(await db.fetchrow("SELECT * FROM inference_requests"))
+            assert before["status"] == "failed"
+            expected_id = "gen-failed-managed-receipt" if failure == "malformed_response" else None
+            assert before["provider_request_id"] == expected_id
+            assert json.loads(before["response_body_text"]).get("provider_request_id") == expected_id
+            assert before["final_provider_cost_usd"] is None
+            for _ in range(2):
+                with pytest.raises(ContractError) as error:
+                    await invoke()
+                assert error.value.code == APIErrorCode.HOLD_CONFLICT
+            assert dict(await db.fetchrow("SELECT * FROM inference_requests")) == before
+        assert calls == [1]
+        assert await wallet.get_balance("user:" + user) == Decimal(100)
+        assert await db.fetchval("SELECT count(*) FROM inference_usage") == 0
+        assert await db.fetchval("SELECT count(*) FROM inference_preauthorizations WHERE status='reserved'") == 0
+        # A refunded customer hold does not establish whether the supplier billed.
+        assert await db.fetchval("SELECT final_charge_v FROM inference_requests") is None
