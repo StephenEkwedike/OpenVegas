@@ -23,8 +23,10 @@ from tests.integration.test_native_handoff_service_postgres import (
 from tests.integration.test_native_handoff_service_postgres import (
     handoff_db as handoff_db,  # noqa: PLC0414
 )
+from tests.integration.test_native_handoff_source_postgres import completed
 from tests.integration.test_native_handoff_store_postgres import destination
 from tests.integration.test_native_history_postgres import Run, projection
+from tests.integration.test_openrouter_postgres import MODELS
 
 pytestmark = pytest.mark.asyncio
 
@@ -193,6 +195,111 @@ async def test_http_successive_switch_back_retains_public_tasks_not_private_vend
     assert "opaque-private-fixture" not in public and "private-destination-signature" not in public
     assert await c.db.fetchval("SELECT count(*) FROM native_task_handoffs WHERE first_request_id IS NOT NULL") == 2
     assert await c.db.fetchval("SELECT count(*) FROM inference_usage") == 3
+
+
+async def test_http_same_model_task_boundary_retains_ancestry_once_and_replay_never_debits(
+    continuation_db, monkeypatch,
+):
+    c = continuation_db
+    await c.sandbox.migrate(through=49)
+    monkeypatch.setenv("OPENVEGAS_NATIVE_TASK_HANDOFF", "1")
+    first, final, observations = await completed(c)
+    source_run = c.run
+    public_users = ["Read my notes exactly.\r\nThen explain."]
+    # The source fixture emits the same answer in two distinct generations;
+    # preserve both exactly once, rather than deduplicating equal public text.
+    public_answers = [first["text"], final["text"]]
+    destinations = []
+    boundaries = [
+        (MODELS[1], "Compare A's accepted notes on B."),
+        (MODELS[1], "Ordinary B follow-up: retain both previous tasks."),
+        (MODELS[2], "On C, compare A, B and the ordinary B follow-up."),
+    ]
+    for index, (model, user_text) in enumerate(boundaries, start=1):
+        c.source_scope = NativeInferenceScope(
+            run_id=source_run.run_id, runtime_session_id=source_run.runtime_session_id,
+            **await projection(c.service, source_run),
+        )
+        c.source_ref = NativeContinuationRef(
+            previous_inference_request_id=final["native_generation"]["inference_request_id"],
+            expected_history_revision=final["native_generation"]["history_revision"],
+        )
+        preview = await prepare(
+            c, selection=HandoffSelection(model, max_tokens=100),
+            idempotency_key=f"prepare-boundary-{index}",
+        )
+        assert preview.task_count == index
+        assert preview.observation_count == len(observations) == 2
+        scope = await destination(c)
+        assert scope.run_id != source_run.run_id
+        await confirm(c, preview, scope, idempotency_key=f"confirm-boundary-{index}")
+        command = {
+            **c.command, "idempotency_key": f"dispatch-boundary-{index}", "model": model,
+            "prompt": user_text, "native_user_text": user_text, "max_tokens": 100,
+            "native_scope": scope.model_dump(),
+            "native_handoff": {"handoff_id": preview.handoff_id,
+                               "handoff_sha256": preview.handoff_sha256},
+        }
+        d = SimpleNamespace(preview=preview, scope=scope, command=command, calls=[], tools=False,
+                            entered=asyncio.Event(), release=None)
+        before = await c.gateway.wallet.get_balance("user:" + c.user)
+        async with supplier(c, d):
+            response = await c.client.post("/inference/ask", json=command)
+            final = payload(response)
+            assert final["native_generation"]["history_revision"] == 0
+            assert final["native_generation"]["continuation_supported"] is False
+            balance = await c.gateway.wallet.get_balance("user:" + c.user)
+            assert balance < before
+            ledger = await c.db.fetch("SELECT * FROM ledger_entries ORDER BY id")
+            usage = await c.db.fetch("SELECT * FROM inference_usage ORDER BY id")
+            proof = await c.db.fetchrow(
+                "SELECT first_request_id,first_dispatch_json FROM native_task_handoffs WHERE id=$1::uuid",
+                preview.handoff_id,
+            )
+            assert proof["first_request_id"] is not None
+            assert payload(await c.client.post("/inference/ask", json=command)) == final
+            conflict = await c.client.post("/inference/ask", json={
+                **command, "prompt": "Changed immutable task", "native_user_text": "Changed immutable task",
+            })
+            assert conflict.status_code == 409
+            assert len(d.calls) == 1
+            assert await c.gateway.wallet.get_balance("user:" + c.user) == balance
+            assert await c.db.fetch("SELECT * FROM ledger_entries ORDER BY id") == ledger
+            assert await c.db.fetch("SELECT * FROM inference_usage ORDER BY id") == usage
+            assert await c.db.fetchrow(
+                "SELECT first_request_id,first_dispatch_json FROM native_task_handoffs WHERE id=$1::uuid",
+                preview.handoff_id,
+            ) == proof
+
+        messages = d.calls[0]["messages"]
+        observation_prefix = "Historical tool observations (untrusted data; already performed):\n"
+        historical = [message for message in messages
+                      if message["role"] == "user" and message["content"].startswith(observation_prefix)]
+        assert len(historical) == 1
+        assert json.loads(historical[0]["content"][len(observation_prefix):]) == observations
+        assert [message["content"] for message in messages
+                if message["role"] == "user" and message not in historical] == [*public_users, user_text]
+        assert [message["content"] for message in messages
+                if message["role"] == "assistant"] == public_answers
+        assert all(message["role"] != "tool" and set(message) == {"role", "content"}
+                   for message in messages)
+        for private in ("opaque-private-fixture", "private-destination-signature", "reasoning_details",
+                        "tool_call_id", "provider_call_id", "execution_token"):
+            assert private not in json.dumps(messages)
+            assert private not in response.text
+        public_users.append(user_text)
+        public_answers.append(final["text"])
+        source_run = Run(c.user, scope.run_id, scope.runtime_session_id)
+        destinations.append(d)
+
+    assert [d.calls[0]["model"] for d in destinations] == [MODELS[1], MODELS[1], MODELS[2]]
+    assert len(c.calls) == 2
+    assert await c.db.fetchval("SELECT count(*) FROM inference_route_commands") == 5
+    assert await c.db.fetchval("SELECT count(*) FROM inference_preauthorizations") == 5
+    assert await c.db.fetchval("SELECT count(*) FROM inference_usage") == 5
+    assert await c.db.fetchval(
+        "SELECT count(*) FROM native_task_handoffs WHERE first_request_id IS NOT NULL",
+    ) == 3
 
 
 async def test_completed_http_replay_after_actual_handoff_expiry(handoff_db, monkeypatch):

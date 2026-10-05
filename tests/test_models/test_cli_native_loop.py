@@ -66,6 +66,9 @@ class LoopDriver:
         self.reuse_provider_call_id = reuse_provider_call_id
         self.runtime_keys, self.receipts = {}, []
         self.pending, self.accepted = {}, set()
+        self.handoff_prepares, self.handoff_confirms = [], []
+        self.handoff_preview = self.handoff_source = None
+        self.web_capable = False
         self.run_id, self.runtime_id = str(uuid4()), str(uuid4())
         self.client = SimpleNamespace(
             ask=self.ask, ide_get_context=AsyncMock(return_value=None),
@@ -73,19 +76,94 @@ class LoopDriver:
             agent_tool_result=self.callback, agent_tool_cancel=AsyncMock(return_value={}),
             agent_run_get=AsyncMock(return_value={
                 "current_state": "running", "valid_actions": [{"action": "handoff"}],
-            }),
-            agent_run_create=self.create_run, agent_register_workspace=AsyncMock(return_value={
                 "run_version": 1, "valid_actions_signature": "sha256:" + "a" * 64,
             }),
+            agent_run_create=self.create_run, agent_register_workspace=AsyncMock(side_effect=self.register_workspace),
+            _request=AsyncMock(side_effect=self.validate_model),
+            list_models=AsyncMock(side_effect=self.list_models),
+            native_handoff_prepare=AsyncMock(side_effect=self.prepare_handoff),
+            native_handoff_confirm=AsyncMock(side_effect=self.confirm_handoff),
         )
         self._compile()
 
     async def create_run(self, **_kwargs):
+        self.assert_handoff_source_retained()
         self.run_id = str(uuid4())
         self.created_runs.append(self.run_id)
+        self.events.append(("create", self.run_id))
         return {"run_id": self.run_id, "run_version": 1, "valid_actions_signature": "sha256:" + "a" * 64}
 
+    async def register_workspace(self, **kwargs):
+        self.assert_handoff_source_retained()
+        assert kwargs["run_id"] == self.created_runs[-1]
+        assert kwargs["runtime_session_id"] == self.runtime_id
+        self.events.append(("register", kwargs["run_id"]))
+        return {"run_version": 1, "valid_actions_signature": "sha256:" + "a" * 64}
+
+    async def validate_model(self, method, path, *, json):
+        assert (method, path) == ("POST", "/models/validate")
+        assert json == {"provider": "openrouter", "model": "google/fixture-model"}
+        return {"selection_valid": True, "state_changed": False, "model": {
+            "provider": json["provider"], "model_id": json["model"], "enabled": True,
+            "available": True, "max_tokens": 1024, "capabilities": {
+                "reviewed": True, "text": True, "tools": True, "file_upload": True,
+                "image_input": True, "web_search": self.web_capable, "stream_events": False,
+                "streaming_mode": "buffered", "reasoning_controls": False, "reasoning_efforts": [],
+            },
+        }}
+
+    async def list_models(self, provider):
+        response = await self.validate_model("POST", "/models/validate", json={
+            "provider": provider, "model": "google/fixture-model",
+        })
+        return {"models": [response["model"]]}
+
+    def source_state(self):
+        return {name: self.outer_cell(name).cell_contents for name in (
+            "native_generation_session", "current_run_id", "current_run_version", "current_signature",
+            "current_provider", "current_model", "current_thread_id",
+        )}
+
+    def assert_handoff_source_retained(self):
+        if self.handoff_source is not None:
+            assert self.source_state() == self.handoff_source
+
+    async def prepare_handoff(self, request):
+        assert not self.pending, "Handoff cannot bypass unaccepted native tool results"
+        self.handoff_source = self.source_state()
+        assert self.handoff_source["native_generation_session"].finalized
+        assert request.source_scope.run_id == self.handoff_source["current_run_id"]
+        assert request.source_ref.previous_inference_request_id == self.receipts[-1]["inference_request_id"]
+        assert request.source_ref.expected_history_revision == self.receipts[-1]["history_revision"]
+        self.handoff_prepares.append(request.model_dump(mode="json"))
+        self.events.append(("handoff_prepare", len(self.handoff_prepares)))
+        self.handoff_preview = {
+            "handoff_id": str(uuid4()), "handoff_sha256": "b" * 64,
+            "selection": request.selection.model_dump(mode="json"), "expires_at": "2099-01-01T00:00:00+00:00",
+            "task_count": 1, "file_count": 0, "unique_file_count": 0,
+            "observation_count": len(self.callbacks), "destination_scope": None,
+        }
+        return deepcopy(self.handoff_preview)
+
+    async def confirm_handoff(self, request):
+        self.assert_handoff_source_retained()
+        assert request.handoff_id == self.handoff_preview["handoff_id"]
+        assert request.handoff_sha256 == self.handoff_preview["handoff_sha256"]
+        assert request.destination_scope.run_id == self.created_runs[-1]
+        self.handoff_confirms.append(request.model_dump(mode="json"))
+        self.events.append(("handoff_confirm", len(self.handoff_confirms)))
+        return {**deepcopy(self.handoff_preview),
+                "destination_scope": request.destination_scope.model_dump(mode="json")}
+
     async def ask(self, prompt, provider, model, **kwargs):
+        if kwargs.get("native_handoff"):
+            assert kwargs["native_handoff"] == {
+                "handoff_id": self.handoff_preview["handoff_id"],
+                "handoff_sha256": self.handoff_preview["handoff_sha256"],
+            }
+            assert kwargs["native_scope"]["run_id"] == self.handoff_confirms[-1]["destination_scope"]["run_id"]
+            assert self.source_state()["current_run_id"] == kwargs["native_scope"]["run_id"]
+            self.handoff_source = None
         request = deepcopy(dict(kwargs, prompt=prompt, provider=provider, model=model))
         self.requests.append(request)
         self.events.append(("ask", len(self.requests)))
@@ -184,11 +262,16 @@ class LoopDriver:
     def _compile(self):
         from openvegas.client import APIError
         from openvegas.tui.approval_menu import SessionApprovalState
+        from openvegas.tui.model_picker import (
+            ModelSelectionError,
+            reviewed_capabilities,
+            validate_selection,
+        )
 
         source = Path(os.getenv("CLI_NATIVE_LOOP_SOURCE", str(ROOT / "openvegas/cli.py")))
         tree = ast.parse(source.read_text())
         names = {"_run_tool_loop", "_update_fence", "_create_and_register_runtime_run", "_ensure_runtime_run"}
-        optional = {"_reset_native_task", "_stage_handoff_destination"}
+        optional = {"_reset_native_task", "_stage_handoff_destination", "_switch_native_model"}
         nodes = {node.name: node for node in ast.walk(tree)
                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in names | optional}
         assert names <= nodes.keys()
@@ -201,6 +284,8 @@ class LoopDriver:
             "last_web_search_retry_without_tool": False, "last_assistant_text_for_turn": "",
             "runtime_run_task": None, "native_generation_session": _session_type()(),
             "pending_native_handoff": None,
+            "pending_handoff_capabilities": None, "current_model_capabilities": None,
+            "current_reasoning_efforts": (), "startup_bootstrap_task": None,
             "APIError": APIError,
         }
         # Nested helpers declare cells in their enclosing function, not chat().
@@ -222,16 +307,25 @@ class LoopDriver:
                 OuterCells().visit(statement)
         assert cells <= initial.keys(), "Add real outer state to the harness, not a production-path stub"
         # Read-only outer values are closure cells too (provider, model, APIError).
+        continuity = next(node for node in ast.walk(tree) if isinstance(node, ast.If)
+                          and ast.unparse(node.test) == "cmd == '/continuity'")
+        command = ast.parse("async def command(message):\n    nonlocal " + ",".join(sorted(initial))
+                            + "\n    for message in [message]:\n        parts = message.split()\n"
+                            + "        cmd = parts[0]\n        pass\n").body[0]
+        command.body[1].body[-1:] = [continuity]
         wrapper = ast.parse("def factory():\n" + "".join(f"    {name} = initial[{name!r}]\n" for name in sorted(initial))
-                            + "    return _run_tool_loop\n")
+                            + "    return _run_tool_loop, command\n")
         # Keep original AST and source line numbers, including every nested branch.
         factory = wrapper.body[0]
-        factory.body[-1:-1] = list(nodes.values())
+        factory.body[-1:-1] = [*nodes.values(), command]
         ast.fix_missing_locations(wrapper)
         no_op = lambda *_a, **_k: None
         self.namespace = {
             **vars(self.cli), **initial, "initial": initial, "client": self.client,
             "NativeGenerationSession": _session_type(), "Confirm": SimpleNamespace(ask=self.confirm),
+            "ModelSelectionError": ModelSelectionError, "reviewed_capabilities": reviewed_capabilities,
+            "validate_selection": validate_selection, "allow_model_switch": True, "chat_transcript": [],
+            "model_switch_local_tools": SimpleNamespace(_BACKGROUND_JOBS={}),
             "workspace_root": str(self.root), "workspace_git_root": str(self.root), "workspace_fp": "fixture",
             "approval_mode": "ask", "plan_mode": False, "conversation_mode": "ephemeral",
             "pending_attachments": [], "attachment_file_ids_for_turn": [], "attachment_context_for_turn": "",
@@ -252,7 +346,7 @@ class LoopDriver:
         }
         # Only trusted repository AST is compiled; the production loop remains intact.
         exec(compile(wrapper, str(source), "exec"), self.namespace)  # noqa: S102
-        self.loop = self.namespace["factory"]()
+        self.loop, self.command = self.namespace["factory"]()
 
     async def run(self, message="Read a.txt and list files", **loop_options):
         return await asyncio.wait_for(self.loop(self.client, message, **loop_options), timeout=3)
@@ -276,6 +370,7 @@ def loop_driver(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENVEGAS_ENV_FILE", str(empty))
     monkeypatch.setenv("OPENVEGAS_CHAT_NATIVE_GENERATION_SCOPE", "1")
     monkeypatch.setenv("OPENVEGAS_CHAT_NATIVE_GENERATION_HISTORY", "1")
+    monkeypatch.setenv("OPENVEGAS_CHAT_NATIVE_TASK_HANDOFF", "0")
     monkeypatch.setenv("OPENVEGAS_CHAT_STREAM_EVENTS", "0")
     monkeypatch.setenv("OPENVEGAS_CHAT_MAX_TOOL_STEPS", "4")
     from openvegas import cli
@@ -321,20 +416,154 @@ async def test_denied_native_bash_never_proposes_executes_or_sends_replacement(l
 
 
 @pytest.mark.asyncio
-async def test_new_user_task_after_final_does_not_inherit_completed_generation(loop_driver):
+async def test_finalized_followup_with_disabled_handoff_retains_complete_source(loop_driver):
+    from openvegas.client import APIError
+
     driver = loop_driver(batches=[READ_LIST, [], []])
     assert await driver.run() is True
-    assert await driver.run("Read b.txt instead") is True
-    first, fresh = driver.requests[0], driver.requests[-1]
-    assert "native_continuation" not in fresh
-    assert fresh["native_scope"]["run_id"] != first["native_scope"]["run_id"]
-    assert fresh["prompt"] == "Read b.txt instead"
-    assert driver.created_runs == [fresh["native_scope"]["run_id"]]
-    driver.client.agent_register_workspace.assert_awaited_once()
+    before = driver.source_state()
+    session = before["native_generation_session"]
+    frozen = deepcopy(vars(session))
+    observed = deepcopy((driver.requests, driver.proposals, driver.callbacks, driver.executions))
+    with pytest.raises(APIError, match="Previous task retained: native follow-up handoff is disabled"):
+        await driver.run("Read b.txt instead")
+    assert driver.source_state() == before and vars(session) == frozen
+    assert (driver.requests, driver.proposals, driver.callbacks, driver.executions) == observed
+    assert driver.rendered == ["FINAL ANSWER"] and not driver.created_runs
+    driver.client.agent_register_workspace.assert_not_awaited()
+    driver.client.native_handoff_prepare.assert_not_awaited()
+    driver.client.native_handoff_confirm.assert_not_awaited()
     assert not driver.confirmations
-    assert driver.receipts[-1]["history_revision"] == 0
-    assert any("previous tool state is not transferred" in note for note in driver.notes)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("web_capable", [False, True])
+async def test_finalized_followup_approved_handoff_runs_new_tools_and_exact_continuation(loop_driver, monkeypatch, web_capable):
+    monkeypatch.setenv("OPENVEGAS_CHAT_NATIVE_TASK_HANDOFF", "1")
+    driver = loop_driver(batches=[READ_LIST, [], [tool("Read", {"path": "b.txt"})], []], fresh_decision=True)
+    driver.web_capable = web_capable
+    driver.outer_cell("web_search_requested").cell_contents = True
+    assert await driver.run() is True
+    source = driver.source_state()
+    session = source["native_generation_session"]
+    frozen = deepcopy(vars(session))
+    source_receipt = deepcopy(driver.receipts[-1])
+    assert await driver.run("Read b.txt using the previous observations") is True
+    assert len(driver.handoff_prepares) == len(driver.handoff_confirms) == 1
+    prepare = driver.handoff_prepares[0]
+    confirm = driver.handoff_confirms[0]
+    assert prepare["source_scope"]["run_id"] == source["current_run_id"]
+    assert prepare["source_ref"] == {
+        "previous_inference_request_id": source_receipt["inference_request_id"],
+        "expected_history_revision": source_receipt["history_revision"],
+    }
+    assert prepare["selection"]["model"] == source["current_model"]
+    assert prepare["selection"]["enable_web_search"] is False
+    assert driver.outer_cell("web_search_requested").cell_contents is True
+    first, followup = driver.requests[0], driver.requests[2]
+    continuation = driver.requests[3]
+    assert followup["native_scope"] == confirm["destination_scope"]
+    assert followup["native_scope"]["run_id"] != first["native_scope"]["run_id"]
+    assert followup["native_handoff"] == {key: confirm[key] for key in ("handoff_id", "handoff_sha256")}
+    assert followup["native_user_text"] == "Read b.txt using the previous observations"
+    assert "native_continuation" not in followup
+    assert continuation["native_handoff"] == followup["native_handoff"]
+    assert followup["enable_web_search"] is False and continuation["enable_web_search"] is False
+    assert continuation["native_continuation"] == {
+        "previous_inference_request_id": driver.receipts[2]["inference_request_id"], "expected_history_revision": 0,
+    }
+    assert [receipt["history_revision"] for receipt in driver.receipts] == [0, 1, 0, 1]
+    assert [call["tool_call_id"] for call in driver.callbacks] == ["call-1-0", "call-1-1", "call-3-0"]
+    assert [call["tool_name"] for call in driver.executions] == ["fs_read", "fs_list", "fs_read"]
+    assert len(driver.proposals) == len(driver.starts) == len(driver.callbacks) == 3
+    assert driver.events.index(("callback", "call-1-1")) < driver.events.index(("handoff_prepare", 1))
+    assert driver.events.index(("handoff_confirm", 1)) < driver.events.index(("ask", 3))
+    assert driver.events.index(("callback", "call-3-0")) < driver.events.index(("ask", 4))
+    assert vars(session) == frozen
+    assert driver.outer_cell("native_generation_session").cell_contents is not session
+    assert driver.outer_cell("native_generation_session").cell_contents.finalized
+    assert len(driver.created_runs) == 1 and not driver.pending
+    assert len(driver.confirmations) == 1 and driver.confirmations[0]["default"] is False
+    assert "Continue with" in driver.confirmations[0]["question"]
     assert driver.rendered == ["FINAL ANSWER", "FINAL ANSWER"]
+
+
+@pytest.mark.asyncio
+async def test_confirmed_fresh_start_then_full_loop_does_not_claim_handoff_or_replay_tools(loop_driver):
+    driver = loop_driver(batches=[READ_LIST, [], []], fresh_decision=True)
+    assert await driver.run() is True
+    source = driver.source_state()
+    frozen = deepcopy(vars(source["native_generation_session"]))
+    await driver.command("/continuity off")
+    assert len(driver.confirmations) == 1
+    assert driver.confirmations[0]["default"] is False
+    assert "Existing context will not transfer" in driver.confirmations[0]["question"]
+    assert len(driver.requests) == 2
+    assert vars(source["native_generation_session"]) == frozen
+    assert await driver.run("Start a separate task") is True
+    fresh = driver.requests[-1]
+    assert fresh["native_scope"]["run_id"] != source["current_run_id"]
+    assert "native_handoff" not in fresh and "native_continuation" not in fresh
+    assert fresh["native_user_text"] == "Start a separate task"
+    assert len(driver.created_runs) == 1
+    assert len(driver.callbacks) == len(driver.executions) == 2
+    assert not driver.handoff_prepares and not driver.handoff_confirms
+    assert driver.rendered == ["FINAL ANSWER", "FINAL ANSWER"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", [
+    "approved", "disabled", "declined", "prepare_failure", "registration_failure", "confirm_failure", "cancel_confirm",
+])
+async def test_followup_handoff_outer_emote_lifecycle_has_exactly_one_terminal_event(loop_driver, monkeypatch, outcome):
+    from openvegas.client import APIError
+    from openvegas.emotes.events import Phase
+    from tests.test_emotes.test_cli_finalization_events import _bridge, _outer_turn, _terminal
+
+    driver = loop_driver(batches=[READ_LIST, [], READ_LIST, []], fresh_decision=True)
+    bridge, events = _bridge(driver)
+    await _outer_turn(driver, bridge)()
+    assert _terminal(events) == [Phase.COMPLETE]
+    before = driver.source_state()
+    frozen = deepcopy(vars(before["native_generation_session"]))
+    monkeypatch.setenv("OPENVEGAS_CHAT_NATIVE_TASK_HANDOFF", "0" if outcome == "disabled" else "1")
+    driver.outer_cell("web_search_requested").cell_contents = True
+    if outcome == "declined":
+        driver.fresh_decision = False
+    elif outcome == "prepare_failure":
+        driver.client.native_handoff_prepare.side_effect = APIError(409, "Synthetic stale source")
+    elif outcome == "registration_failure":
+        driver.client.agent_register_workspace.side_effect = APIError(503, "Synthetic registration failure")
+    elif outcome == "confirm_failure":
+        driver.client.native_handoff_confirm.side_effect = APIError(503, "Synthetic lost confirmation ACK")
+    elif outcome == "cancel_confirm":
+        driver.client.native_handoff_confirm.side_effect = asyncio.CancelledError()
+    ask = driver.client.ask
+
+    async def checked_ask(*args, **kwargs):
+        assert _terminal(events) == [Phase.COMPLETE], "Handoff or tool progress is not final success"
+        return await ask(*args, **kwargs)
+
+    driver.client.ask = checked_ask
+    run = _outer_turn(driver, bridge, message="Read b.txt in the workspace")
+    if outcome == "cancel_confirm":
+        with pytest.raises(asyncio.CancelledError):
+            await run()
+    else:
+        await run()
+    expected = Phase.COMPLETE if outcome == "approved" else Phase.CANCEL if outcome == "cancel_confirm" else Phase.ERROR
+    assert _terminal(events) == [Phase.COMPLETE, expected]
+    assert not bridge.finish(success=True, turn=bridge.current_turn)
+    assert not bridge.cancel(turn=bridge.current_turn)
+    assert _terminal(events) == [Phase.COMPLETE, expected]
+    assert vars(before["native_generation_session"]) == frozen
+    if outcome == "approved":
+        assert len(driver.requests) == 4 and len(driver.callbacks) == 4
+        assert driver.rendered == ["FINAL ANSWER", "FINAL ANSWER"]
+    else:
+        assert driver.source_state() == before
+        assert len(driver.requests) == 2 and len(driver.callbacks) == 2
+        assert driver.rendered == ["FINAL ANSWER"]
 
 
 @pytest.mark.asyncio
@@ -480,18 +709,25 @@ async def test_active_native_history_cannot_silently_downgrade(loop_driver, monk
 
 
 @pytest.mark.asyncio
-async def test_failed_fresh_registration_restores_previous_session_and_fence(loop_driver):
+async def test_explicit_fresh_start_registration_failure_retains_previous_session_and_fence(loop_driver):
     from openvegas.client import APIError
 
-    driver = loop_driver(batches=[[], []])
+    driver = loop_driver(batches=[READ_LIST, [], []], fresh_decision=True)
     assert await driver.run() is True
     names = ("native_generation_session", "current_run_id", "current_run_version", "current_signature")
     previous = {name: driver.outer_cell(name).cell_contents for name in names}
+    source_values = deepcopy(vars(previous["native_generation_session"]))
     driver.client.agent_register_workspace.side_effect = APIError(503, "fixture registration failure")
-    with pytest.raises(APIError, match="Could not register"):
-        await driver.run("Read b.txt instead")
+    await driver.command("/continuity off")
     assert {name: driver.outer_cell(name).cell_contents for name in names} == previous
     assert driver.outer_cell("native_generation_session").cell_contents is previous["native_generation_session"]
-    assert len(driver.requests) == 1 and driver.rendered == ["FINAL ANSWER"]
+    assert vars(previous["native_generation_session"]) == source_values
+    assert len(driver.requests) == 2 and driver.rendered == ["FINAL ANSWER"]
+    assert len(driver.callbacks) == len(driver.executions) == 2
+    assert len(driver.confirmations) == 1 and driver.confirmations[0]["default"] is False
+    assert "Existing context will not transfer" in driver.confirmations[0]["question"]
+    assert any("Conversation unchanged" in note and "Could not register" in note for note in driver.notes)
     assert len(driver.created_runs) == 1
     driver.client.agent_register_workspace.assert_awaited_once()
+    driver.client.native_handoff_prepare.assert_not_awaited()
+    driver.client.native_handoff_confirm.assert_not_awaited()

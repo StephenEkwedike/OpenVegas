@@ -6445,13 +6445,41 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
         ):
             raise APIError(409, "Native history cannot switch to a different provider or text-only history path. Start a fresh session explicitly.")
         if native_history_mode and native_generation_session.history_active:
-            if not native_generation_session.finalized and not await _chat_modal(lambda: Confirm.ask(
-                "The previous native task is unfinished or unconfirmed. Start a separate task without resuming or retrying it?",
-                default=False,
-            )):
-                raise APIError(409, "Previous task retained. No new request or automatic retry was sent.")
-            await _reset_native_task()
-            console.print("Starting a separate native task; previous tool state is not transferred.", markup=False)
+            if native_generation_session.finalized:
+                if not _env_flag("OPENVEGAS_CHAT_NATIVE_TASK_HANDOFF", "0") or not allow_model_switch:
+                    raise APIError(409, "Previous task retained: native follow-up handoff is disabled. "
+                                   "Use /continuity off only to explicitly start fresh.")
+                try:
+                    target = await validate_selection(client, current_provider, current_model)
+                except (APIError, ModelSelectionError):
+                    raise APIError(409, "Previous task retained: follow-up model validation failed. No request was sent.") from None
+                if not all(_env_flag(name, "0") for name in (
+                    "OPENVEGAS_CHAT_NATIVE_TASK_HANDOFF", "OPENVEGAS_CHAT_NATIVE_GENERATION_SCOPE",
+                    "OPENVEGAS_CHAT_NATIVE_GENERATION_HISTORY",
+                )):
+                    raise APIError(409, "Previous task retained: native follow-up was disabled during validation.")
+                # A new user turn needs its own owned task, not a changed input
+                # inside the old native generation or an unbound history reset.
+                capabilities = reviewed_capabilities(target, current_provider, current_model)
+                followup_web_search = bool(
+                    web_search_requested
+                    and _should_enable_web_search_for_turn(
+                        user_message, has_uploaded_attachments=bool(attachment_file_ids_for_turn),
+                    )
+                    and capabilities.supports(current_provider, current_model, "web_search")
+                )
+                if not await _switch_native_model(
+                    current_provider, current_model, target, followup_web_search=followup_web_search,
+                ):
+                    raise APIError(409, "Previous task retained: follow-up handoff was not confirmed. No request was sent.")
+            else:
+                if not await _chat_modal(lambda: Confirm.ask(
+                    "The previous native task is unfinished or unconfirmed. Start a separate task without resuming or retrying it?",
+                    default=False,
+                )):
+                    raise APIError(409, "Previous task retained. No new request or automatic retry was sent.")
+                await _reset_native_task()
+                console.print("Starting a separate native task; previous tool state is not transferred.", markup=False)
 
         canonical_chat = getattr(client, "_canonical_chat", None)
         if isinstance(canonical_chat, dict):
@@ -8844,7 +8872,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             expected_run_version=registered.get("run_version"),
             expected_valid_actions_signature=registered.get("valid_actions_signature"))
 
-    async def _switch_native_model(next_provider, next_model, target=None) -> bool:
+    async def _switch_native_model(next_provider, next_model, target=None, *, followup_web_search=None) -> bool:
         nonlocal pending_native_handoff, pending_handoff_capabilities, native_generation_session
         nonlocal current_provider, current_model, current_thread_id
         nonlocal current_run_id, current_run_version, current_signature
@@ -8855,8 +8883,11 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
 
         try:
             pending = pending_native_handoff
+            same_model = (next_provider, next_model) == (current_provider, current_model)
+            if followup_web_search is not None and (type(followup_web_search) is not bool or not same_model):
+                raise ValueError("Per-turn web selection requires a same-model follow-up.")
             if pending is None:
-                if pending_attachments:
+                if pending_attachments and not same_model:
                     console.print("Send or remove pending attachments before changing models. Nothing was switched.", markup=False)
                     return False
                 if (next_provider != "openrouter" or current_provider != "openrouter"
@@ -8867,15 +8898,23 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 if not capabilities.supports(next_provider, next_model, "tools"):
                     console.print("Target model does not support native task tools; choose another model. Nothing was switched.", markup=False)
                     return False
+                if pending_attachments and (
+                    not capabilities.supports(next_provider, next_model, "file_upload")
+                    or (any(_attachment_is_image(att) for att in pending_attachments)
+                        and not capabilities.supports(next_provider, next_model, "image_input"))
+                ):
+                    console.print("Current model cannot accept the pending attachments. Previous task retained.", markup=False)
+                    return False
                 if (current_reasoning_effort is not None
                         and current_reasoning_effort not in capabilities.reasoning_efforts):
                     console.print("Target model does not support the current reasoning effort. Use /reasoning default or choose a supported effort, then switch again. Nothing was switched.", markup=False)
                     return False
-                if web_search_requested and not capabilities.supports(next_provider, next_model, "web_search"):
+                selected_web = web_search_requested if followup_web_search is None else followup_web_search
+                if selected_web and not capabilities.supports(next_provider, next_model, "web_search"):
                     console.print("Target model does not support the requested web search. Choose a web-capable model to retain this task's settings. Nothing was switched.", markup=False)
                     return False
                 snapshot = await client.agent_run_get(current_run_id)
-                selection = NativeHandoffSelection(model=next_model, enable_web_search=web_search_requested,
+                selection = NativeHandoffSelection(model=next_model, enable_web_search=selected_web,
                     reasoning_effort=current_reasoning_effort, max_tokens=min(1024, target["max_tokens"]))
                 old_selection = NativeHandoffSelection(model=current_model, enable_web_search=web_search_requested,
                     reasoning_effort=current_reasoning_effort, max_tokens=native_generation_session.max_tokens or 1024)
@@ -8892,7 +8931,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             if pending.state in {"new", "prepare_uncertain", "prepared"}:
                 preview = await pending.prepare(client)
                 if not await _chat_modal(lambda: Confirm.ask(
-                    f"Switch to {selected.model}, retaining {preview.task_count} task(s), "
+                    f"{'Continue with' if same_model else 'Switch to'} {selected.model}, retaining {preview.task_count} task(s), "
                     f"{preview.unique_file_count} file(s) and {preview.observation_count} accepted observation(s)? "
                     "Private model reasoning is not transferred. No inference is sent by switching.", default=False)):
                     pending.cancel()
@@ -8910,11 +8949,15 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             current_provider, current_model, current_thread_id = selected.provider, selected.model, None
             current_run_id, current_run_version, current_signature = (
                 scope.run_id, scope.expected_run_version, scope.expected_valid_actions_signature)
-            current_reasoning_effort, web_search_requested = selected.reasoning_effort, selected.enable_web_search
+            current_reasoning_effort = selected.reasoning_effort
+            # A follow-up pins this turn's effective web setting, not the user's
+            # preference for future turns. The pending operation retains it on ACK retry.
+            web_search_requested = pending.old_selection.enable_web_search if same_model else selected.enable_web_search
             native_generation_session = adopted
             current_model_capabilities, current_reasoning_efforts = capabilities, capabilities.reasoning_efforts
             pending_native_handoff = pending_handoff_capabilities = None
-            console.print(f"Selected {selected.model}; confirmed task context retained. Enter your next request.", markup=False)
+            console.print(f"Selected {selected.model}; confirmed task context retained."
+                          + ("" if same_model else " Enter your next request."), markup=False)
             return True
         except (APIError, ValueError, TypeError, KeyError):
             console.print("Model switch was not verified; the prior selection is retained. "

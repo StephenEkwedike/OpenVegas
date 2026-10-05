@@ -57,6 +57,7 @@ class Shell:
                       "expected_run_version": 2, "expected_valid_actions_signature": "sha256:" + "a" * 64}
         self.destination_id = str(uuid.uuid4())
         self.target = descriptor()
+        self.source_model = OLD
         self.source_session = NativeGenerationSession()
         self.source_session.prepare(key="source", scope=self.scope, options={
             "provider": "openrouter", "model": OLD, "enable_tools": True,
@@ -84,12 +85,12 @@ class Shell:
 
     async def validate_model(self, method, path, *, json):
         assert (method, path) == ("POST", "/models/validate")
-        assert json["model"] == NEW
+        assert json["model"] == self.target["model_id"]
         return {"selection_valid": True, "state_changed": False, "model": deepcopy(self.target)}
 
     def assert_old(self):
         current = self.state()
-        assert current["current_model"] == OLD
+        assert current["current_model"] == self.source_model
         assert current["current_run_id"] == self.scope["run_id"]
         assert current["native_generation_session"] is self.source_session
 
@@ -158,7 +159,8 @@ class Shell:
         names = {"_stage_handoff_destination", "_switch_native_model", "_use_model_capabilities",
                  "_refresh_model_capabilities", "_chat_capability", "_validate_openrouter_request",
                  "_ask_with_optional_stream", "_env_flag", "_model_capability", "_reasoning_status",
-                 "_reasoning_for_model", "_ensure_runtime_run", "_create_and_register_runtime_run", "_reset_native_task"}
+                 "_reasoning_for_model", "_ensure_runtime_run", "_create_and_register_runtime_run", "_reset_native_task",
+                 "_attachment_is_image"}
         names.update({"_should_enable_web_search_for_turn", "_has_workspace_tooling_intent",
                       "_is_local_attachment_analysis_request", "_has_web_request_signal", "_has_patch_intent",
                       "_has_explicit_file_target", "_is_noncode_asset_reference", "_has_code_filename_reference",
@@ -222,7 +224,8 @@ class Shell:
         factory = wrapper.body[0]
         commands = next(node for node in factory.body if isinstance(node, ast.AsyncFunctionDef))
         commands.body[1].body[-1:] = [pending_guard, command_branch("/handoff"),
-                                     command_branch({"/models", "/provider", "/model"}), command_branch("/reasoning")]
+                                     command_branch({"/models", "/provider", "/model"}), command_branch("/reasoning"),
+                                     command_branch("/continuity")]
         factory.body[-1:-1] = [*nodes.values(), entry, web]
         ast.fix_missing_locations(wrapper)
         namespace = {"initial": initial, "SimpleNamespace": SimpleNamespace, "Any": Any,
@@ -239,11 +242,30 @@ class Shell:
             "workspace_fp": "sha256:" + "c" * 64, "pending_attachments": [], "chat_transcript": [],
             "allow_model_switch": True, "conversation_mode": "persistent", "show_stream_status": False,
             "native_history_mode": True, "user_message": "Exact new task", "emote_bridge": SimpleNamespace(current_turn="turn"),
+            "PendingAttachment": SimpleNamespace,
+            "attachment_file_ids_for_turn": [],
         }
         exec(compile(wrapper, str(SOURCE), "exec"), namespace)  # noqa: S102 - Unmodified trusted CLI nodes.
         self.helpers = namespace["factory"]()
         self.state = self.helpers.state
         self.namespace = namespace
+
+    def checkpoint_source(self):
+        """Advance synthetic transport expectations after a completed real CLI handoff."""
+        state = self.state()
+        self.source_session = state["native_generation_session"]
+        assert self.source_session.finalized
+        self.source_model = state["current_model"]
+        self.scope = {"run_id": state["current_run_id"], "runtime_session_id": state["runtime_session_id"],
+                      "expected_run_version": state["current_run_version"],
+                      "expected_valid_actions_signature": state["current_signature"]}
+        self.client.agent_run_get.return_value = {
+            "run_version": self.scope["expected_run_version"],
+            "valid_actions_signature": self.scope["expected_valid_actions_signature"],
+        }
+        self.destination_id = str(uuid.uuid4())
+        self.target = descriptor(self.source_model)
+        self.preview = None
 
     async def bound_session(self, phase):
         assert await self.helpers.switch("openrouter", NEW, self.target)
@@ -379,6 +401,277 @@ async def test_bound_stream_has_no_legacy_ask_fallback(shell, monkeypatch, statu
     assert error.value.status == status and len(shell.inference_bodies) == 1
     shell.client.ask.assert_not_awaited()
     assert shell.state()["native_generation_session"].awaiting_first_dispatch
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("with_attachment", [False, True])
+async def test_finalized_handoff_followup_rebinds_same_model_then_switches_back(
+    shell, monkeypatch, stream, with_attachment,
+):
+    monkeypatch.setenv("OPENVEGAS_CHAT_NATIVE_TASK_HANDOFF", "1")
+    assert await shell.helpers.switch("openrouter", NEW, shell.target)
+    await shell.helpers.ask("First B task", idempotency_key="b-first", enable_tools=True,
+                            enable_web_search=False, attachments=[])
+    shell.checkpoint_source()
+    source = shell.source_session
+    source_state = deepcopy(vars(source))
+    source_receipt = deepcopy(source._receipt)
+    files = [str(uuid.uuid4())] if with_attachment else []
+    if files:
+        shell.namespace["pending_attachments"].append(SimpleNamespace(file_id=files[0], mime_type="image/png"))
+        shell.namespace["attachment_file_ids_for_turn"] = files
+    queued = deepcopy(shell.namespace["pending_attachments"])
+    calls_before = len(shell.inference_bodies)
+
+    assert await shell.helpers.enter(shell.client, "Follow up on A and B")
+    session = shell.state()["native_generation_session"]
+    assert session is not source and session.awaiting_first_dispatch
+    assert session.handoff_ref is not None and session.handoff_ref != source.handoff_ref
+    assert session.confirmed_selection.model == NEW
+    assert shell.prepare_bodies[-1]["source_scope"] == shell.scope
+    assert shell.prepare_bodies[-1]["source_ref"] == {
+        "previous_inference_request_id": source_receipt["inference_request_id"],
+        "expected_history_revision": source_receipt["history_revision"],
+    }
+    assert len(shell.prompts) == 2
+    assert shell.namespace["pending_attachments"] == queued
+    assert len(shell.inference_bodies) == calls_before
+    assert vars(source) == source_state
+    assert not any("Starting a separate native task" in note for note in shell.notes)
+
+    shell.namespace["user_message"] = "Follow up on A and B"
+    monkeypatch.setenv("OPENVEGAS_CHAT_STREAM_EVENTS", str(int(stream)))
+    await shell.helpers.ask("Runtime follow-up", idempotency_key="b-followup", enable_tools=True,
+                            enable_web_search=False, attachments=files)
+    sent = shell.inference_bodies[-1]
+    assert sent["native_handoff"] == session.handoff_ref.model_dump()
+    assert sent["native_scope"] == shell.confirm_bodies[-1]["destination_scope"]
+    assert sent["native_user_text"] == "Follow up on A and B" and sent["attachments"] == files
+    assert sent["native_history"] is True and "native_continuation" not in sent
+    assert session.finalized
+
+    shell.namespace["pending_attachments"].clear()
+    followup_receipt = deepcopy(session._receipt)
+    shell.checkpoint_source()
+    shell.target = descriptor(OLD)
+    await shell.helpers.command(["/model " + OLD])
+    assert shell.state()["current_model"] == OLD
+    assert shell.prepare_bodies[-1]["source_ref"]["previous_inference_request_id"] == followup_receipt["inference_request_id"]
+    assert shell.state()["native_generation_session"].handoff_ref is not None
+    assert len(shell.inference_bodies) == calls_before + 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [
+    "validation", "tools", "prepare", "registration", "confirm", "decline", "cancel_prepare", "cancel_confirm",
+])
+async def test_finalized_followup_failure_preserves_source_without_dispatch(shell, monkeypatch, failure):
+    monkeypatch.setenv("OPENVEGAS_CHAT_NATIVE_TASK_HANDOFF", "1")
+    shell.target = descriptor(OLD)
+    before = shell.state()
+    source_state = deepcopy(vars(shell.source_session))
+    if failure == "validation":
+        shell.client._request.side_effect = APIError(503, "Synthetic model validation failure")
+    elif failure == "tools":
+        shell.target["capabilities"]["tools"] = False
+    elif failure == "prepare":
+        shell.client.native_handoff_prepare.side_effect = APIError(409, "Synthetic expired retained file")
+    elif failure == "registration":
+        shell.fail_registration = True
+    elif failure == "confirm":
+        shell.lose_confirm = True
+    elif failure == "decline":
+        shell.decision = False
+    elif failure == "cancel_prepare":
+        shell.client.native_handoff_prepare.side_effect = asyncio.CancelledError()
+    elif failure == "cancel_confirm":
+        shell.client.native_handoff_confirm.side_effect = asyncio.CancelledError()
+    expected = asyncio.CancelledError if failure.startswith("cancel_") else APIError
+    with pytest.raises(expected):
+        await shell.helpers.enter(shell.client, "Follow up without losing history")
+    shell.assert_old()
+    assert vars(shell.source_session) == source_state
+    for key in before.keys() - {"pending_native_handoff", "pending_handoff_capabilities"}:
+        assert shell.state()[key] == before[key]
+    assert not shell.inference_bodies
+    if failure in {"validation", "tools", "prepare", "decline", "cancel_prepare"}:
+        shell.client.agent_run_create.assert_not_awaited()
+    if failure in {"confirm", "cancel_confirm"}:
+        assert shell.state()["pending_native_handoff"].state == "confirm_uncertain"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("web_capable", [False, True])
+@pytest.mark.parametrize("with_attachment", [False, True])
+async def test_default_web_preference_followup_binds_effective_local_turn(shell, monkeypatch, web_capable, with_attachment):
+    monkeypatch.setenv("OPENVEGAS_CHAT_NATIVE_TASK_HANDOFF", "1")
+    shell.target = descriptor(OLD)
+    shell.target["capabilities"]["web_search"] = web_capable
+    shell.helpers.set_state(web_search_requested=True)
+    files = [str(uuid.uuid4())] if with_attachment else []
+    shell.namespace["attachment_file_ids_for_turn"] = files
+    prompt = "Summarize this PDF attachment" if with_attachment else "Read notes.txt in this workspace and explain it."
+    assert shell.helpers.heuristic(prompt, has_uploaded_attachments=bool(files)) is False
+    assert await shell.helpers.enter(shell.client, prompt)
+    session = shell.state()["native_generation_session"]
+    assert session.confirmed_selection.enable_web_search is False
+    assert shell.state()["web_search_requested"] is True
+    assert shell.helpers.web(prompt, files) == (False, False)
+    assert shell.prepare_bodies[-1]["selection"]["enable_web_search"] is False
+    shell.namespace["user_message"] = prompt
+    await shell.helpers.ask(prompt, idempotency_key="local-followup", enable_tools=True,
+                            enable_web_search=shell.helpers.web(prompt, files)[1], attachments=files)
+    assert shell.inference_bodies[-1]["enable_web_search"] is False
+    assert shell.inference_bodies[-1]["native_handoff"] == session.handoff_ref.model_dump()
+
+
+@pytest.mark.asyncio
+async def test_followup_lost_ack_keeps_bound_web_false_and_user_preference_true(shell, monkeypatch):
+    monkeypatch.setenv("OPENVEGAS_CHAT_NATIVE_TASK_HANDOFF", "1")
+    shell.target = descriptor(OLD)
+    shell.helpers.set_state(web_search_requested=True)
+    shell.lose_confirm = True
+    with pytest.raises(APIError):
+        await shell.helpers.enter(shell.client, "Read notes.txt in this workspace")
+    pending = shell.state()["pending_native_handoff"]
+    assert pending.prepare_request.selection.enable_web_search is False
+    assert shell.state()["web_search_requested"] is True
+    await shell.helpers.command(["/handoff retry"])
+    assert shell.confirm_bodies[0] == shell.confirm_bodies[1]
+    assert shell.state()["native_generation_session"].confirmed_selection.enable_web_search is False
+    assert shell.state()["web_search_requested"] is True
+    assert not shell.inference_bodies
+
+
+@pytest.mark.asyncio
+async def test_default_web_explicit_model_switch_keeps_requested_web_setting(shell, monkeypatch):
+    monkeypatch.setenv("OPENVEGAS_CHAT_NATIVE_TASK_HANDOFF", "1")
+    shell.target["capabilities"]["web_search"] = True
+    shell.helpers.set_state(web_search_requested=True)
+    await shell.helpers.command(["/model " + NEW])
+    assert shell.state()["current_model"] == NEW
+    assert shell.prepare_bodies[-1]["selection"]["enable_web_search"] is True
+    assert shell.state()["native_generation_session"].confirmed_selection.enable_web_search is True
+    assert shell.state()["web_search_requested"] is True
+    assert shell.helpers.web("Read notes.txt in this workspace", []) == (True, True)
+
+
+@pytest.mark.asyncio
+async def test_ordinary_web_followup_keeps_reviewed_web_true_and_blocks_capability_loss(shell, monkeypatch):
+    monkeypatch.setenv("OPENVEGAS_CHAT_NATIVE_TASK_HANDOFF", "1")
+    shell.target = descriptor(OLD)
+    shell.target["capabilities"]["web_search"] = True
+    shell.helpers.set_state(web_search_requested=True)
+    prompt = "Search the web for the latest Python release notes"
+    assert shell.helpers.heuristic(prompt, has_uploaded_attachments=False) is True
+    assert await shell.helpers.enter(shell.client, prompt)
+    session = shell.state()["native_generation_session"]
+    assert session.confirmed_selection.enable_web_search is True
+    assert shell.helpers.web(prompt, []) == (True, True)
+    shell.target["capabilities"]["web_search"] = False
+    shell.helpers.set_state(current_model_capabilities=reviewed_capabilities(shell.target, "openrouter", OLD))
+    with pytest.raises(APIError, match="confirmed web capability"):
+        shell.helpers.web(prompt, [])
+    assert session.confirmed_selection.enable_web_search is True
+    assert not shell.inference_bodies
+
+
+@pytest.mark.asyncio
+async def test_finalized_followup_lost_ack_recovers_identical_handoff_before_dispatch(shell, monkeypatch):
+    monkeypatch.setenv("OPENVEGAS_CHAT_NATIVE_TASK_HANDOFF", "1")
+    shell.target = descriptor(OLD)
+    shell.lose_confirm = True
+    with pytest.raises(APIError):
+        await shell.helpers.enter(shell.client, "Follow up")
+    shell.assert_old()
+    with pytest.raises(APIError, match="pending model switch"):
+        await shell.helpers.enter(shell.client, "Do not retry inference")
+    await shell.helpers.command(["/handoff retry"])
+    assert shell.confirm_bodies[0] == shell.confirm_bodies[1]
+    shell.client.agent_run_create.assert_awaited_once()
+    session = shell.state()["native_generation_session"]
+    assert session.awaiting_first_dispatch and session.handoff_ref is not None
+    assert await shell.helpers.enter(shell.client, "Follow up")
+    assert shell.state()["native_generation_session"] is session
+    assert len(shell.prompts) == 1 and not shell.inference_bodies
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("gate", ["handoff", "switching"])
+async def test_finalized_followup_disabled_gate_blocks_instead_of_reset(shell, monkeypatch, gate):
+    monkeypatch.setenv("OPENVEGAS_CHAT_NATIVE_TASK_HANDOFF", "0" if gate == "handoff" else "1")
+    if gate == "switching":
+        shell.namespace["allow_model_switch"] = False
+    before = shell.state()
+    with pytest.raises(APIError, match="retained"):
+        await shell.helpers.enter(shell.client, "Follow up")
+    assert shell.state() == before
+    shell.client.native_handoff_prepare.assert_not_awaited()
+    shell.client.agent_run_create.assert_not_awaited()
+    assert not shell.inference_bodies
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flag", [
+    "OPENVEGAS_CHAT_NATIVE_TASK_HANDOFF", "OPENVEGAS_CHAT_NATIVE_GENERATION_SCOPE",
+    "OPENVEGAS_CHAT_NATIVE_GENERATION_HISTORY",
+])
+async def test_finalized_followup_gate_loss_during_validation_retains_source(shell, monkeypatch, flag):
+    monkeypatch.setenv("OPENVEGAS_CHAT_NATIVE_TASK_HANDOFF", "1")
+    shell.target = descriptor(OLD)
+    before = shell.state()
+
+    async def validate_then_disable(*args, **kwargs):
+        response = await shell.validate_model(*args, **kwargs)
+        monkeypatch.setenv(flag, "0")
+        return response
+
+    shell.client._request.side_effect = validate_then_disable
+    with pytest.raises(APIError, match="retained"):
+        await shell.helpers.enter(shell.client, "Follow up")
+    assert shell.state() == before
+    shell.client.native_handoff_prepare.assert_not_awaited()
+    shell.client.agent_run_create.assert_not_awaited()
+    assert not shell.inference_bodies
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("feature", ["file_upload", "image_input"])
+async def test_finalized_followup_incompatible_new_file_blocks_before_handoff(shell, monkeypatch, feature):
+    monkeypatch.setenv("OPENVEGAS_CHAT_NATIVE_TASK_HANDOFF", "1")
+    shell.target = descriptor(OLD)
+    shell.target["capabilities"][feature] = False
+    queued = SimpleNamespace(file_id=str(uuid.uuid4()), mime_type="image/png")
+    shell.namespace["pending_attachments"].append(queued)
+    before = shell.state()
+    with pytest.raises(APIError, match="retained"):
+        await shell.helpers.enter(shell.client, "Follow up with this image")
+    assert shell.state() == before
+    assert shell.namespace["pending_attachments"] == [queued]
+    shell.client.native_handoff_prepare.assert_not_awaited()
+    shell.client.agent_run_create.assert_not_awaited()
+    assert not shell.inference_bodies
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("accept", [False, True])
+async def test_explicit_native_fresh_start_still_requires_confirmation(shell, accept):
+    shell.decision = accept
+    source = shell.source_session
+    before = deepcopy(vars(source))
+    await shell.helpers.command(["/continuity off"])
+    assert len(shell.prompts) == 1 and "Existing context will not transfer" in shell.prompts[0]
+    assert vars(source) == before
+    if accept:
+        assert shell.state()["native_generation_session"] is not source
+        assert not shell.state()["native_generation_session"].prepared_handoff
+        shell.client.agent_run_create.assert_awaited_once()
+    else:
+        shell.assert_old()
+        shell.client.agent_run_create.assert_not_awaited()
+    shell.client.native_handoff_prepare.assert_not_awaited()
+    assert not shell.inference_bodies
 
 
 @pytest.mark.asyncio
