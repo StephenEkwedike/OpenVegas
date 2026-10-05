@@ -865,7 +865,7 @@ async def test_standard_tools_enabled_chat_can_return_final_web_answer(setup):
     assert len(db.data["usage"]) == 1
 
 
-async def attachment_web_request(monkeypatch, *, kind="image", mismatch=False):
+async def attachment_web_request(monkeypatch, *, kind="image", mismatch=False, output_parameter="max_tokens"):
     from server.services.file_uploads import FileUploadService
     from server.services.openrouter_attachment_request import prepare_attachment_request
     from tests.test_models.test_openrouter_attachment_request import (
@@ -888,6 +888,7 @@ async def attachment_web_request(monkeypatch, *, kind="image", mismatch=False):
         "fixture/different-endpoint" if mismatch else "fixture/endpoint"
     )
     policy["attachments"]["pdf_page_tokens"] = 1000
+    policy["attachments"]["output_token_parameter"] = output_parameter
     uploads = UploadDB()
     file_id = IMAGE_ID
     if kind == "pdf":
@@ -923,7 +924,8 @@ async def attachment_web_request(monkeypatch, *, kind="image", mismatch=False):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["image", "pdf"])
-async def test_compatible_owned_attachments_local_tools_and_web_compose(setup, monkeypatch, kind):
+@pytest.mark.parametrize("output_parameter", ["max_tokens", "max_completion_tokens"])
+async def test_compatible_owned_attachments_local_tools_and_web_compose(setup, monkeypatch, kind, output_parameter):
     from server.services import openrouter_attachments as normalization
 
     async def handler(outbound):
@@ -935,11 +937,13 @@ async def test_compatible_owned_attachments_local_tools_and_web_compose(setup, m
         monkeypatch.setattr(normalization, "datetime", AfterReviewExpires)
         return httpx.Response(200, json=response())
 
-    req = await attachment_web_request(monkeypatch, kind=kind)
+    req = await attachment_web_request(monkeypatch, kind=kind, output_parameter=output_parameter)
     original = copy.deepcopy(req.messages)
     gateway, db, observed = setup(handler=handler, reserved="0.530240")
     result = await gateway.infer(req)
     assert observed[0]["messages"] == original and req.messages == original
+    assert observed[0][output_parameter] == req.max_tokens
+    assert ({"max_tokens", "max_completion_tokens"} & observed[0].keys()) == {output_parameter}
     assert result.v_cost == Decimal("0.212") and result.web_search_requests == 1
     assert observed[0]["provider"]["only"] == ["fixture/endpoint"]
     assert observed[0]["provider"]["max_price"]["image"] == 0

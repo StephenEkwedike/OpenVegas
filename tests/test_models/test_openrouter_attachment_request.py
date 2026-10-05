@@ -234,6 +234,44 @@ async def test_current_owned_image_reaches_actual_transport_as_data_url(setup):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("parameter", ["max_tokens", "max_completion_tokens"])
+async def test_reviewed_endpoint_output_parameter_preserves_budget_and_guards(setup, parameter):
+    setup.review["attachments"]["output_token_parameter"] = parameter
+    setup.install_review()
+    req, _ = await setup.request(tools=True)
+    payload = setup.build(req)
+    assert payload[parameter] == req.max_tokens == 64
+    assert ({"max_tokens", "max_completion_tokens"} & payload.keys()) == {parameter}
+    assert payload["provider"]["only"] == ["fixture-provider"]
+    assert payload["provider"]["zdr"] is True
+    assert payload["provider"]["data_collection"] == "deny"
+    assert payload["provider"]["allow_fallbacks"] is False
+    assert payload["provider"]["max_price"]["image"] == 0
+    assert payload["tools"]
+    req.max_tokens = setup.config["max_tokens"] + 1
+    with pytest.raises(ContractError, match="output budget"):
+        setup.build(req)
+
+
+@pytest.mark.asyncio
+async def test_endpoint_output_parameter_change_invalidates_prepared_media(setup):
+    req, _ = await setup.request()
+    setup.review["attachments"]["output_token_parameter"] = "max_completion_tokens"
+    setup.install_review()
+    with pytest.raises(ContractError, match="review changed"):
+        setup.build(req)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parameter", [None, [], "max_output_tokens", "", True])
+async def test_unreviewable_endpoint_output_parameter_is_rejected(setup, parameter):
+    setup.review["attachments"]["output_token_parameter"] = parameter
+    setup.install_review()
+    with pytest.raises(AttachmentError):
+        await setup.request()
+
+
+@pytest.mark.asyncio
 async def test_current_text_is_complete_and_serialized_not_a_preview(setup):
     text = "full content \u4f60\u597d\n" * 700
     setup.db.put(TEXT_ID, text.encode(), "text/plain", "notes.txt")

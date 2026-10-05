@@ -144,6 +144,7 @@ class AttachmentReview:
     input_price_per_1m: Decimal
     output_price_per_1m: Decimal
     expires_at: datetime
+    output_token_parameter: str = "max_tokens"
 
 
 @dataclass(frozen=True)
@@ -232,6 +233,9 @@ def validate_attachment_review(
     (nonempty audit reference/explanation), and all six *_tokens fields below.
     image/pdf overhead must be positive iff that modality is reviewed; disabled
     modalities use explicit zero. The parent owns review creation/installation.
+    Optional output_token_parameter selects the endpoint's advertised output
+    cap: max_tokens (legacy default) or max_completion_tokens. Both retain the
+    same reviewed combined reasoning/output budget; this never raises the cap.
 
     Top-level observed_pricing uses USD/token (as in the public API), must
     explicitly include prompt/completion/request/image, and may only contain
@@ -294,7 +298,12 @@ def validate_attachment_review(
         "pdf_page_tokens",
         "pdf_file_overhead_tokens",
     }
-    if not isinstance(policy, dict) or set(policy) != fields:
+    if not isinstance(policy, dict) or set(policy) - {"output_token_parameter"} != fields:
+        _reject_review()
+    output_token_parameter = policy.get("output_token_parameter", "max_tokens")
+    if not isinstance(output_token_parameter, str) or output_token_parameter not in {
+        "max_tokens", "max_completion_tokens"
+    }:
         _reject_review()
     if (
         type(policy["schema_version"]) is not int
@@ -368,6 +377,7 @@ def validate_attachment_review(
         input_price_per_1m=_price(model_config["cost_input_per_1m"]),
         output_price_per_1m=_price(model_config["cost_output_per_1m"]),
         expires_at=expires,
+        output_token_parameter=output_token_parameter,
     )
 
 

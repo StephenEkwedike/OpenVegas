@@ -430,6 +430,95 @@ async def fetch_public_models(*, transport: httpx.AsyncBaseTransport | None = No
         ) from None
 
 
+def verify_attachment_endpoints(
+    bundle: dict, endpoint_payloads: list[bytes], zdr_payload: bytes
+) -> dict:
+    """Offline cross-check of pinned routes; not account access or live success.
+
+    Use contemporaneous /models/{id}/endpoints and /endpoints/zdr snapshots.
+    Never broaden the pin, remove privacy filters, or invent a price/parameter.
+    """
+    if not isinstance(endpoint_payloads, list) or len(endpoint_payloads) > MAX_REVIEWS:
+        raise ReviewError("Use a bounded list of exact-model endpoint snapshots")
+    snapshots = {}
+    for raw in endpoint_payloads:
+        data = parse_json(raw).get("data")
+        if not isinstance(data, dict):
+            raise ReviewError("Endpoint snapshot requires model data")
+        model = exact_model_id(data.get("id"))
+        if model in snapshots:
+            raise ReviewError("Duplicate endpoint snapshots are ambiguous")
+        snapshots[model] = (data, hashlib.sha256(raw).hexdigest())
+    zdr = parse_json(zdr_payload).get("data")
+    if not isinstance(zdr, list) or not 1 <= len(zdr) <= MAX_MODELS:
+        raise ReviewError("ZDR snapshot requires a bounded nonempty endpoint list")
+    verified = {}
+    for review in bundle["model_reviews"].values():
+        policy = review.get("attachments")
+        if policy is None:
+            continue
+        model, tag = policy["model_id"], policy["provider"]
+        if model not in snapshots:
+            raise ReviewError("Every attachment model needs its exact endpoint snapshot")
+        data, sha = snapshots[model]
+        endpoints = data.get("endpoints")
+        if not isinstance(endpoints, list) or not 1 <= len(endpoints) <= MAX_MODELS:
+            raise ReviewError("Endpoint snapshot requires a bounded nonempty list")
+        matches = [e for e in endpoints if isinstance(e, dict)
+                   and e.get("model_id") == model and e.get("tag") == tag]
+        private = [e for e in zdr if isinstance(e, dict)
+                   and e.get("model_id") == model and e.get("tag") == tag]
+        if len(matches) != 1 or len(private) != 1:
+            raise ReviewError("Pinned endpoint must occur exactly once in both model and ZDR snapshots")
+        required = {policy.get("output_token_parameter", "max_tokens")}
+        if review["capabilities"].get("tools"):
+            required.update({"tools", "tool_choice"})
+        if review["capabilities"].get("reasoning_efforts"):
+            required.add("reasoning")
+        for endpoint in (matches[0], private[0]):
+            if (type(endpoint.get("status")) is not int or endpoint["status"] != 0
+                    or not required <= set(_strings(endpoint.get("supported_parameters")))):
+                raise ReviewError("Pinned endpoint is unavailable or lacks required parameters")
+            if (_positive_int(endpoint.get("context_length")) < review["context_window_tokens"]
+                    or _positive_int(endpoint.get("max_completion_tokens")) < review["max_tokens"]):
+                raise ReviewError("Endpoint token limits are below the reviewed request limits")
+            prompt_limit = endpoint.get("max_prompt_tokens")
+            if (prompt_limit is not None
+                    and _positive_int(prompt_limit) < review["context_window_tokens"] - 1):
+                raise ReviewError("Endpoint input ceiling is below the reviewed prompt budget")
+            prices = endpoint.get("pricing")
+            if not isinstance(prices, dict):
+                raise ReviewError("Endpoint token pricing is required")
+            if (prices.keys() - (UNIT_FEES | CACHE_FEES | {"prompt", "completion", "overrides", "discount"})
+                    or ("overrides" in prices and prices["overrides"] != [])
+                    or ("discount" in prices and prices["discount"] != 0)):
+                raise ReviewError("Conditional or unknown endpoint pricing requires a separate review")
+            for field, cap in (("prompt", "cost_input_per_1m"), ("completion", "cost_output_per_1m")):
+                if decimal_price(prices.get(field)) * 1_000_000 > decimal_price(review[cap]):
+                    raise ReviewError("Pinned endpoint exceeds the reviewed token-price cap")
+            for field in ("image", "request"):
+                if field in prices and decimal_price(prices[field]) != 0:
+                    raise ReviewError("Pinned endpoint has an unsupported additional media/request fee")
+            for field in CACHE_FEES | {"internal_reasoning"}:
+                if field not in prices:
+                    continue
+                ceiling = (
+                    decimal_price(review["cost_input_per_1m"]) / 1_000_000
+                    if field == "input_cache_read" else
+                    decimal_price(review["cost_output_per_1m"]) / 1_000_000
+                    if field == "internal_reasoning" else Decimal(0)
+                )
+                if decimal_price(prices[field]) > ceiling:
+                    raise ReviewError("Endpoint cache/reasoning rate exceeds the reviewed token-only budget")
+        verified[model] = {
+            "provider": tag, "output_token_parameter": next(iter(required & {"max_tokens", "max_completion_tokens"})),
+            "endpoint_snapshot_sha256": sha,
+            "zdr_snapshot_sha256": hashlib.sha256(zdr_payload).hexdigest(),
+            "scope": "Public endpoint eligibility only; account access, fee attestations and live execution remain separate",
+        }
+    return verified
+
+
 def reviewed_bundle(
     payload: bytes,
     plan: dict,

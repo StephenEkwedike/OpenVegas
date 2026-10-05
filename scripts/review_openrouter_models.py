@@ -31,6 +31,12 @@ symlink ancestors or overwrites. It never installs rows or sets environment
 variables. The separate operator install must place provider_catalog rows and
 model_reviews (OPENVEGAS_MODEL_REVIEWS_JSON) together and verify matching prices.
 Rows remain disabled. PUBLIC LISTING DOES NOT PROVE MANAGED ACCOUNT ACCESS.
+
+Attachment bundles additionally require --endpoint-input (repeat per model)
+and --zdr-input. Obtain these snapshots at the same observation time as the
+model catalog. The tool verifies the exact pin's privacy eligibility, advertised
+output parameter, limits and price caps before writing a bundle. This does not
+replace fee/account attestations or a separately approved live check.
 """
 
 from __future__ import annotations
@@ -56,6 +62,7 @@ from openvegas.gateway.openrouter_catalog import (
     parse_json,
     review_template,
     reviewed_bundle,
+    verify_attachment_endpoints,
 )
 
 
@@ -169,6 +176,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ack-account-access", action="store_true")
     parser.add_argument("--ack-retail-prices", action="store_true")
     parser.add_argument("--output", help="Write JSON exclusively; default stdout")
+    parser.add_argument("--endpoint-input", action="append", default=[],
+                        help="Contemporaneous exact-model /endpoints JSON; repeat per attachment model")
+    parser.add_argument("--zdr-input", help="Contemporaneous /api/v1/endpoints/zdr JSON")
     args = parser.parse_args(argv)
     if args.save_snapshot and not args.fetch_public:
         parser.error("--save-snapshot requires --fetch-public")
@@ -182,6 +192,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--review requires both explicit acknowledgements")
     if args.review and not (args.observed_at or args.fetch_public):
         parser.error("Review of an offline snapshot requires its actual --observed-at timestamp")
+    if (args.endpoint_input or args.zdr_input) and not args.review:
+        parser.error("Endpoint snapshots apply only to --review")
     try:
         payload = asyncio.run(fetch_public_models()) if args.fetch_public else _read(args.input)
         observed = datetime.now(UTC).isoformat() if args.fetch_public else args.observed_at
@@ -194,6 +206,12 @@ def main(argv: list[str] | None = None) -> int:
                 ack_account_access=args.ack_account_access,
                 ack_retail_prices=args.ack_retail_prices,
             )
+            if any("attachments" in value for value in report["model_reviews"].values()):
+                if not args.endpoint_input or not args.zdr_input:
+                    raise ReviewError("Attachment review requires --endpoint-input and --zdr-input snapshots")
+                report["endpoint_verification"] = verify_attachment_endpoints(
+                    report, [_read(path) for path in args.endpoint_input], _read(args.zdr_input),
+                )
         elif args.template:
             report = review_template(report, args.model)
         data = (json.dumps(report, sort_keys=True, indent=2, ensure_ascii=True) + "\n").encode()

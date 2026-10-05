@@ -141,6 +141,35 @@ async def test_concurrent_consumed_reads_do_not_rebill_or_deadlock(handoff_db):
     assert len(d.calls) == 1
 
 
+async def test_reviewed_completion_token_alias_survives_settled_handoff(continuation_db, monkeypatch):
+    import os
+    from openvegas.contracts.native_scope import NativeInferenceScope
+    from tests.integration.test_native_continuation_postgres import payload, post, projection, setup_media
+
+    c = continuation_db
+    await c.sandbox.migrate(through=49)
+    await setup_media(c, monkeypatch, web=False, attachment=True)
+    reviews = json.loads(os.environ["OPENVEGAS_MODEL_REVIEWS_JSON"])
+    reviews["openrouter:" + c.command["model"]]["attachments"]["output_token_parameter"] = "max_completion_tokens"
+    monkeypatch.setenv("OPENVEGAS_MODEL_REVIEWS_JSON", json.dumps(reviews))
+    c.emit_calls = False
+    source = payload(await post(c, native_user_text="Remember the owned file."))
+    c.source_scope = NativeInferenceScope(run_id=c.run.run_id,
+        runtime_session_id=c.run.runtime_session_id, **await projection(c.service, c.run))
+    c.source_ref = NativeContinuationRef(
+        previous_inference_request_id=source["native_generation"]["inference_request_id"],
+        expected_history_revision=0)
+    monkeypatch.setenv("OPENVEGAS_NATIVE_TASK_HANDOFF", "1")
+    d, result = await settled(c, selection=HandoffSelection(c.command["model"], max_tokens=100))
+    assert d.calls[0]["max_completion_tokens"] == 100
+    assert "max_tokens" not in d.calls[0]
+    before = await c.db.fetchval("SELECT count(*) FROM inference_usage")
+    proof = await verify(c, d)
+    assert proof.first_request_id == result.inference_request_id
+    assert await c.db.fetchval("SELECT count(*) FROM inference_usage") == before
+    assert len(d.calls) == 1
+
+
 @pytest.mark.parametrize('foreign_owner', [False, True])
 async def test_corrupted_reverse_link_rejects_without_locking_unrelated_route(handoff_db, foreign_owner):
     c = handoff_db

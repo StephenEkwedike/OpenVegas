@@ -142,9 +142,24 @@ async def _verify_first(tx, *, record, route):
     if any(settings.get(key) != getattr(record.target, key) for key in (
             "provider", "model", "enable_tools", "enable_web_search", "reasoning_effort", "max_tokens")):
         _fail()
-    if (payload.get("model") != record.target.model or payload.get("max_tokens") != record.target.max_tokens
+    if (payload.get("model") != record.target.model
+            or _output_budget(payload, record.target.provider) != record.target.max_tokens
             or _hash(payload.get("tools")) != record.target.tool_definitions_sha256):
         _fail()
+
+
+def _output_budget(payload: dict, provider: str) -> int:
+    # Hashes above authenticate the original wire bytes. Accept exactly one
+    # budget spelling; never prefer one of two conflicting limits.
+    keys = {"max_tokens", "max_completion_tokens"} & payload.keys()
+    if len(keys) != 1:
+        _fail()
+    key = next(iter(keys))
+    value = payload[key]
+    if ((key != "max_tokens" and provider != "openrouter")
+            or type(value) is not int or value < 1):
+        _fail()
+    return value
 
 
 async def verify_consumed_handoff_tx(

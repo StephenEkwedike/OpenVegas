@@ -465,6 +465,9 @@ def _prepare_web_context(req: Any, model_config: dict, capabilities: dict, tool_
         # the actual owned media messages are validated below and never truncated.
         payload = prepared.payload([{"role": "user", "content": ""}])
         payload["messages"] = json.loads(json.dumps(req.messages))
+        output_parameter = attachment.prepared.review.output_token_parameter
+        if output_parameter != "max_tokens":
+            payload[output_parameter] = payload.pop("max_tokens")
         payload["provider"]["max_price"]["image"] = 0
         if options["plugins"]:
             payload["plugins"] = [
@@ -558,10 +561,16 @@ def _build_fresh_payload(req: Any, model_config: dict, capabilities: dict, tool_
             APIErrorCode.INVALID_TRANSITION,
             "OpenRouter context exceeds its reviewed bound; nothing was truncated.",
         )
+    # Endpoint metadata may advertise only max_completion_tokens. The choice is
+    # server-reviewed and bound to the attachment context, never caller input.
+    output_parameter = (
+        attachment_context.prepared.review.output_token_parameter
+        if attachment_context is not None else "max_tokens"
+    )
     payload = {
         "model": req.model,
         "messages": req.messages,
-        "max_tokens": req.max_tokens,
+        output_parameter: req.max_tokens,
         "stream": False,
         "transforms": [],
         "provider": {
