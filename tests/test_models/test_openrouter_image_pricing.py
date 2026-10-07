@@ -164,3 +164,69 @@ async def test_handoff_composition_preserves_image_fee_and_owned_public_context(
     assert current.blocks[-1] in destination.messages[-1]["content"]
     assert "complete text" in str(destination.messages)
     assert "Historical tool observations" in str(destination.messages)
+
+
+@pytest.mark.asyncio
+async def test_unquoted_request_fee_requires_explicit_cap_policy_and_preserves_wire_guard(setup):
+    upgrade(setup.review)
+    setup.review["observed_pricing"].pop("request")
+    setup.install_review()
+    with pytest.raises(AttachmentError):
+        await setup.request()
+    setup.review["attachments"]["request_fee_policy"] = "zero_routing_cap"
+    setup.install_review()
+    req, _ = await setup.request()
+    payload = setup.build(req)
+    assert payload["provider"]["max_price"]["request"] == 0
+    assert payload["provider"]["only"] == [setup.review["attachments"]["provider"]]
+    assert payload["provider"]["allow_fallbacks"] is False
+    assert "request" not in setup.review["observed_pricing"]
+
+
+@pytest.mark.parametrize("fee", [None, "0.01", "NaN", "-0.01", {}, True])
+def test_zero_request_cap_never_overrides_invalid_or_nonzero_quote(fee):
+    review = request.model_review()
+    upgrade(review)
+    review["attachments"]["request_fee_policy"] = "zero_routing_cap"
+    review["observed_pricing"]["request"] = fee
+    with pytest.raises(AttachmentError):
+        validate_attachment_review(model_id=request.MODEL, model_config=request.catalog_config(), model_review=review)
+
+
+@pytest.mark.parametrize("policy", [None, False, [], {}, "assume_zero"])
+def test_request_fee_policy_is_closed(policy):
+    review = request.model_review()
+    upgrade(review)
+    review["attachments"]["request_fee_policy"] = policy
+    with pytest.raises(AttachmentError):
+        validate_attachment_review(model_id=request.MODEL, model_config=request.catalog_config(), model_review=review)
+
+
+def test_request_cap_opt_in_is_not_available_to_legacy_reviews():
+    review = request.model_review()
+    review["attachments"]["request_fee_policy"] = "zero_routing_cap"
+    with pytest.raises(AttachmentError):
+        validate_attachment_review(model_id=request.MODEL, model_config=request.catalog_config(), model_review=review)
+
+
+def test_unquoted_request_fee_catalog_preserves_unknown_and_checks_both_endpoints():
+    source = catalog.catalog.model()
+    source["pricing"].pop("request")
+    data = catalog.catalog.payload(source)
+    plan = catalog.plan()
+    plan["source_sha256"] = catalog.catalog.plan(data)["source_sha256"]
+    temporary = {"attachments": plan["models"][0]["attachments"], "observed_pricing": {}}
+    upgrade(temporary, fee="0")
+    temporary["attachments"]["request_fee_policy"] = "zero_routing_cap"
+    result = catalog.catalog.build(data=data, review=plan)
+    assert result["provider_catalog"][0]["enabled"] is False
+    assert "request" not in result["model_reviews"]["openrouter:vendor/model-v2"]["observed_pricing"]
+    _, endpoints, zdr = catalog.endpoint_fixture()
+    for endpoint in (endpoints["data"]["endpoints"][0], zdr["data"][0]):
+        endpoint["pricing"].pop("request")
+    assert catalog.verify(result, endpoints, zdr)
+    for endpoint in (endpoints["data"]["endpoints"][0], zdr["data"][0]):
+        endpoint["pricing"]["request"] = "0.01"
+        with pytest.raises(ReviewError, match="media/request fee"):
+            catalog.verify(result, endpoints, zdr)
+        del endpoint["pricing"]["request"]
