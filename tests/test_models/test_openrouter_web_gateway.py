@@ -483,6 +483,39 @@ async def test_lost_settlement_ack_replays_without_another_charge(setup):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_ambiguous_supplier_receipt_refunds_without_settlement_or_redispatch(setup, streaming):
+    raw = json.dumps(response()).replace('"cost":', '"cost":"999", "cost":')
+
+    async def supplier(_):
+        return httpx.Response(200, text=raw)
+
+    gateway, db, observed = setup(handler=supplier)
+
+    async def run():
+        if streaming:
+            async for _ in gateway.stream_infer(request()):
+                pytest.fail("Ambiguous receipt must not expose an answer")
+        else:
+            await gateway.infer(request())
+
+    with pytest.raises(ContractError) as error:
+        await run()
+    assert error.value.diagnostic_reason == "ambiguous_response"
+    assert db.data["balance"] == 10
+    assert db.data["usage"] == db.data["charges"] == []
+    row = next(iter(db.data["requests"].values()))
+    assert row["status"] == "failed"
+    assert row.get("provider_request_id") is None
+    assert all(value == 0 for value in db.data["escrow"].values())
+    row["updated_at"] = datetime.now(UTC) - timedelta(days=1)
+    with pytest.raises(ContractError) as replay:
+        await run()
+    assert replay.value.code == APIErrorCode.HOLD_CONFLICT
+    assert len(observed) == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "case",
     [

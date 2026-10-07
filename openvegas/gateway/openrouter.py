@@ -82,6 +82,7 @@ def _failure_category(error: Exception) -> str:
         "Empty response": "empty_response",
         "Missing request identifier": "invalid_request_identity",
         "Response too large": "response_too_large",
+        "Duplicate provider response field": "ambiguous_response",
         "Reflected credential": "reflected_credential",
     }.get(error.args[0], "malformed_response")
 
@@ -92,6 +93,16 @@ def _request_identity(body: Any) -> str | None:
             and not value.lower().startswith("sk-")):
         return value
     return None
+
+
+def _unique_response_fields(pairs: list[tuple[str, Any]]) -> dict:
+    # Never choose one of conflicting IDs, tool fields or billing receipts.
+    fields = {}
+    for key, value in pairs:
+        if key in fields:
+            raise ValueError("Duplicate provider response field")
+        fields[key] = value
+    return fields
 
 
 def valid_model(model: object) -> bool:
@@ -909,7 +920,10 @@ async def complete(
                     raw.extend(chunk)
             if api_key.encode("utf-8") in raw:
                 raise ValueError("Reflected credential")
-            body = json.loads(raw, **({"parse_float": Decimal} if req.enable_web_search else {}))
+            body = json.loads(
+                raw, object_pairs_hook=_unique_response_fields,
+                **({"parse_float": Decimal} if req.enable_web_search else {}),
+            )
             if native_dispatch is not None and api_key in json.dumps(body, default=str):
                 raise ValueError("Reflected credential")
             candidate_id = _request_identity(body)
