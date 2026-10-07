@@ -248,7 +248,7 @@ def validate_attachment_review(
     same reviewed combined reasoning/output budget; this never raises the cap.
 
     Top-level observed_pricing uses USD/token (as in the public API), must
-    explicitly include prompt/completion/image, and ordinarily request, and may
+    explicitly include prompt/completion, ordinarily image/request, and may
     only contain known, bounded token fees. Missing prices are NOT zero quotes.
     no_additional_fees is the endpoint-specific attestation for fees the public
     model listing may omit, including plugins and automatic cache writes.
@@ -264,6 +264,9 @@ def validate_attachment_review(
     'zero_routing_cap' when the request fee is unlisted: the wire always enforces
     max_price.request=0, not an invented observed quote. Listed nonzero or invalid
     fees still fail. Omitting this policy retains the explicit-quote requirement.
+    The analogous image_fee_policy='zero_routing_cap' permits an unlisted image
+    fee only with non_token_fees.image='0' and max_price.image=0 on the wire.
+    It cannot authorize a nonzero unquoted image price.
     Schema 1 behavior is unchanged.
     """
     if not isinstance(model_config, dict) or not isinstance(model_review, dict):
@@ -328,11 +331,14 @@ def validate_attachment_review(
         fields |= {"cache_policy", "fee_bound_basis"}
     optional_fields = {"output_token_parameter"}
     if bounded_image_fee:
-        optional_fields.add("request_fee_policy")
+        optional_fields.update({"request_fee_policy", "image_fee_policy"})
     if set(policy) - optional_fields != fields:
         _reject_review()
     request_fee_policy = policy.get("request_fee_policy", "observed_zero")
     if request_fee_policy not in ("observed_zero", "zero_routing_cap"):
+        _reject_review()
+    image_fee_policy = policy.get("image_fee_policy", "observed_price")
+    if image_fee_policy not in ("observed_price", "zero_routing_cap"):
         _reject_review()
     output_token_parameter = policy.get("output_token_parameter", "max_tokens")
     if not isinstance(output_token_parameter, str) or output_token_parameter not in {
@@ -365,6 +371,8 @@ def validate_attachment_review(
            if name != "image" or not bounded_image_fee):
         _reject_review()
     image_price = _price(fees["image"])
+    if image_fee_policy == "zero_routing_cap" and image_price != 0:
+        _reject_review()
     modalities = policy["input_modalities"]
     if (
         not isinstance(modalities, list)
@@ -385,7 +393,9 @@ def validate_attachment_review(
     ):
         _reject_review()
     observed = model_review.get("observed_pricing")
-    required_prices = {"prompt", "completion", "image"}
+    required_prices = {"prompt", "completion"}
+    if image_fee_policy != "zero_routing_cap":
+        required_prices.add("image")
     if request_fee_policy != "zero_routing_cap":
         required_prices.add("request")
     if (
@@ -398,7 +408,7 @@ def validate_attachment_review(
     for source, stored in (("prompt", "cost_input_per_1m"), ("completion", "cost_output_per_1m")):
         if _price(observed[source]) * 1_000_000 != _price(model_config[stored]):
             _reject_review()
-    if _price(observed["image"]) != image_price:
+    if "image" in observed and _price(observed["image"]) != image_price:
         _reject_review()
     for fee in observed.keys() & _FEE_FIELDS:
         value = _price(observed[fee])

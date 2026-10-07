@@ -230,3 +230,34 @@ def test_unquoted_request_fee_catalog_preserves_unknown_and_checks_both_endpoint
         with pytest.raises(ReviewError, match="media/request fee"):
             catalog.verify(result, endpoints, zdr)
         del endpoint["pricing"]["request"]
+
+
+@pytest.mark.asyncio
+async def test_unquoted_image_fee_requires_explicit_zero_cap(setup):
+    upgrade(setup.review, fee="0")
+    setup.review["observed_pricing"].pop("image")
+    setup.install_review()
+    with pytest.raises(AttachmentError):
+        await setup.request()
+    setup.review["attachments"]["image_fee_policy"] = "zero_routing_cap"
+    setup.install_review()
+    req, _ = await setup.request()
+    wire = setup.build(req)
+    assert wire["provider"]["max_price"]["image"] == 0
+    assert req._managed_openrouter_dispatch.supplier_image_cost_usd == 0
+    assert "image" not in setup.review["observed_pricing"]
+
+
+@pytest.mark.parametrize("change", ["nonzero_bound", "nonzero_quote", "invalid_quote", "invalid_policy", "legacy"])
+def test_unquoted_image_fee_policy_does_not_authorize_a_surcharge(change):
+    review = request.model_review()
+    upgrade(review, fee="0")
+    review["attachments"]["image_fee_policy"] = "zero_routing_cap"
+    review["observed_pricing"].pop("image")
+    if change == "nonzero_bound": review["attachments"]["non_token_fees"]["image"] = "0.1"
+    elif change == "nonzero_quote": review["observed_pricing"]["image"] = "0.1"
+    elif change == "invalid_quote": review["observed_pricing"]["image"] = None
+    elif change == "invalid_policy": review["attachments"]["image_fee_policy"] = []
+    else: review["attachments"]["schema_version"] = 1
+    with pytest.raises(AttachmentError):
+        validate_attachment_review(model_id=request.MODEL, model_config=request.catalog_config(), model_review=review)
