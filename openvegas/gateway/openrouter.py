@@ -324,6 +324,23 @@ def input_token_bound(req: Any) -> int:
     return _initial_input_token_bound(req, local_tool_definitions(req.model) if req.enable_tools else None)
 
 
+def supplier_cost_bound(req: Any, model_config: dict, capabilities: dict) -> Decimal:
+    """Preflight the exact request before a caller reserves an approved USD cap.
+
+    No IO or dispatch. Retail wallet reservation remains separately token-priced.
+    The bound includes supplier image fees and the receipt rounding tolerance.
+    """
+    build_payload(req, model_config, capabilities)
+    if req.enable_web_search:
+        return req._managed_web_context.prepared.budget.supplier_total_usd
+    dispatch = req._managed_openrouter_dispatch
+    return (
+        (dispatch.input_tokens * price(model_config["cost_input_per_1m"])
+         + req.max_tokens * price(model_config["cost_output_per_1m"])) / 1_000_000
+        + dispatch.supplier_image_cost_usd + Decimal("0.000001")
+    )
+
+
 def _initial_input_token_bound(req: Any, tools: list[dict] | None) -> int:
     attachments = getattr(req, "_managed_attachment_context", None)
     if attachments is not None:
@@ -392,6 +409,29 @@ def _web_binding(req: Any, model_config: dict) -> str:
 class DispatchMetering:
     input_tokens: int
     binding: str
+    supplier_image_cost_usd: Decimal = Decimal(0)
+
+
+def _dispatch_metering(req: Any, model_config: dict, input_bound: int, payload: dict) -> DispatchMetering:
+    context = getattr(req, "_managed_attachment_context", None)
+    image_cost = Decimal(0)
+    if context is not None:
+        prepared = context.prepared
+        if prepared.review.implicit_cache_only:
+            # Validate actual wire metadata, including retained native messages.
+            # Text/tool argument strings are not parsed or searched for keywords.
+            pending = [payload]
+            while pending:
+                item = pending.pop()
+                if isinstance(item, dict):
+                    if "cache_control" in item:
+                        raise ContractError(APIErrorCode.INVALID_TRANSITION,
+                                            "Paid prompt caching is not reviewed for this attachment route.")
+                    pending.extend(item.values())
+                elif isinstance(item, list):
+                    pending.extend(item)
+        image_cost = prepared.supplier_image_cost_usd
+    return DispatchMetering(input_bound, _web_binding(req, model_config), image_cost)
 
 
 @dataclass(frozen=True)
@@ -421,6 +461,8 @@ def _web_attachment_options(req: Any, model_config: dict, prepared: PreparedWebS
         raise WebValidationError("invalid_private_attachment_context")
     options = context.validate(req, model_config)
     attachment = context.prepared.review
+    if attachment.image_price_usd:
+        raise WebValidationError("web_attachment_image_fee_unreviewed")
     web = prepared.snapshot
     if (attachment.provider != web.execution.provider_slug
             or attachment.context_window_tokens != web.context_window_tokens
@@ -589,7 +631,7 @@ def _build_fresh_payload(req: Any, model_config: dict, capabilities: dict, tool_
         payload.update(tools=tools, tool_choice="auto")
     payload.update(attachment_options)
     payload.update(reasoning_payload(getattr(req, "reasoning_effort", None), capabilities))
-    req._managed_openrouter_dispatch = DispatchMetering(input_bound, _web_binding(req, model_config))
+    req._managed_openrouter_dispatch = _dispatch_metering(req, model_config, input_bound, payload)
     # Output metering includes reasoning. Do not forward private thought fields.
     return payload
 
@@ -623,7 +665,7 @@ def _build_native_continuation(req: Any, native: dict, model_config: dict, capab
             # snapshot with a later timestamp. Rechecking dispatch must not replace it.
         else:
             req._managed_web_context = ManagedWebContext(prepared, _web_binding(req, model_config), encoded)
-    req._managed_openrouter_dispatch = DispatchMetering(bound, _web_binding(req, model_config))
+    req._managed_openrouter_dispatch = _dispatch_metering(req, model_config, bound, native)
     return native
 
 
@@ -712,6 +754,8 @@ def parse_response(body: Any, req: Any, model_config: dict, parse_tool, *, expec
             counts[0] * price(model_config["cost_input_per_1m"])
             + counts[1] * price(model_config["cost_output_per_1m"])
         ) / 1_000_000
+        if dispatch is not None:
+            maximum += dispatch.supplier_image_cost_usd
         if cost > maximum + Decimal("0.000001"):
             raise ValueError("Reported cost exceeds approved token prices")
     native_calls = message.get("tool_calls")

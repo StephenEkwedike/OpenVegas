@@ -32,7 +32,8 @@ Official contracts checked 2026-09-21:
 https://openrouter.ai/docs/guides/overview/multimodal/image-understanding
 https://openrouter.ai/docs/guides/overview/multimodal/pdfs
 PDF defaults may invoke paid OCR. Always send engine=native, with one reviewed
-endpoint, no fallbacks, and a review of token-only pricing and zero extra fees.
+endpoint and no fallbacks. Schema 1 remains token-only; schema 2 can additionally
+bound a per-input-image fee, but cannot combine that fee with PDF preprocessing.
 """
 
 from __future__ import annotations
@@ -145,6 +146,8 @@ class AttachmentReview:
     output_price_per_1m: Decimal
     expires_at: datetime
     output_token_parameter: str = "max_tokens"
+    image_price_usd: Decimal = Decimal(0)
+    implicit_cache_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -173,6 +176,13 @@ class PreparedAttachments:
         return json.loads(self._blocks_json)
 
     @property
+    def supplier_image_cost_usd(self) -> Decimal:
+        # Count occurrences, including repeated images retained across turns.
+        return self.review.image_price_usd * sum(
+            block["type"] == "image_url" for block in self.blocks
+        )
+
+    @property
     def request_options(self) -> dict[str, Any]:
         has_pdf = any(block["type"] == "file" for block in self.blocks)
         return {
@@ -188,7 +198,7 @@ class PreparedAttachments:
                     "prompt": float(self.review.input_price_per_1m),
                     "completion": float(self.review.output_price_per_1m),
                     "request": 0,
-                    "image": 0,
+                    "image": float(self.review.image_price_usd),
                 },
             },
         }
@@ -197,7 +207,7 @@ class PreparedAttachments:
 def _reject_review() -> None:
     raise AttachmentError(
         "attachment_review_required",
-        "Attachments require a current exact-model, endpoint, capability and token-only pricing review.",
+        "Attachments require a current exact-model, endpoint, capability and bounded pricing review.",
         503,
     )
 
@@ -242,6 +252,15 @@ def validate_attachment_review(
     known, bounded token fees. Missing image/request prices are NOT zero.
     no_additional_fees is the endpoint-specific attestation for fees the public
     model listing may omit, including plugins and automatic cache writes.
+
+    Schema 2 uses pricing_policy='bounded_image_fee_v2', cache_policy=
+    'implicit_free_only_no_cache_control', and fee_bound_basis (20-2000 chars).
+    It permits only a reviewed USD-per-input-image fee, not new customer fees.
+    no_additional_fees then attests that there are no OTHER applicable fees,
+    including automatic paid cache writes. Advertised explicit-cache/audio/web
+    rates may be nonzero because these features are not invoked by this path.
+    Nonzero image fees with PDFs are refused: parser image counts are unbounded
+    by the image upload count. Schema 1 behavior is unchanged.
     """
     if not isinstance(model_config, dict) or not isinstance(model_review, dict):
         _reject_review()
@@ -298,7 +317,12 @@ def validate_attachment_review(
         "pdf_page_tokens",
         "pdf_file_overhead_tokens",
     }
-    if not isinstance(policy, dict) or set(policy) - {"output_token_parameter"} != fields:
+    if not isinstance(policy, dict):
+        _reject_review()
+    bounded_image_fee = type(policy.get("schema_version")) is int and policy["schema_version"] == 2
+    if bounded_image_fee:
+        fields |= {"cache_policy", "fee_bound_basis"}
+    if set(policy) - {"output_token_parameter"} != fields:
         _reject_review()
     output_token_parameter = policy.get("output_token_parameter", "max_tokens")
     if not isinstance(output_token_parameter, str) or output_token_parameter not in {
@@ -307,9 +331,9 @@ def validate_attachment_review(
         _reject_review()
     if (
         type(policy["schema_version"]) is not int
-        or policy["schema_version"] != 1
+        or policy["schema_version"] not in {1, 2}
         or policy["model_id"] != model_id
-        or policy["pricing_policy"] != "input_tokens_only"
+        or policy["pricing_policy"] != ("bounded_image_fee_v2" if bounded_image_fee else "input_tokens_only")
         or policy["no_additional_fees"] is not True
         or policy["token_bound_policy"] != "utf8_bytes_plus_reviewed_media_v1"
         or not isinstance(policy["token_bound_basis"], str)
@@ -318,11 +342,19 @@ def validate_attachment_review(
         or not re.fullmatch(r"[a-z0-9][a-z0-9._/-]{0,127}", policy["provider"])
     ):
         _reject_review()
+    if bounded_image_fee and (
+        policy["cache_policy"] != "implicit_free_only_no_cache_control"
+        or not isinstance(policy["fee_bound_basis"], str)
+        or not 20 <= len(policy["fee_bound_basis"].strip()) <= 2000
+    ):
+        _reject_review()
     fees = policy["non_token_fees"]
     if not isinstance(fees, dict) or set(fees) != {"image", "native_pdf", "plugins", "request"}:
         _reject_review()
-    if any(_price(amount) != 0 for amount in fees.values()):
+    if any(_price(amount) != 0 for name, amount in fees.items()
+           if name != "image" or not bounded_image_fee):
         _reject_review()
+    image_price = _price(fees["image"])
     modalities = policy["input_modalities"]
     if (
         not isinstance(modalities, list)
@@ -332,6 +364,8 @@ def validate_attachment_review(
         or "text" not in modalities
         or set(modalities) - {"text", "image", "file"}
     ):
+        _reject_review()
+    if image_price and ("image" not in modalities or "file" in modalities):
         _reject_review()
     image_tokens = _integer(policy["image_tokens"], 1 if "image" in modalities else 0)
     pdf_page = _integer(policy["pdf_page_tokens"], 1 if "file" in modalities else 0)
@@ -351,8 +385,17 @@ def validate_attachment_review(
     for source, stored in (("prompt", "cost_input_per_1m"), ("completion", "cost_output_per_1m")):
         if _price(observed[source]) * 1_000_000 != _price(model_config[stored]):
             _reject_review()
+    if _price(observed["image"]) != image_price:
+        _reject_review()
     for fee in observed.keys() & _FEE_FIELDS:
         value = _price(observed[fee])
+        if bounded_image_fee and fee in {
+            "image", "audio", "input_audio", "output_audio", "input_audio_cache",
+            "web_search", "input_cache_write", "input_cache_write_1h",
+        }:
+            # Parsed for validity, but only the image fee is activated. Cached
+            # reads and reasoning still must fit the ordinary token ceilings.
+            continue
         ceiling = (
             _price(observed["prompt"])
             if fee == "input_cache_read"
@@ -378,6 +421,8 @@ def validate_attachment_review(
         output_price_per_1m=_price(model_config["cost_output_per_1m"]),
         expires_at=expires,
         output_token_parameter=output_token_parameter,
+        image_price_usd=image_price,
+        implicit_cache_only=bounded_image_fee,
     )
 
 

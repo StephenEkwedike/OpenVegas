@@ -458,6 +458,21 @@ def verify_attachment_endpoints(
         if policy is None:
             continue
         model, tag = policy["model_id"], policy["provider"]
+        from server.services.openrouter_attachments import AttachmentError, validate_attachment_review
+
+        rows = [row for row in bundle["provider_catalog"] if row.get("model_id") == model]
+        if len(rows) != 1:
+            raise ReviewError("Attachment model must have exactly one catalog row")
+        try:
+            attachment = validate_attachment_review(
+                model_id=model, model_config={**rows[0], "enabled": True},
+                model_review=review,
+                # Bundle construction separately checks the actual clock. This
+                # offline endpoint comparison must also work for saved reviews.
+                now=_time(review["reviewed_at"]),
+            )
+        except AttachmentError:
+            raise ReviewError("Attachment pricing review is invalid") from None
         if model not in snapshots:
             raise ReviewError("Every attachment model needs its exact endpoint snapshot")
         data, sha = snapshots[model]
@@ -497,10 +512,14 @@ def verify_attachment_endpoints(
                 if decimal_price(prices.get(field)) * 1_000_000 > decimal_price(review[cap]):
                     raise ReviewError("Pinned endpoint exceeds the reviewed token-price cap")
             for field in ("image", "request"):
-                if field in prices and decimal_price(prices[field]) != 0:
+                cap = attachment.image_price_usd if field == "image" else Decimal(0)
+                if field in prices and decimal_price(prices[field]) > cap:
                     raise ReviewError("Pinned endpoint has an unsupported additional media/request fee")
             for field in CACHE_FEES | {"internal_reasoning"}:
                 if field not in prices:
+                    continue
+                if field in CACHE_WRITE_FEES and attachment.implicit_cache_only:
+                    decimal_price(prices[field])
                     continue
                 ceiling = (
                     decimal_price(review["cost_input_per_1m"]) / 1_000_000
@@ -702,7 +721,10 @@ def reviewed_bundle(
             if (not attachment_review.modalities <= set(candidate["input_modalities"])
                     or caps["image_input"] != ("image" in attachment_review.modalities)):
                 raise ReviewError("Attachment modalities do not match this model's explicit review and listing")
-            installed_review["pricing_policy"] = "owned_native_media_tokens_zero_request_fee"
+            installed_review["pricing_policy"] = (
+                "owned_native_media_bounded_image_fee"
+                if attachment_review.implicit_cache_only else "owned_native_media_tokens_zero_request_fee"
+            )
             installed_review["pricing_scope"] = {
                 **candidate["pricing_scope"], "input": "owned_reviewed_attachments",
                 "plugins": "native_pdf_only" if "file" in attachment_review.modalities else False,

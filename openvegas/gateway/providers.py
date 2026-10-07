@@ -121,7 +121,12 @@ def model_capabilities(provider: str, model_id: str) -> dict[str, Any]:
         provider == "openrouter"
         and review.get("account_access") is True
         and review.get("completion_chat") is True
-        and attachments.get("schema_version") == 1
+        and type(attachments.get("schema_version")) is int
+        and attachments["schema_version"] in {1, 2}
+        and (attachments["schema_version"] == 1 or (
+            attachments.get("pricing_policy") == "bounded_image_fee_v2"
+            and attachments.get("cache_policy") == "implicit_free_only_no_cache_control"
+        ))
         and attachments.get("model_id") == model_id
         and attachments.get("no_additional_fees") is True
         and isinstance(modalities, list)
