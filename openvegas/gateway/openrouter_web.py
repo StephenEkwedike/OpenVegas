@@ -66,6 +66,7 @@ SCALE = Decimal("0.000001")
 MAX_TOKENS = 10_000_000
 MAX_TEXT_BYTES = 1_000_000
 MAX_ANNOTATIONS = 64
+WEB_REQUIRED_PARAMETERS = frozenset({"tools", "tool_choice", "parallel_tool_calls", "max_tokens"})
 _MONEY = re.compile(r"(?:0|[1-9][0-9]{0,6})(?:\.[0-9]{1,12})?\Z")
 _ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}\Z")
 
@@ -76,6 +77,14 @@ class WebValidationError(ValueError):
     def __init__(self, code: str):
         super().__init__(code)
         self.code = code
+
+
+def validate_web_supported_parameters(parameters: object) -> None:
+    """Require advertised model controls even when local function tools are off."""
+    if (not isinstance(parameters, list)
+            or any(not isinstance(value, str) for value in parameters)
+            or not WEB_REQUIRED_PARAMETERS <= set(parameters)):
+        raise WebValidationError("web_required_parameters_unreviewed")
 
 
 def _integer(value: object, minimum: int, maximum: int, code: str) -> int:
@@ -906,6 +915,7 @@ def prepare_server_review(
         expires = _review_datetime(review["expires_at"])
         if not reviewed <= now < expires or expires - reviewed > timedelta(days=30):
             raise WebValidationError("stale_web_review")
+        validate_web_supported_parameters(review.get("supported_parameters"))
         web = review["web_search"]
         if (
             not isinstance(web, dict)

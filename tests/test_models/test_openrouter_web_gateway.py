@@ -52,7 +52,7 @@ def review():
         "context_window_tokens": 8192,
         "cost_input_per_1m": "1",
         "cost_output_per_1m": "2",
-        "supported_parameters": ["reasoning"],
+        "supported_parameters": ["max_tokens", "tools", "tool_choice", "parallel_tool_calls", "reasoning"],
         "capabilities": {"tools": True, "web_search": True, "reasoning_efforts": ["low", "high"]},
         "web_search": {
             "schema_version": 1,
@@ -579,6 +579,11 @@ async def test_invalid_receipt_refunds_hold_but_never_retries_uncertain_attempt(
         "low_cap",
         "catalog_price",
         "forged_context",
+        "parameter_tools",
+        "parameter_tool_choice",
+        "parameter_parallel_tool_calls",
+        "parameter_max_tokens",
+        "missing_supported_parameters",
     ],
 )
 async def test_preflight_fails_explicitly_before_credentials_reservation_or_network(
@@ -607,6 +612,10 @@ async def test_preflight_fails_explicitly_before_credentials_reservation_or_netw
         config["web_search"]["prices"]["retail_cap_v"] = "0.01"
     elif case == "catalog_price":
         gateway.catalog.get_model.return_value["v_price_input_per_1m"] = "11"
+    elif case.startswith("parameter_"):
+        config["supported_parameters"].remove(case.removeprefix("parameter_"))
+    elif case == "missing_supported_parameters":
+        config.pop("supported_parameters")
     monkeypatch.setenv("OPENVEGAS_MODEL_REVIEWS_JSON", json.dumps({"openrouter:" + MODEL: config}))
     with pytest.raises(ContractError):
         await gateway.infer(req)

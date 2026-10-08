@@ -55,7 +55,7 @@ async def test_reviewed_web_reaches_authenticated_gateway(setup, endpoint):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case", ["no_review", "expired", "price_changed", "no_key", "rollout"])
+@pytest.mark.parametrize("case", ["no_review", "expired", "price_changed", "no_key", "rollout", "parallel_parameter"])
 async def test_unreviewed_web_never_silently_becomes_plain_answer(setup, monkeypatch, case):
     value = copy.deepcopy(setup.review)
     key = web.KEY
@@ -67,6 +67,8 @@ async def test_unreviewed_web_never_silently_becomes_plain_answer(setup, monkeyp
         setup.state["row"]["v_price_input_per_1m"] = "11"
     elif case == "rollout":
         monkeypatch.setenv("OPENVEGAS_ROLLOUT_WEB_SEARCH_PCT", "0")
+    elif case == "parallel_parameter":
+        value["supported_parameters"].remove("parallel_tool_calls")
     else:
         key = None
     transport.install_review(monkeypatch, value)
@@ -88,8 +90,14 @@ def test_web_discovery_requires_exact_price_and_execution_review(setup, monkeypa
     assert not resolve_capability("openrouter", web.MODEL, "web_search")
 
 
-def plan():
-    value = catalog.plan()
+def catalog_payload():
+    return catalog.payload(catalog.model(supported_parameters=[
+        "max_tokens", "tools", "tool_choice", "parallel_tool_calls", "temperature",
+    ]))
+
+
+def plan(data=None):
+    value = catalog.plan(catalog_payload() if data is None else data)
     entry = value["models"][0]
     policy = copy.deepcopy(web.review()["web_search"])
     expires = (catalog.NOW + timedelta(hours=1)).isoformat()
@@ -112,7 +120,7 @@ def plan():
 
 
 def test_catalog_keeps_reviewed_web_disabled_until_operator_activation():
-    bundle = catalog.build(review=plan())
+    bundle = catalog.build(data=catalog_payload(), review=plan())
     assert not bundle["provider_catalog"][0]["enabled"]
     review = bundle["model_reviews"]["openrouter:vendor/model-v2"]
     assert review["capabilities"]["web_search"] is True
@@ -137,7 +145,44 @@ def test_invalid_web_review_never_builds_installable_bundle(case):
     else:
         entry["web_search"]["prices"]["supplier_cap_usd"] = "0.00001"
     with pytest.raises(ReviewError):
-        catalog.build(review=value)
+        catalog.build(data=catalog_payload(), review=value)
+
+
+@pytest.mark.parametrize("missing", ["tools", "tool_choice", "parallel_tool_calls", "max_tokens"])
+def test_catalog_web_requires_parameters_without_local_tool_capability(missing):
+    model = catalog.model(supported_parameters=[
+        p for p in ("max_tokens", "tools", "tool_choice", "parallel_tool_calls") if p != missing
+    ])
+    data = catalog.payload(model)
+    value = plan(data)
+    value["models"][0]["capabilities"]["tools"] = False
+    error = "ineligible exact-model review" if missing == "max_tokens" else "Invalid bounded web"
+    with pytest.raises(ReviewError, match=error):
+        catalog.build(data=data, review=value)
+
+
+@pytest.mark.parametrize("surface", ["review", "model_endpoint", "zdr_endpoint"])
+@pytest.mark.parametrize("missing", [None, "tools", "tool_choice", "parallel_tool_calls", "max_tokens"])
+def test_web_only_endpoint_admission_requires_complete_parameter_support(surface, missing):
+    value = plan()
+    value["models"][0]["capabilities"]["tools"] = False
+    bundle = catalog.build(data=catalog_payload(), review=value)
+    review = bundle["model_reviews"]["openrouter:vendor/model-v2"]
+    assert "attachments" not in review
+    endpoint = {"model_id": "vendor/model-v2", "tag": "fixture/endpoint", "status": 0,
+                "supported_parameters": ["max_tokens", "tools", "tool_choice", "parallel_tool_calls"]}
+    private = copy.deepcopy(endpoint)
+    target = {"review": review, "model_endpoint": endpoint, "zdr_endpoint": private}[surface]
+    if missing:
+        target["supported_parameters"].remove(missing)
+    args = (bundle, [json.dumps({"data": {"id": "vendor/model-v2", "endpoints": [endpoint]}}).encode()],
+            json.dumps({"data": [private]}).encode())
+    if missing:
+        with pytest.raises(ReviewError, match="Pinned web endpoint lacks explicitly reviewed required parameters"):
+            catalog.c.verify_attachment_endpoints(*args)
+    else:
+        result = catalog.c.verify_attachment_endpoints(*args)
+        assert result["vendor/model-v2"]["provider"] == "fixture/endpoint"
 
 
 @pytest_asyncio.fixture

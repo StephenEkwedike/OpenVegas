@@ -437,6 +437,7 @@ def verify_attachment_endpoints(
 
     Use contemporaneous /models/{id}/endpoints and /endpoints/zdr snapshots.
     Never broaden the pin, remove privacy filters, or invent a price/parameter.
+    Web-only reviews also require their pinned endpoint's emitted model controls.
     """
     if not isinstance(endpoint_payloads, list) or len(endpoint_payloads) > MAX_REVIEWS:
         raise ReviewError("Use a bounded list of exact-model endpoint snapshots")
@@ -454,6 +455,35 @@ def verify_attachment_endpoints(
         raise ReviewError("ZDR snapshot requires a bounded nonempty endpoint list")
     verified = {}
     for review in bundle["model_reviews"].values():
+        if review.get("capabilities", {}).get("web_search") is True:
+            from openvegas.gateway.openrouter_web import (
+                WebValidationError, validate_web_supported_parameters,
+            )
+
+            try:
+                validate_web_supported_parameters(review.get("supported_parameters"))
+                execution = review["web_search"]["execution"]
+                web_model = exact_model_id(execution["model"])
+                web_tag = execution["provider_slug"]
+                data, web_sha = snapshots[web_model]
+                web_endpoints = data["endpoints"]
+                if not isinstance(web_endpoints, list) or not 1 <= len(web_endpoints) <= MAX_MODELS:
+                    raise ReviewError("Web endpoint snapshot requires a bounded nonempty list")
+                for candidates in (web_endpoints, zdr):
+                    matches = [e for e in candidates if isinstance(e, dict)
+                               and e.get("model_id") == web_model and e.get("tag") == web_tag]
+                    if (len(matches) != 1 or type(matches[0].get("status")) is not int
+                            or matches[0]["status"] != 0):
+                        raise ReviewError("Pinned web endpoint must be available in model and ZDR snapshots")
+                    validate_web_supported_parameters(matches[0].get("supported_parameters"))
+            except (KeyError, TypeError, WebValidationError):
+                raise ReviewError("Pinned web endpoint lacks explicitly reviewed required parameters") from None
+            verified[web_model] = {
+                "provider": web_tag, "output_token_parameter": "max_tokens",
+                "endpoint_snapshot_sha256": web_sha,
+                "zdr_snapshot_sha256": hashlib.sha256(zdr_payload).hexdigest(),
+                "scope": "Public web endpoint parameter eligibility only; account access, pricing and live execution remain separate",
+            }
         policy = review.get("attachments")
         if policy is None:
             continue

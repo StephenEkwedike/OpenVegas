@@ -807,6 +807,7 @@ def server_review():
                 "context_window_tokens": 8192,
                 "cost_input_per_1m": "1",
                 "cost_output_per_1m": "2",
+                "supported_parameters": ["tools", "tool_choice", "parallel_tool_calls", "max_tokens"],
                 "web_search": {
                     "schema_version": 1,
                     "prices": asdict(prices()),
@@ -827,6 +828,26 @@ def test_prepare_server_review_has_no_implicit_retail_price_and_freezes_values()
     assert p.snapshot.prices.retail_search_v_per_call == D("0.125")
     del review["web_search"]["prices"]["retail_search_v_per_call"]
     with pytest.raises(web.WebValidationError):
+        web.prepare_server_review(execution().model, 64, review, now=NOW)
+
+
+@pytest.mark.parametrize("missing", ["tools", "tool_choice", "parallel_tool_calls", "max_tokens"])
+def test_server_web_review_requires_every_emitted_model_parameter(missing):
+    review = server_review()
+    review["supported_parameters"].remove(missing)
+    with pytest.raises(web.WebValidationError, match="web_required_parameters_unreviewed"):
+        web.prepare_server_review(execution().model, 64, review, now=NOW)
+
+
+@pytest.mark.parametrize("parameters", [None, [], "tools,tool_choice,parallel_tool_calls,max_tokens",
+                                       {"tools": True}, [["tools"]], [True]])
+def test_server_web_review_requires_an_explicit_parameter_list(parameters):
+    review = server_review()
+    review["supported_parameters"] = parameters
+    with pytest.raises(web.WebValidationError, match="web_required_parameters_unreviewed"):
+        web.prepare_server_review(execution().model, 64, review, now=NOW)
+    review.pop("supported_parameters")
+    with pytest.raises(web.WebValidationError, match="web_required_parameters_unreviewed"):
         web.prepare_server_review(execution().model, 64, review, now=NOW)
 
 
