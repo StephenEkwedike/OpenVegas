@@ -8935,7 +8935,17 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     return False
                 await pending.stage_destination(_stage_handoff_destination)
             if pending.state in {"staged", "confirm_uncertain", "confirmed"}:
-                await pending.confirm(client)
+                try:
+                    await pending.confirm(client)
+                except ValueError:
+                    if pending.state != "confirm_uncertain":
+                        raise
+                    resolved = await pending.resolve(client)
+                    if resolved.outcome == "expired_uncommitted":
+                        pending_native_handoff = pending_handoff_capabilities = None
+                        console.print("Model switch expired before confirmation. Your previous model and context "
+                                      "are intact; you can retry the switch or continue chatting.", markup=False)
+                        return False
             capabilities = reviewed_capabilities(pending_handoff_capabilities, selected.provider, selected.model)
             adopted = pending.adopt()
             confirmed = pending.confirmed

@@ -175,3 +175,23 @@ class NativeHandoffResponse(NativeHandoffRef):
         if files is not None and tasks is not None and (value > files or files > tasks * value):
             raise ValueError(_INVALID)
         return value
+
+
+class NativeHandoffResolution(_PublicHandoff):
+    """Verified confirmation outcome, never a grant to start inference."""
+
+    request: ConfirmNativeHandoff = Field(repr=False)
+    outcome: Literal["committed", "expired_uncommitted"]
+    confirmed: NativeHandoffResponse | None = None
+
+    @model_validator(mode="after")
+    def bind_outcome(self):
+        if self.outcome == "expired_uncommitted":
+            if self.confirmed is not None:
+                raise _validation_error(type(self).__name__)
+        elif (self.confirmed is None
+                or self.confirmed.handoff_id != self.request.handoff_id
+                or self.confirmed.handoff_sha256 != self.request.handoff_sha256
+                or self.confirmed.destination_scope != self.request.destination_scope):
+            raise _validation_error(type(self).__name__)
+        return self

@@ -35,6 +35,7 @@ from openvegas.config import (
 from openvegas.contracts.native_handoff import (
     ConfirmNativeHandoff,
     NativeHandoffRef,
+    NativeHandoffResolution,
     NativeHandoffResponse,
     PrepareNativeHandoff,
 )
@@ -1334,6 +1335,18 @@ class OpenVegasClient:
             if (result.handoff_id != checked.handoff_id
                     or result.handoff_sha256 != checked.handoff_sha256
                     or result.destination_scope != checked.destination_scope):
+                raise ValueError
+            return result
+        except (APIError, ValueError, TypeError) as exc:
+            raise _handoff_response_error(exc.status if isinstance(exc, APIError) else 502) from None
+
+    async def native_handoff_resolve(self, request: ConfirmNativeHandoff) -> NativeHandoffResolution:
+        checked = ConfirmNativeHandoff.model_validate(deepcopy(request))
+        try:
+            response = await self._request("POST", "/agent/native-handoffs/resolve",
+                                           json=checked.model_dump(mode="json"))
+            result = NativeHandoffResolution.model_validate(response)
+            if result.request != checked:
                 raise ValueError
             return result
         except (APIError, ValueError, TypeError) as exc:

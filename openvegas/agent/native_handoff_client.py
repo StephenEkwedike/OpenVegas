@@ -13,6 +13,7 @@ from typing import Any
 from openvegas.agent.native_scope_client import NativeGenerationSession
 from openvegas.contracts.native_handoff import (
     ConfirmNativeHandoff,
+    NativeHandoffResolution,
     NativeHandoffResponse,
     NativeHandoffSelection,
     PrepareNativeHandoff,
@@ -156,6 +157,35 @@ class PendingNativeHandoff:
             self._state = "confirm_uncertain"
             if isinstance(exc, Exception):
                 raise PendingHandoffError("Confirmation outcome is uncertain; retry only the identical confirmation.") from None
+            raise
+        finally:
+            self._busy = False
+
+    async def resolve(self, client: Any) -> NativeHandoffResolution:
+        """Release a pending operation only on an identity-bound terminal reply."""
+        self._allow("confirm_uncertain")
+        self._source_unchanged()
+        self._busy = True
+        try:
+            result = NativeHandoffResolution.model_validate(
+                await client.native_handoff_resolve(self.confirm_request))
+            if result.request != self.confirm_request:
+                raise ValueError
+            self._source_unchanged()
+            if result.outcome == "expired_uncommitted":
+                self._state = "cancelled"
+            else:
+                expected = self.preview.model_dump()
+                expected["destination_scope"] = self.confirm_request.destination_scope.model_dump()
+                if result.confirmed != NativeHandoffResponse.model_validate(expected):
+                    raise ValueError
+                self._confirmed_json, self._state = result.confirmed.model_dump_json(), "confirmed"
+            return result
+        except BaseException as exc:
+            self._state = "confirm_uncertain"
+            if isinstance(exc, Exception):
+                raise PendingHandoffError(
+                    "Confirmation remains uncertain; no selection or history was changed.") from None
             raise
         finally:
             self._busy = False

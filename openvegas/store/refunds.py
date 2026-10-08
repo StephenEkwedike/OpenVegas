@@ -10,6 +10,7 @@ import json
 from decimal import Decimal
 from uuid import UUID
 
+from openvegas.payments.adjustments import lock_user_adjustments, policy
 from openvegas.store.service import StoreError, StoreService
 from openvegas.wallet.ledger import LedgerEntry, WalletService
 
@@ -26,6 +27,40 @@ def _uuid(value: str) -> str:
         return str(parsed)
     except (ValueError, TypeError, AttributeError):
         raise StoreError("REFUND_INVALID_IDENTIFIER") from None
+
+
+async def _cash_adjustment_review(db, *, user_id: str, order_id: str) -> dict:
+    """Read current policy facts without attributing funds or changing audit history."""
+    attributed = await db.fetchval(
+        "SELECT EXISTS(SELECT 1 FROM stripe_emote_funding WHERE user_id=$1 AND order_id=$2)",
+        user_id,
+        order_id,
+    )
+    rows = await db.fetch(
+        """SELECT a.*,t.amount_usd FROM stripe_emote_adjustments a
+        JOIN fiat_topups t ON t.id=a.topup_id AND t.user_id=a.user_id WHERE a.user_id=$1""",
+        user_id,
+    )
+    groups = {}
+    for row in rows:
+        groups.setdefault(str(row["topup_id"]), []).append(dict(row))
+    reasons = set()
+    # Like purchases, refunds cannot infer that an unlinked order is unrelated to
+    # an account's unresolved cash adjustment. Historical audit rows are not holds.
+    for group in groups.values():
+        target, reason = policy(
+            group, total_minor=int(group[0]["amount_usd"] * 100), exclusive=False
+        )
+        if target != "active":
+            reasons.add(reason)
+        if any(r["kind"] == "refund" and r["state"] in {"pending", "requires_action"} for r in group):
+            reasons.add("pending_cash_refund")
+    return {
+        "required": bool(reasons),
+        "funding_attributed": bool(attributed),
+        "funding_review_required": bool(reasons) and not attributed,
+        "reasons": sorted(reasons),
+    }
 
 
 async def inspect_refund(db, *, user_id: str, order_id: str) -> dict:
@@ -46,6 +81,9 @@ async def inspect_refund(db, *, user_id: str, order_id: str) -> dict:
         "cost_v": str(row["cost_v"]),
         "status": str(row["status"]),
         "entitlement_status": row["entitlement_status"],
+        "cash_adjustment_review": await _cash_adjustment_review(
+            db, user_id=user_id, order_id=order_id
+        ),
     }
 
 
@@ -72,6 +110,7 @@ async def refund_cosmetic(
         separators=(",", ":"),
     )
     async with db.transaction() as tx:
+        await lock_user_adjustments(tx, user_id)
         await service._lock_scope(tx, "sku", user_id, item_id)
         row = await tx.fetchrow(
             """SELECT o.status, o.cost_v, o.failure_reason, e.status AS entitlement_status,
@@ -85,6 +124,10 @@ async def refund_cosmetic(
         )
         if row is None:
             raise StoreError("COSMETIC_ORDER_NOT_FOUND")
+        # Inspection can precede a webhook commit; recheck under the shared lock.
+        summary["cash_adjustment_review"] = await _cash_adjustment_review(
+            tx, user_id=user_id, order_id=order_id
+        )
         amount = Decimal(str(row["cost_v"]))
         if not amount.is_finite() or amount < 0:
             raise StoreError("REFUND_REQUIRES_RECONCILIATION")
@@ -132,6 +175,8 @@ async def refund_cosmetic(
         ):
             raise StoreError("REFUND_REQUIRES_RECONCILIATION")
         if amount > 0:
+            if summary["cash_adjustment_review"]["required"]:
+                raise StoreError("REFUND_REQUIRES_RECONCILIATION")
             await wallet._execute(
                 LedgerEntry(
                     debit_account="store",

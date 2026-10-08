@@ -15,10 +15,10 @@ from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from openvegas.contracts.errors import APIErrorCode, ContractError
-from openvegas.contracts.native_handoff import NativeHandoffResponse
+from openvegas.contracts.native_handoff import NativeHandoffResolution, NativeHandoffResponse
 from openvegas.contracts.native_scope import NativeInferenceScope
 from server.routes import native_handoffs as routes
-from server.services.native_handoff_service import HandoffPreview, HandoffSelection
+from server.services.native_handoff_service import HandoffPreview, HandoffResolution, HandoffSelection
 
 PRIVATE = "private-rejected-history-must-not-be-reflected"
 FLAGS = ("OPENVEGAS_NATIVE_TASK_HANDOFF", "OPENVEGAS_NATIVE_GENERATION_SCOPE",
@@ -52,6 +52,10 @@ def boundary(monkeypatch):
             calls.append(("confirm", kwargs))
             return self.confirmed
 
+        async def resolve(self, **kwargs):
+            calls.append(("resolve", kwargs))
+            return HandoffResolution("committed", self.confirmed)
+
     monkeypatch.setattr(routes, "NativeHandoffService", Service)
     monkeypatch.setattr(routes, "get_db", lambda: database)
     monkeypatch.setattr(routes, "get_fraud_engine", lambda: SimpleNamespace(check_inference=AsyncMock(return_value=True)))
@@ -66,24 +70,29 @@ def boundary(monkeypatch):
     return app, TestClient(app), owner, prepare, confirm, calls, Service
 
 
-@pytest.mark.parametrize("operation", ["prepare", "confirm"])
+@pytest.mark.parametrize("operation", ["prepare", "confirm", "resolve"])
 def test_owned_typed_summary_only_and_no_store_cache(boundary, operation):
     _, client, owner, prepare, confirm, calls, _ = boundary
     request = prepare if operation == "prepare" else confirm
     response = client.post("/agent/native-handoffs/" + operation, json=request)
     assert response.status_code == 200
-    parsed = NativeHandoffResponse.model_validate(response.json())
+    if operation == "resolve":
+        resolution = NativeHandoffResolution.model_validate(response.json())
+        assert resolution.request.model_dump(mode="json") == request
+        parsed = resolution.confirmed
+    else:
+        parsed = NativeHandoffResponse.model_validate(response.json())
     assert parsed.task_count == 2 and parsed.file_count == 3 and parsed.unique_file_count == 2
     assert response.headers["Cache-Control"] == "private, no-store"
     assert calls[0][0] == operation and calls[0][1]["user_id"] == owner
     assert calls[0][1]["idempotency_key"] == request["idempotency_key"]
-    assert request["idempotency_key"] not in response.text
+    assert (request["idempotency_key"] in response.text) == (operation == "resolve")
     assert owner not in response.text
     assert "document" not in response.text and "observations" not in response.text
     assert (parsed.destination_scope is None) == (operation == "prepare")
 
 
-@pytest.mark.parametrize("operation", ["prepare", "confirm"])
+@pytest.mark.parametrize("operation", ["prepare", "confirm", "resolve"])
 @pytest.mark.parametrize("outcome", [False, None, 1, "true", RuntimeError(PRIVATE)])
 def test_rate_gate_denial_is_private_and_precedes_storage(boundary, monkeypatch, operation, outcome):
     _, client, owner, prepare, confirm, calls, _ = boundary
@@ -98,7 +107,43 @@ def test_rate_gate_denial_is_private_and_precedes_storage(boundary, monkeypatch,
     assert response.headers["Cache-Control"] == "private, no-store"
 
 
-@pytest.mark.parametrize("operation", ["prepare", "confirm"])
+def test_expired_uncommitted_resolution_has_exact_request_and_no_confirmation(boundary, monkeypatch):
+    _, client, _, _, confirm, calls, service = boundary
+
+    async def expired(self, **kwargs):
+        calls.append(("resolve", kwargs))
+        return HandoffResolution("expired_uncommitted")
+
+    monkeypatch.setattr(service, "resolve", expired)
+    for _ in range(2):
+        response = client.post("/agent/native-handoffs/resolve", json=confirm)
+        assert response.status_code == 200
+        assert response.json() == {"request": confirm, "outcome": "expired_uncommitted", "confirmed": None}
+        assert response.headers["Cache-Control"] == "private, no-store"
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("change", ["digest", "destination", "missing", "unexpected_confirmation", "outcome", "dict"])
+def test_invalid_resolution_is_not_advertised_as_recoverable(boundary, monkeypatch, change):
+    _, client, _, _, confirm, _, service = boundary
+    preview = service.confirmed
+    if change == "digest": preview = replace(preview, handoff_sha256="c" * 64)
+    elif change == "destination": preview = replace(preview, destination_scope=None)
+    elif change == "missing": preview = None
+    outcome = {"unexpected_confirmation": "expired_uncommitted", "outcome": "unknown"}.get(change, "committed")
+    result = HandoffResolution(outcome, preview)
+    if change == "dict": result = {"outcome": "expired_uncommitted", "confirmed": None}
+
+    async def invalid(self, **kwargs):
+        return result
+
+    monkeypatch.setattr(service, "resolve", invalid)
+    response = client.post("/agent/native-handoffs/resolve", json=confirm)
+    assert response.status_code == 409
+    assert "outcome" not in response.json()
+
+
+@pytest.mark.parametrize("operation", ["prepare", "confirm", "resolve"])
 def test_rate_gate_uses_shared_owned_inference_key(boundary, monkeypatch, operation):
     _, client, owner, prepare, confirm, _, _ = boundary
     limiter = AsyncMock(return_value=True)
@@ -135,7 +180,7 @@ def test_prepare_replay_after_commit_returns_existing_destination(boundary):
     assert response.json()["destination_scope"] == service.confirmed.destination_scope.model_dump()
 
 
-@pytest.mark.parametrize("operation", ["prepare", "confirm"])
+@pytest.mark.parametrize("operation", ["prepare", "confirm", "resolve"])
 @pytest.mark.parametrize("name", FLAGS)
 def test_each_disabled_gate_prevents_database_access(boundary, monkeypatch, operation, name):
     _, client, _, prepare, confirm, calls, _ = boundary
@@ -145,7 +190,7 @@ def test_each_disabled_gate_prevents_database_access(boundary, monkeypatch, oper
     assert response.status_code == 409 and not calls
 
 
-@pytest.mark.parametrize("operation", ["prepare", "confirm"])
+@pytest.mark.parametrize("operation", ["prepare", "confirm", "resolve"])
 @pytest.mark.parametrize("extra", ["user_id", "document", "history", "claim", "target", PRIVATE])
 def test_client_authority_and_history_rejected_without_reflection(boundary, operation, extra):
     _, client, _, prepare, confirm, calls, _ = boundary
@@ -155,7 +200,7 @@ def test_client_authority_and_history_rejected_without_reflection(boundary, oper
     assert response.headers["Cache-Control"] == "private, no-store"
 
 
-@pytest.mark.parametrize("operation", ["prepare", "confirm"])
+@pytest.mark.parametrize("operation", ["prepare", "confirm", "resolve"])
 def test_invalid_json_never_reflected(boundary, operation):
     _, client, _, _, _, calls, _ = boundary
     response = client.post("/agent/native-handoffs/" + operation, content='{"bad":"' + PRIVATE,
@@ -163,7 +208,7 @@ def test_invalid_json_never_reflected(boundary, operation):
     assert response.status_code == 422 and not calls and PRIVATE not in response.text
 
 
-@pytest.mark.parametrize("operation", ["prepare", "confirm"])
+@pytest.mark.parametrize("operation", ["prepare", "confirm", "resolve"])
 def test_authentication_required_before_service(boundary, operation):
     app, client, _, prepare, confirm, calls, _ = boundary
 
@@ -175,7 +220,7 @@ def test_authentication_required_before_service(boundary, operation):
     assert response.status_code == 401 and not calls
 
 
-@pytest.mark.parametrize("operation", ["prepare", "confirm"])
+@pytest.mark.parametrize("operation", ["prepare", "confirm", "resolve"])
 @pytest.mark.parametrize("error", [RuntimeError(PRIVATE), ContractError(APIErrorCode.HANDOFF_BLOCKED, PRIVATE),
                                   ContractError(APIErrorCode.STALE_PROJECTION, PRIVATE)])
 def test_private_service_diagnostics_never_reflected(boundary, monkeypatch, operation, error):
@@ -210,7 +255,7 @@ def test_cancellation_is_not_converted_into_recoverable_response(boundary, monke
                                                  {"user_id": owner}))
 
 
-@pytest.mark.parametrize("operation", ["prepare", "confirm"])
+@pytest.mark.parametrize("operation", ["prepare", "confirm", "resolve"])
 @pytest.mark.parametrize("declared", [True, False])
 def test_body_limit_precedes_parsing_authentication_and_disabled_gate(boundary, monkeypatch, operation, declared):
     app, _, _, _, _, calls, _ = boundary
@@ -241,7 +286,7 @@ def test_exact_body_limit_valid_json_is_accepted(boundary):
 
 
 @pytest.mark.parametrize("disabled", [None, *FLAGS])
-@pytest.mark.parametrize("operation", ["prepare", "confirm"])
+@pytest.mark.parametrize("operation", ["prepare", "confirm", "resolve"])
 def test_registered_router_is_default_off_before_database_access(boundary, monkeypatch, disabled, operation):
     from server.main import app
     _, _, owner, prepare, confirm, calls, _ = boundary

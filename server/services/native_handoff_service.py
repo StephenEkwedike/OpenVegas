@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from functools import wraps
-from typing import Any
+from typing import Any, Literal
 
 from openvegas.agent import native_handoff_store as store
 from openvegas.agent.native_handoff_source import assemble_task_tx
@@ -75,6 +75,12 @@ class HandoffPreview:
     unique_file_count: int
     observation_count: int
     destination_scope: NativeInferenceScope | None = None
+
+
+@dataclass(frozen=True)
+class HandoffResolution:
+    outcome: Literal["committed", "expired_uncommitted"]
+    confirmed: HandoffPreview | None = None
 
 
 def _selection(record):
@@ -243,3 +249,38 @@ class NativeHandoffService:
                 handoff_sha256=handoff_sha256, target=target, destination_scope=destination_scope,
                 idempotency_key=idempotency_key)
             return _public(bound)
+
+    @_private
+    async def resolve(self, *, user_id: str, handoff_id: str, handoff_sha256: str,
+                      destination_scope: NativeInferenceScope, idempotency_key: str) -> HandoffResolution:
+        """Recover a commit or verify expiry under the confirmation writer locks."""
+        user_id, key = store._uuid(user_id), store._key(idempotency_key)
+        store._scope(destination_scope)
+        store._digest(handoff_sha256)
+        async with self.db.transaction() as tx:
+            record = await store.load_handoff_tx(tx, user_id=user_id, handoff_id=handoff_id)
+            if (record.handoff_sha256 != handoff_sha256
+                    or record.source_scope.run_id == destination_scope.run_id):
+                _fail()
+            runs = await store._runs(tx, user_id, record.source_scope, destination_scope)
+            record = await store.load_handoff_tx(tx, user_id=user_id, handoff_id=handoff_id)
+            if record.handoff_sha256 != handoff_sha256:
+                _fail()
+            if record.destination_scope is not None:
+                # Replay exactly as confirm does, without renewing expiry or review.
+                bound = await store.bind_destination_tx(tx, user_id=user_id, handoff_id=handoff_id,
+                    handoff_sha256=handoff_sha256, target=record.target,
+                    destination_scope=destination_scope, idempotency_key=key)
+                return HandoffResolution("committed", _public(bound))
+            record = await store._lock_record(tx, record)
+            if record.destination_scope is not None or record.handoff_sha256 != handoff_sha256:
+                _fail()
+            store._registration(record, runs)
+            if store._workspace(runs[destination_scope.run_id]) != record.workspace_json:
+                _fail()
+            now = store._date(await tx.fetchval("SELECT clock_timestamp()"))
+            if now < record.expires_at:
+                _fail()
+            # Expiry is immutable. A later confirmer takes these same run locks
+            # and must recheck the deadline against the same database clock.
+            return HandoffResolution("expired_uncommitted")

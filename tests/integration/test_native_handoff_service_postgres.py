@@ -11,7 +11,8 @@ from uuid import uuid4
 import pytest
 
 from openvegas.contracts.errors import ContractError
-from server.services.native_handoff_service import HandoffSelection, NativeHandoffService
+from openvegas.agent import native_handoff_store as store
+from server.services.native_handoff_service import HandoffResolution, HandoffSelection, NativeHandoffService
 from tests.integration.test_native_handoff_store_postgres import (
     continuation_db as continuation_db,
     handoff_db as handoff_db,
@@ -46,6 +47,105 @@ async def confirm(c, preview, scope, **changes):
         "handoff_sha256": preview.handoff_sha256, "destination_scope": scope,
         "idempotency_key": "confirm-one", **changes,
     })
+
+
+async def resolve(c, preview, scope, **changes):
+    return await NativeHandoffService(c.db).resolve(**{
+        "user_id": c.user, "handoff_id": preview.handoff_id,
+        "handoff_sha256": preview.handoff_sha256, "destination_scope": scope,
+        "idempotency_key": "confirm-one", **changes,
+    })
+
+
+async def short_preview(c, monkeypatch):
+    create = store.create_handoff_tx
+
+    async def bounded(*args, **kwargs):
+        return await create(*args, **{**kwargs, "ttl_seconds": 2})
+
+    monkeypatch.setattr(store, "create_handoff_tx", bounded)
+    return await prepare(c)
+
+
+async def after_expiry(db, preview):
+    now = await db.fetchval("SELECT clock_timestamp()")
+    await asyncio.sleep(max(0, (preview.expires_at - now).total_seconds()) + 0.02)
+
+
+async def resolution_snapshot(c):
+    return (
+        await c.db.fetch("SELECT * FROM native_task_handoffs ORDER BY id"),
+        await c.db.fetch("SELECT id,version,native_handoff_id FROM agent_runs ORDER BY id"),
+        await c.db.fetchval("SELECT count(*) FROM inference_requests"),
+        await c.db.fetchval("SELECT count(*) FROM inference_preauthorizations"),
+        await c.db.fetchval("SELECT count(*) FROM inference_usage"),
+        len(c.calls),
+    )
+
+
+async def test_resolve_expired_uncommitted_repeats_without_writes_or_redispatch(handoff_db, monkeypatch):
+    c = handoff_db
+    preview, scope = await short_preview(c, monkeypatch), await destination(c)
+    before = await resolution_snapshot(c)
+    with pytest.raises(ContractError):
+        await resolve(c, preview, scope)
+    await after_expiry(c.db, preview)
+    for _ in range(2):
+        assert await resolve(c, preview, scope) == HandoffResolution("expired_uncommitted")
+    with pytest.raises(ContractError):
+        await confirm(c, preview, scope)
+    assert await resolution_snapshot(c) == before
+
+
+async def test_resolve_committed_ack_after_expiry_and_restart_never_renews(handoff_db, monkeypatch):
+    c = handoff_db
+    preview, scope = await short_preview(c, monkeypatch), await destination(c)
+    committed = await confirm(c, preview, scope)
+    await after_expiry(c.db, preview)
+    c.db = await c.sandbox.reconnect()
+    monkeypatch.setenv("OPENVEGAS_MODEL_REVIEWS_JSON", "{}")
+    before = await resolution_snapshot(c)
+    for _ in range(2):
+        assert await resolve(c, preview, scope) == HandoffResolution("committed", committed)
+    with pytest.raises(ContractError):
+        await resolve(c, preview, scope, idempotency_key="different-confirm")
+    with pytest.raises(ContractError):
+        await resolve(c, preview, scope, user_id=str(uuid4()))
+    assert await resolution_snapshot(c) == before
+
+
+async def test_resolve_and_confirm_wait_on_same_lock_then_expiry_prevents_commit(handoff_db, monkeypatch):
+    c = handoff_db
+    preview, scope = await short_preview(c, monkeypatch), await destination(c)
+    before = await resolution_snapshot(c)
+    original = store._runs
+    entered = {name: asyncio.Event() for name in ("expiry-confirm", "expiry-resolve")}
+
+    async def watched(*args):
+        name = asyncio.current_task().get_name()
+        if name in entered:
+            entered[name].set()
+        return await original(*args)
+
+    monkeypatch.setattr(store, "_runs", watched)
+    pending = []
+    try:
+        async with c.db.transaction() as tx:
+            await tx.fetchrow("SELECT id FROM agent_runs WHERE id=$1::uuid FOR UPDATE", c.source_scope.run_id)
+            pending = [asyncio.create_task(confirm(c, preview, scope), name="expiry-confirm"),
+                       asyncio.create_task(resolve(c, preview, scope), name="expiry-resolve")]
+            await asyncio.wait_for(asyncio.gather(*(event.wait() for event in entered.values())), 2)
+            assert not any(task.done() for task in pending)
+            await after_expiry(tx, preview)
+        rejected, expired = await asyncio.wait_for(asyncio.gather(*pending, return_exceptions=True), 5)
+        assert isinstance(rejected, ContractError)
+        assert expired == HandoffResolution("expired_uncommitted")
+    finally:
+        for task in pending:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+    assert await resolution_snapshot(c) == before
 
 
 async def test_prepare_and_concurrent_commit_lost_ack_do_not_reserve_or_dispatch(handoff_db, monkeypatch):

@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 from openvegas.contracts.errors import APIErrorCode, ContractError
 from openvegas.contracts.native_handoff import (
     ConfirmNativeHandoff,
+    NativeHandoffResolution,
     NativeHandoffResponse,
     PrepareNativeHandoff,
 )
@@ -22,6 +23,7 @@ from server.middleware.private_validation import PrivateInferenceRoute
 from server.services.dependencies import get_db, get_fraud_engine
 from server.services.native_handoff_service import (
     HandoffPreview,
+    HandoffResolution,
     HandoffSelection,
     NativeHandoffService,
 )
@@ -86,12 +88,12 @@ async def _rate_gate(user_id):
         headers=_HEADERS)
 
 
-def _response(preview):
+def _summary(preview):
     if type(preview) is not HandoffPreview or type(preview.selection) is not HandoffSelection:
         raise ValueError(_DETAIL)
     # No dict passthrough from internal records: only this typed summary crosses
     # the transport boundary, even if storage grows more private fields later.
-    value = NativeHandoffResponse.model_validate({
+    return NativeHandoffResponse.model_validate({
         "handoff_id": preview.handoff_id,
         "handoff_sha256": preview.handoff_sha256,
         "selection": {"provider": "openrouter", "enable_tools": True, **asdict(preview.selection)},
@@ -102,7 +104,10 @@ def _response(preview):
         "observation_count": preview.observation_count,
         "destination_scope": preview.destination_scope,
     })
-    return JSONResponse(content=value.model_dump(mode="json"), headers=_HEADERS)
+
+
+def _response(preview):
+    return JSONResponse(content=_summary(preview).model_dump(mode="json"), headers=_HEADERS)
 
 
 @router.post("/prepare")
@@ -148,4 +153,29 @@ async def confirm_native_handoff(request: ConfirmNativeHandoff,
             raise ValueError(_DETAIL)
         return _response(preview)
     except Exception as exc:  # noqa: BLE001
+        return _failure(exc)
+
+
+@router.post("/resolve")
+async def resolve_native_handoff(request: ConfirmNativeHandoff,
+                                  user: Annotated[dict, Depends(get_current_user)]):
+    try:
+        from openvegas.agent.native_handoff_store import _enabled
+        _enabled()
+        limited = await _rate_gate(user["user_id"])
+        if limited is not None:
+            return limited
+        resolution = await NativeHandoffService(get_db()).resolve(
+            user_id=user["user_id"], handoff_id=request.handoff_id,
+            handoff_sha256=request.handoff_sha256, destination_scope=request.destination_scope,
+            idempotency_key=request.idempotency_key,
+        )
+        if type(resolution) is not HandoffResolution:
+            raise ValueError(_DETAIL)
+        value = NativeHandoffResolution(
+            request=request, outcome=resolution.outcome,
+            confirmed=_summary(resolution.confirmed) if resolution.confirmed is not None else None,
+        )
+        return JSONResponse(content=value.model_dump(mode="json"), headers=_HEADERS)
+    except Exception as exc:  # noqa: BLE001 - A rejection is never proof of an uncommitted handoff.
         return _failure(exc)
