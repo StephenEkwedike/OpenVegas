@@ -50,6 +50,8 @@ def make_case(monkeypatch):
         inspected = web_fixture.review() if web else review()
         inspected.setdefault("capabilities", {}).update(tools=True, reasoning_efforts=["low", "high"])
         inspected["supported_parameters"] = ["tools", "reasoning"]
+        if web:
+            inspected["supported_parameters"] += ["tool_choice", "parallel_tool_calls", "max_tokens"]
         monkeypatch.setenv("OPENVEGAS_MODEL_REVIEWS_JSON", json.dumps({"openrouter:" + MODEL: inspected}))
         monkeypatch.setattr(service, "resolve_provider_api_key", AsyncMock(return_value="synthetic-test-key"))
         from server.services import dependencies

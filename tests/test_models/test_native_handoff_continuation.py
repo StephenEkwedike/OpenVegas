@@ -63,6 +63,8 @@ def make_case(monkeypatch):
             inspected["capabilities"] = {"web_search": True}
         inspected.setdefault("capabilities", {}).update(tools=True, reasoning_efforts=["low", "high"])
         inspected["supported_parameters"] = ["tools", "reasoning"]
+        if web:
+            inspected["supported_parameters"] += ["tool_choice", "parallel_tool_calls", "max_tokens"]
         monkeypatch.setenv("OPENVEGAS_MODEL_REVIEWS_JSON", json.dumps({"openrouter:" + MODEL: inspected}))
         from server.services import dependencies
         monkeypatch.setattr(dependencies, "current_flags", lambda: SimpleNamespace(files_enabled=True))
