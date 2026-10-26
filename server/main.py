@@ -173,6 +173,8 @@ async def lifespan(app: FastAPI):
         finally:
             await http_client.aclose()
 
+from server import seo, not_found
+
 app = FastAPI(
     title="OpenVegas API",
     version="0.3.7",
@@ -202,9 +204,12 @@ async def telemetry_http_middleware(request: Request, call_next):
             latency_ms=(perf_counter() - started) * 1000.0,
         )
 
+seo.install(app)
+
 UI_INDEX = ROOT_DIR / "ui" / "index.html"
 TOPUP_UI_PAGE = ROOT_DIR / "ui" / "topup.html"
 UI_DIR = ROOT_DIR / "ui"
+not_found.install(app, UI_DIR)
 UI_ASSETS_DIR = UI_DIR / "assets"
 UI_NO_CACHE_HEADERS = {
     "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
@@ -348,7 +353,7 @@ async def health_ready():
 @app.get("/ui")
 @app.get("/ui/")
 async def ui_page():
-    return FileResponse(UI_INDEX, headers=UI_NO_CACHE_HEADERS)
+    return seo.page_response(UI_INDEX, "/ui", UI_NO_CACHE_HEADERS)
 
 
 def _resolve_ui_asset(asset_path: str) -> Path | None:
@@ -417,7 +422,7 @@ async def ui_page_slug(slug: str):
     page = UI_PAGES.get(slug)
     if not page or not page.exists():
         raise HTTPException(status_code=404, detail="Page not found")
-    return FileResponse(page, headers=UI_NO_CACHE_HEADERS)
+    return seo.page_response(page, "/ui/" + slug, UI_NO_CACHE_HEADERS)
 
 
 @app.get("/favicon.ico", include_in_schema=False)
