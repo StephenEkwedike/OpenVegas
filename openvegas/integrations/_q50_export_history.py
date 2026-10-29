@@ -1,0 +1,23 @@
+"""Trusted hashes of shipped local Q50 v2 exports, never installer-supplied receipts."""
+
+Q50_PRIOR_EXPORTS = ({'id': 'openvegas-preview-q50-jewelry-motion-q50-jewelry-motion',
+  'files': {'pet.json': {'bytes': 3309,
+                         'sha256': '2c7c965815d9159d1b616af66804cd55b40059fcb76681ecc730999a953eedbd'},
+            'spritesheet.png': {'bytes': 1166949,
+                                'sha256': 'edb9ba8fe44770c5c363d15462c8c2675df7c1ff911f5cdcb64376cd248309d2'},
+            '.openvegas-preview.json': {'bytes': 258,
+                                        'sha256': '926608845c823d0ef14f2c4dcfb548f4e9f61ea57078d4ccf7331b8d685194db'}}},
+ {'id': 'openvegas-demo-q50-jewelry-motion',
+  'files': {'pet.json': {'bytes': 5343,
+                         'sha256': '1c19d3e724978b8784b9329e6044938828bc741267da4bdf4c525a7a0d7a72d2'},
+            'spritesheet.png': {'bytes': 1166949,
+                                'sha256': 'edb9ba8fe44770c5c363d15462c8c2675df7c1ff911f5cdcb64376cd248309d2'},
+            '.openvegas-preview.json': {'bytes': 258,
+                                        'sha256': 'd6c3fa76a7ae0f95310ad600691a7a0a81f02c54a520b33a51db3eea7308cf7a'}}},
+ {'id': 'openvegas-demo-q50-jewelry-motion',
+  'files': {'pet.json': {'bytes': 5860,
+                         'sha256': 'f6618dc42b0b3b5c0871d8b6740c194f9a96124c98a046216ec4a8e24de025b5'},
+            'spritesheet.png': {'bytes': 1166949,
+                                'sha256': 'edb9ba8fe44770c5c363d15462c8c2675df7c1ff911f5cdcb64376cd248309d2'},
+            '.openvegas-preview.json': {'bytes': 258,
+                                        'sha256': 'f8314027ab3c8afcbf3fd011acb1662c8b185233f53f298ed06bfa519afdab76'}}})

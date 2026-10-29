@@ -1,0 +1,119 @@
+{
+  "schema_version": 1,
+  "id": "bureau-pilot",
+  "channel_id": "01",
+  "title": "The Bureau of Alternate Tuesdays",
+  "description": "An original 35-second captioned multiverse-office satire. Geometric characters, authored vector keyframes, no generated media, borrowed characters, dialogue, or voices. Silent animatic, not live television.",
+  "duration_seconds": 35,
+  "canvas": {"width": 320, "height": 180},
+  "credits": "Original OpenVegas TV pilot. Authored geometric vector scenes and captions. No external media or voices. Local playback; billing disabled.",
+  "scenes": [
+    {
+      "id": "arrivals", "title": "01 / Please take a universe", "start": 0, "end": 7,
+      "description": "A round orange visitor approaches a rectangular teal clerk in a cream-colored office. A queue ticket drifts down from an impossible doorway.",
+      "background": "#f4ead5",
+      "shapes": [
+        {"id":"floor","kind":"rect","x":0,"y":143,"width":320,"height":37,"fill":"#d8d0b9"},
+        {"id":"door","kind":"rect","x":18,"y":36,"width":55,"height":107,"fill":"#214d4a"},
+        {"id":"door-light","kind":"rect","x":25,"y":44,"width":41,"height":93,"fill":"#69b8a4"},
+        {"id":"sign","kind":"text","x":98,"y":12,"width":212,"height":22,"fill":"#214d4a","font_size":12,"text":"BUREAU OF ALTERNATE TUESDAYS"},
+        {"id":"clerk","kind":"rect","x":225,"y":58,"width":31,"height":56,"fill":"#278b7b"},
+        {"id":"clerk-eye-a","kind":"rect","x":232,"y":70,"width":4,"height":4,"fill":"#f4ead5"},
+        {"id":"clerk-eye-b","kind":"rect","x":246,"y":70,"width":4,"height":4,"fill":"#f4ead5"},
+        {"id":"clerk-tie","kind":"rect","x":239,"y":88,"width":5,"height":20,"fill":"#f1ba43"},
+        {"id":"desk","kind":"rect","x":176,"y":111,"width":111,"height":35,"fill":"#214d4a"},
+        {"id":"desk-label","kind":"text","x":188,"y":120,"width":90,"height":16,"fill":"#f4ead5","font_size":11,"text":"ARRIVALS"},
+        {"id":"visitor","kind":"ellipse","x":95,"y":82,"width":42,"height":58,"fill":"#e77945"},
+        {"id":"visitor-eye-a","kind":"ellipse","x":117,"y":96,"width":4,"height":4,"fill":"#214d4a"},
+        {"id":"visitor-eye-b","kind":"ellipse","x":125,"y":96,"width":4,"height":4,"fill":"#214d4a"},
+        {"id":"case","kind":"rect","x":139,"y":118,"width":21,"height":22,"fill":"#c49840"},
+        {"id":"ticket","kind":"rect","x":36,"y":46,"width":18,"height":12,"fill":"#fff9e9","keyframes":[{"at":0,"x":36,"y":46,"opacity":1},{"at":7,"x":76,"y":125,"opacity":1}]}
+      ]
+    },
+    {
+      "id": "three-futures", "title": "02 / Three futures. One appointment.", "start": 7, "end": 14,
+      "description": "Three incompatible future cards float above the service desk: rain, sunshine, and more paperwork. The clerk remains impressively unmoved.",
+      "background": "#e7f0e8",
+      "shapes": [
+        {"id":"floor","kind":"rect","x":0,"y":148,"width":320,"height":32,"fill":"#c6d7cb"},
+        {"id":"sign","kind":"text","x":30,"y":12,"width":270,"height":20,"fill":"#214d4a","font_size":14,"text":"FUTURES / PLEASE CHOOSE ONE"},
+        {"id":"rain-card","kind":"rect","x":43,"y":45,"width":59,"height":47,"fill":"#79a5ad","keyframes":[{"at":0,"x":43,"y":50,"opacity":1},{"at":3.5,"x":43,"y":40,"opacity":1},{"at":7,"x":43,"y":50,"opacity":1}]},
+        {"id":"rain","kind":"text","x":51,"y":60,"width":46,"height":15,"fill":"#ffffff","font_size":11,"text":"RAIN"},
+        {"id":"sun-card","kind":"rect","x":125,"y":45,"width":59,"height":47,"fill":"#eab84c"},
+        {"id":"sun","kind":"ellipse","x":142,"y":56,"width":25,"height":25,"fill":"#fff7cf"},
+        {"id":"forms-card","kind":"rect","x":207,"y":45,"width":59,"height":47,"fill":"#d98f68","keyframes":[{"at":0,"x":207,"y":40,"opacity":1},{"at":3.5,"x":207,"y":50,"opacity":1},{"at":7,"x":207,"y":40,"opacity":1}]},
+        {"id":"forms","kind":"text","x":214,"y":60,"width":48,"height":15,"fill":"#ffffff","font_size":10,"text":"FORMS"},
+        {"id":"visitor","kind":"ellipse","x":59,"y":105,"width":34,"height":43,"fill":"#e77945"},
+        {"id":"visitor-eye","kind":"ellipse","x":80,"y":116,"width":4,"height":4,"fill":"#214d4a"},
+        {"id":"clerk","kind":"rect","x":226,"y":102,"width":27,"height":33,"fill":"#278b7b"},
+        {"id":"desk","kind":"rect","x":188,"y":133,"width":100,"height":15,"fill":"#214d4a"},
+        {"id":"queue-line","kind":"rect","x":110,"y":143,"width":64,"height":3,"fill":"#b0c6b7"}
+      ]
+    },
+    {
+      "id": "number-department", "title": "03 / The number department", "start": 14, "end": 21,
+      "description": "A close-up of a ticket machine offers the infinity symbol as the next queue number, shown as two overlapping rings. A tiny ticket slowly emerges.",
+      "background": "#f5dfcf",
+      "shapes": [
+        {"id":"sign","kind":"text","x":63,"y":12,"width":230,"height":22,"fill":"#6f4234","font_size":14,"text":"PLEASE TAKE A NUMBER"},
+        {"id":"machine","kind":"rect","x":91,"y":43,"width":138,"height":111,"fill":"#214d4a"},
+        {"id":"screen","kind":"rect","x":108,"y":56,"width":104,"height":48,"fill":"#9ed3ba"},
+        {"id":"infinity-left","kind":"ellipse","x":128,"y":67,"width":35,"height":25,"fill":"#9ed3ba","stroke":"#214d4a","stroke_width":4},
+        {"id":"infinity-right","kind":"ellipse","x":157,"y":67,"width":35,"height":25,"fill":"#9ed3ba","stroke":"#214d4a","stroke_width":4},
+        {"id":"slot","kind":"rect","x":133,"y":120,"width":54,"height":7,"fill":"#102c2b"},
+        {"id":"ticket","kind":"rect","x":142,"y":125,"width":36,"height":21,"fill":"#fff9e9","keyframes":[{"at":0,"x":142,"y":125,"opacity":1},{"at":4,"x":142,"y":151,"opacity":1},{"at":7,"x":142,"y":151,"opacity":1}]},
+        {"id":"visitor","kind":"ellipse","x":32,"y":94,"width":35,"height":58,"fill":"#e77945"},
+        {"id":"visitor-eye","kind":"ellipse","x":53,"y":107,"width":4,"height":4,"fill":"#214d4a"},
+        {"id":"button","kind":"ellipse","x":197,"y":117,"width":14,"height":14,"fill":"#eab84c"}
+      ]
+    },
+    {
+      "id": "paperwork", "title": "04 / A minor administrative weather event", "start": 21, "end": 28,
+      "description": "Cream-colored forms drift through a teal office like a slow paper storm. A gold rubber stamp descends exactly once. Everything remains quite bureaucratic.",
+      "background": "#214d4a",
+      "shapes": [
+        {"id":"sign","kind":"text","x":36,"y":12,"width":270,"height":22,"fill":"#f4ead5","font_size":13,"text":"DEPARTMENT OF POSSIBLE DELAYS"},
+        {"id":"desk","kind":"rect","x":35,"y":143,"width":250,"height":22,"fill":"#173c39"},
+        {"id":"form-a","kind":"rect","x":20,"y":55,"width":26,"height":37,"fill":"#fff9e9","keyframes":[{"at":0,"x":20,"y":55,"opacity":1},{"at":7,"x":109,"y":113,"opacity":1}]},
+        {"id":"form-b","kind":"rect","x":97,"y":39,"width":23,"height":32,"fill":"#d5e1c9","keyframes":[{"at":0,"x":97,"y":39,"opacity":1},{"at":7,"x":192,"y":104,"opacity":1}]},
+        {"id":"form-c","kind":"rect","x":224,"y":56,"width":26,"height":37,"fill":"#fff9e9","keyframes":[{"at":0,"x":224,"y":56,"opacity":1},{"at":7,"x":258,"y":120,"opacity":1}]},
+        {"id":"form-d","kind":"rect","x":151,"y":116,"width":43,"height":25,"fill":"#fff9e9"},
+        {"id":"stamp-head","kind":"rect","x":150,"y":65,"width":45,"height":13,"fill":"#eab84c","keyframes":[{"at":0,"x":150,"y":65,"opacity":1},{"at":2,"x":150,"y":65,"opacity":1},{"at":2.5,"x":150,"y":108,"opacity":1},{"at":3.1,"x":150,"y":65,"opacity":1},{"at":7,"x":150,"y":65,"opacity":1}]},
+        {"id":"stamp-handle","kind":"rect","x":164,"y":42,"width":17,"height":23,"fill":"#e77945","keyframes":[{"at":0,"x":164,"y":42,"opacity":1},{"at":2,"x":164,"y":42,"opacity":1},{"at":2.5,"x":164,"y":85,"opacity":1},{"at":3.1,"x":164,"y":42,"opacity":1},{"at":7,"x":164,"y":42,"opacity":1}]},
+        {"id":"approved","kind":"rect","x":158,"y":124,"width":28,"height":7,"fill":"#e77945","opacity":0,"keyframes":[{"at":0,"x":158,"y":124,"opacity":0},{"at":2.5,"x":158,"y":124,"opacity":0},{"at":2.6,"x":158,"y":124,"opacity":1},{"at":7,"x":158,"y":124,"opacity":1}]}
+      ]
+    },
+    {
+      "id": "approved", "title": "05 / Your next universe is ready", "start": 28, "end": 35,
+      "description": "The visitor reaches a luminous new doorway. Beyond it is the exact same service desk, now with a small plant. The plant is the upgrade.",
+      "background": "#f4ead5",
+      "shapes": [
+        {"id":"sign","kind":"text","x":51,"y":10,"width":260,"height":22,"fill":"#214d4a","font_size":14,"text":"WELCOME TO YOUR NEW UNIVERSE"},
+        {"id":"portal","kind":"rect","x":167,"y":39,"width":116,"height":120,"fill":"#69b8a4"},
+        {"id":"interior","kind":"rect","x":176,"y":48,"width":98,"height":101,"fill":"#e7f0e8"},
+        {"id":"clerk","kind":"rect","x":224,"y":79,"width":24,"height":35,"fill":"#278b7b"},
+        {"id":"clerk-eye-a","kind":"rect","x":229,"y":86,"width":3,"height":3,"fill":"#f4ead5"},
+        {"id":"clerk-eye-b","kind":"rect","x":240,"y":86,"width":3,"height":3,"fill":"#f4ead5"},
+        {"id":"desk","kind":"rect","x":190,"y":114,"width":74,"height":24,"fill":"#214d4a"},
+        {"id":"plant-pot","kind":"rect","x":198,"y":104,"width":12,"height":10,"fill":"#e77945"},
+        {"id":"plant","kind":"ellipse","x":196,"y":88,"width":16,"height":18,"fill":"#65a374","keyframes":[{"at":0,"x":196,"y":88,"opacity":1},{"at":3.5,"x":199,"y":88,"opacity":1},{"at":7,"x":196,"y":88,"opacity":1}]},
+        {"id":"visitor","kind":"ellipse","x":85,"y":87,"width":40,"height":59,"fill":"#e77945"},
+        {"id":"visitor-eye","kind":"ellipse","x":110,"y":101,"width":5,"height":5,"fill":"#214d4a"},
+        {"id":"case","kind":"rect","x":129,"y":122,"width":20,"height":23,"fill":"#c49840"},
+        {"id":"floor","kind":"rect","x":0,"y":160,"width":320,"height":20,"fill":"#d8d0b9"}
+      ]
+    }
+  ],
+  "captions": [
+    {"start":0,"end":3.5,"text":"At the Bureau of Alternate Tuesdays, every universe needs an appointment."},
+    {"start":3.5,"end":7,"text":"This visitor brought three futures. All were double-booked."},
+    {"start":7,"end":10.5,"text":"CLERK: Which future did you reserve?"},
+    {"start":10.5,"end":14,"text":"VISITOR: The one where this takes less time."},
+    {"start":14,"end":17.5,"text":"CLERK: Excellent. Please take a number."},
+    {"start":17.5,"end":21,"text":"VISITOR: Is infinity before or after lunch?"},
+    {"start":21,"end":24.5,"text":"A minor paperwork storm. Entirely within the forecast."},
+    {"start":24.5,"end":28,"text":"CLERK: Approved. We found you a better universe."},
+    {"start":28,"end":31.5,"text":"VISITOR: This is the same office."},
+    {"start":31.5,"end":35,"text":"CLERK: Yes, but this one has a plant."}
+  ]
+}

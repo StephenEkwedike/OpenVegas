@@ -1,0 +1,74 @@
+/* Shared landing-page language. Keep transactional controls and game artwork intact. */
+body.site-clarity { background: var(--bg-main); font: 1rem/1.6 var(--font-sans); }
+.site-clarity .top-nav { position: relative; backdrop-filter: none; background: var(--bg-main); border: 0; padding: 1.25rem max(20px, calc((100% - 1240px)/2)); }
+.site-clarity .brand-link { white-space: nowrap; font-size: .85rem; color: var(--text-main); }
+.site-clarity .nav-links { gap: .25rem 1rem; }
+.site-clarity .nav-links a { font: 500 .85rem/1.5 var(--font-sans); letter-spacing: 0; text-transform: none; padding-block: .5rem; }
+.site-clarity .nav-links a.active { color: var(--aqua); }
+.nav-soon { border: 1px solid currentColor; padding: .1rem .3rem; margin-left: .3rem; font-size: .65rem; vertical-align: .1em; }
+.site-clarity .container { width: min(1240px, calc(100% - 40px)); }
+.site-clarity .page-shell { padding-block: clamp(1.5rem, 4vw, 4rem) 2rem; }
+.site-clarity .page-hero { border: 0; padding: 0 0 3rem; gap: 2rem; align-items: center; }
+.site-clarity :is(.page-title, .growth-title) { font-size: clamp(2.5rem, 5.3vw, 4.75rem); line-height: 1.05; font-weight: 500; letter-spacing: -.045em; text-wrap: balance; }
+.site-clarity :is(.page-lead, .growth-lead) { font: 1.1rem/1.6 var(--font-sans); letter-spacing: 0; text-transform: none; color: var(--text-main); max-width: 38rem; }
+.site-clarity :is(.card-copy, .growth-note) { color: var(--muted); font: 1rem/1.6 var(--font-sans); }
+.site-clarity :is(.section-grid-2, .section-grid-3, .contact-grid) { border: 0; gap: 1.25rem; }
+.site-clarity .card { border: 0; min-height: auto; padding: clamp(1.25rem, 3vw, 2rem); background: var(--surface-2); }
+.site-clarity .card:hover { background: var(--surface-2); }
+.site-clarity :is(.card-title, .guide-section h2) { font-weight: 500; letter-spacing: -.035em; line-height: 1.15; font-size: clamp(1.5rem, 2.8vw, 2.25rem); }
+.site-clarity .btn { font: 500 .9rem/1.4 var(--font-sans); letter-spacing: 0; text-transform: none; min-height: 44px; border-radius: 0; }
+.site-clarity .btn-primary { background: var(--aqua); color: var(--bg-main); border-color: var(--aqua); }
+.site-clarity :focus-visible { outline: 3px solid var(--aqua); outline-offset: 4px; }
+.site-clarity :is(input, select, textarea) { max-width: 100%; font-size: 1rem; }
+.site-clarity .page-shell > section + section { margin-top: 2rem; }
+.site-clarity :is(.text-mono-xs, .text-mono-sm):not(.brand-link) { font-family: var(--font-sans); text-transform: none; letter-spacing: 0; font-size: .85rem; }
+.site-clarity :is(pre, code) { font-family: var(--font-mono); }
+.site-clarity pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.site-clarity .tag { font-family: var(--font-sans); letter-spacing: 0; text-transform: none; font-size: .8rem; }
+.guide-hero { display: grid; grid-template-columns: 1.15fr 1fr; gap: clamp(2rem, 5vw, 5rem); align-items: center; }
+.guide-hero h1 { font: 500 clamp(2.5rem, 5.3vw, 4.75rem)/1.05 var(--font-sans); letter-spacing: -.045em; text-wrap: balance; }
+.guide-hero .lead { margin-block: 1.5rem; max-width: 34rem; font-size: 1.15rem; }
+.guide-stage { background: var(--bg-glow-aqua); padding: clamp(1.5rem, 4vw, 3rem); }
+.guide-stage h2 { font-size: 1.6rem; line-height: 1.2; font-weight: 500; letter-spacing: -.035em; }
+.guide-stage p { margin-top: 1rem; }
+.guide-section { margin-top: clamp(3rem, 7vw, 6rem) !important; }
+.guide-section > p { margin-top: 1rem; max-width: 44rem; }
+.guide-split { display: grid; grid-template-columns: .8fr 1.2fr; gap: 2rem; align-items: start; }
+.guide-section ul, .guide-stage ul, .guide-section ol { padding-left: 1.25rem; margin-top: 1rem; }
+.guide-section li + li, .guide-stage li + li { margin-top: .65rem; }
+.guide-commands { background: var(--surface-2); padding: 1.5rem; }
+.guide-commands p + pre { margin-top: .5rem; }
+.guide-commands pre + p { margin-top: 1.5rem; }
+.guide-commands pre { color: var(--aqua); font-size: .95rem; }
+.guide-note { color: var(--muted); font-size: .9rem; margin-top: 1rem; }
+.guide-section details { border-top: 1px solid var(--line); padding-block: 1rem; margin-top: 1rem; }
+.guide-section summary { cursor: pointer; font-weight: 500; padding-block: .5rem; }
+.guide-section details p { max-width: 52rem; margin-top: 1rem; }
+.guide-section h3 { margin-top: 1.5rem; font-size: 1.2rem; font-weight: 500; }
+.game-list { list-style: none; padding: 0 !important; }
+.game-list li { display: grid; grid-template-columns: 3rem 9rem 1fr; gap: 1rem; align-items: center; background: var(--surface-2); padding: 1rem 1.25rem; }
+.game-mark { font-size: 1.7rem; color: var(--aqua); text-align: center; }
+.mode-list { display: grid; gap: 1rem; margin-top: 1.5rem; }
+.mode-list article { display: grid; grid-template-columns: .7fr 1.3fr; gap: 2rem; background: var(--surface-2); padding: 1.5rem; }
+.mode-list h3 { font-size: 1.3rem; font-weight: 500; }
+.guide-status { display: inline-block; border: 1px solid var(--aqua); padding: .25rem .65rem; margin-bottom: 1rem; color: var(--aqua); }
+.arena-seats { display: flex; justify-content: space-between; align-items: center; gap: .75rem; margin-block: 2rem; }
+.arena-seat { background: var(--surface-2); padding: 1.25rem .75rem; flex: 1; text-align: center; }
+.arena-seat strong { display: block; font-size: 1.2rem; }
+.site-footer { width: min(1240px, calc(100% - 40px)); margin: clamp(3rem, 7vw, 6rem) auto 0; padding-block: 2rem; display: grid; grid-template-columns: 1fr auto; gap: 1.5rem 2rem; align-items: center; }
+.site-footer strong { font-size: 1.2rem; font-weight: 500; }
+.site-footer p { color: var(--muted); margin-top: .4rem; }
+.site-footer-links { display: flex; gap: .25rem 1.5rem; flex-wrap: wrap; grid-column: 1 / -1; }
+.site-footer-links a { padding-block: .5rem; font-size: .9rem; }
+.site-footer .partnership-cta { display: inline-flex; padding: 1rem 1.5rem; min-height: 52px; background: var(--aqua); color: var(--bg-main); text-decoration: none; justify-content: center; font-weight: 500; }
+@media (max-width: 1000px) { .site-clarity .top-nav { align-items: flex-start; flex-direction: column; gap: .5rem; } .site-clarity .ov-nav-right, .site-clarity .nav-links { justify-content: flex-start; } }
+@media (max-width: 760px) {
+  .site-clarity .container, .site-footer { width: calc(100% - 32px); }
+  .guide-hero, .guide-split, .site-clarity .page-hero, .mode-list article { grid-template-columns: 1fr; gap: 1.5rem; }
+  .guide-hero h1 { font-size: clamp(2.5rem, 9.5vw, 3.5rem); }
+  .game-list li { grid-template-columns: 2rem 1fr; gap: .5rem 1rem; }
+  .game-list li > p { grid-column: 2; }
+  .site-footer { grid-template-columns: 1fr; }
+  .site-footer .partnership-cta { justify-self: start; }
+  .site-clarity .page-hero { padding-bottom: 2rem; }
+}

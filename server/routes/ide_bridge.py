@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -17,6 +18,17 @@ from server.middleware.auth import get_current_user
 from server.services.dependencies import get_db
 
 router = APIRouter(prefix="/ide", tags=["ide-bridge"])
+
+
+def _host_bridge_enabled() -> bool:
+    runtime = os.getenv("OPENVEGAS_RUNTIME_ENV", os.getenv("ENV", "local")).strip().lower()
+    # These adapters operate on the API host, not on a remote user's computer.
+    return runtime not in {"prod", "production"} and os.getenv("OPENVEGAS_ENABLE_HOST_IDE_BRIDGE", "1") == "1"
+
+
+def _require_host_bridge() -> None:
+    if not _host_bridge_enabled():
+        raise HTTPException(503, "Host IDE bridge is unavailable on this backend; use the local CLI tools")
 
 
 class RegisterBridgeRequest(BaseModel):
@@ -108,7 +120,7 @@ async def _assert_run_binding(
         raise ContractError(APIErrorCode.INVALID_TRANSITION, "Run/session/actor binding mismatch.")
 
 
-@router.post("/register")
+@router.post("/register", dependencies=[Depends(_require_host_bridge)])
 async def register_bridge(req: RegisterBridgeRequest, user: dict = Depends(get_current_user)):
     try:
         actor_id = str(user["user_id"])
@@ -141,7 +153,7 @@ async def register_bridge(req: RegisterBridgeRequest, user: dict = Depends(get_c
         return JSONResponse(status_code=_status_for_error(e.code), content={"error": e.code.value, "detail": e.detail})
 
 
-@router.post("/open-file")
+@router.post("/open-file", dependencies=[Depends(_require_host_bridge)])
 async def ide_open_file(req: OpenFileRequest, user: dict = Depends(get_current_user)):
     try:
         actor_id = str(user["user_id"])
@@ -173,7 +185,7 @@ async def ide_open_file(req: OpenFileRequest, user: dict = Depends(get_current_u
         )
 
 
-@router.post("/run-command")
+@router.post("/run-command", dependencies=[Depends(_require_host_bridge)])
 async def ide_run_command(req: RunCommandRequest, user: dict = Depends(get_current_user)):
     try:
         actor_id = str(user["user_id"])
@@ -205,7 +217,7 @@ async def ide_run_command(req: RunCommandRequest, user: dict = Depends(get_curre
         )
 
 
-@router.post("/show-diff")
+@router.post("/show-diff", dependencies=[Depends(_require_host_bridge)])
 async def ide_show_diff(req: ShowDiffRequest, user: dict = Depends(get_current_user)):
     try:
         actor_id = str(user["user_id"])
@@ -236,7 +248,7 @@ async def ide_show_diff(req: ShowDiffRequest, user: dict = Depends(get_current_u
         return JSONResponse(status_code=_status_for_error(e.code), content={"error": e.code.value, "detail": e.detail})
 
 
-@router.post("/read-buffer")
+@router.post("/read-buffer", dependencies=[Depends(_require_host_bridge)])
 async def ide_read_buffer(req: ReadBufferRequest, user: dict = Depends(get_current_user)):
     try:
         actor_id = str(user["user_id"])
@@ -259,6 +271,9 @@ async def ide_read_buffer(req: ReadBufferRequest, user: dict = Depends(get_curre
 
 @router.post("/context")
 async def ide_context(req: ContextRequest, user: dict = Depends(get_current_user)):
+    if not _host_bridge_enabled():
+        return {"open_files": [], "active_file": None, "cursor": None, "selection": None,
+                "diagnostics": [], "terminal_history": []}
     try:
         actor_id = str(user["user_id"])
         await _assert_run_binding(
@@ -285,7 +300,7 @@ async def ide_context(req: ContextRequest, user: dict = Depends(get_current_user
         return JSONResponse(status_code=_status_for_error(e.code), content={"error": e.code.value, "detail": e.detail})
 
 
-@router.post("/message")
+@router.post("/message", dependencies=[Depends(_require_host_bridge)])
 async def ide_message(req: IDEEnvelopeRequest, user: dict = Depends(get_current_user)):
     try:
         actor_id = str(user["user_id"])
@@ -354,7 +369,7 @@ async def ide_message(req: IDEEnvelopeRequest, user: dict = Depends(get_current_
         )
 
 
-@router.get("/events/stream")
+@router.get("/events/stream", dependencies=[Depends(_require_host_bridge)])
 async def ide_events_stream(run_id: str, runtime_session_id: str, user: dict = Depends(get_current_user)):
     actor_id = str(user["user_id"])
     await _assert_run_binding(run_id=run_id, actor_id=actor_id, runtime_session_id=runtime_session_id)

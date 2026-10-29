@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from openvegas.integrations.game_result import amount as format_v
+
 import os
 import re
 import sys
@@ -326,7 +328,7 @@ def render_topup_hint(console: Console, hint: dict[str, object]) -> None:
 
     console.print(Text("  ⚠ Low balance", style="yellow"))
     if balance_v:
-        console.print(Text(f"  Balance: {balance_v} $V", style=ASSISTANT_TEXT))
+        console.print(Text(f"  Balance: {format_v(balance_v)}", style=ASSISTANT_TEXT))
     if suggested:
         console.print(Text(f"  Suggested top-up: ${suggested}", style=ASSISTANT_TEXT))
     if isinstance(methods, list) and methods:

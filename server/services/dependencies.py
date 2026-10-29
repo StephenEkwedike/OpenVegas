@@ -5,6 +5,7 @@ Provides runtime DB/Redis initialization and feature-aware schema checks.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import logging
 from dataclasses import dataclass
@@ -18,7 +19,7 @@ from openvegas.gateway.catalog import ProviderCatalog
 from openvegas.gateway.inference import AIGateway
 from openvegas.mint.engine import MintService
 from openvegas.payments.fake_gateway import FakeGateway
-from openvegas.payments.service import BillingService
+from openvegas.payments.service import BillingError, BillingService
 from openvegas.payments.stripe_gateway import StripeGateway
 from openvegas.telemetry import emit_metric
 from openvegas.wallet.ledger import WalletService
@@ -162,6 +163,8 @@ def _db_connect_timeout_sec() -> float:
 
 
 def _db_fail_open_enabled() -> bool:
+    if _is_production_env():
+        return False
     explicit = os.getenv("OPENVEGAS_DB_FAIL_OPEN")
     if explicit is not None:
         return _env_enabled("OPENVEGAS_DB_FAIL_OPEN", "0")
@@ -249,6 +252,25 @@ async def require_migration_min(db: Any, version: str) -> None:
 
 
 async def assert_schema_compatible(db: Any, flags: FeatureFlags) -> None:
+    await require_migration_min(db, '059_agent_funding_settlement')
+    await require_tables(db, {'agent_funding_orders', 'agent_auto_topups', 'agent_payment_adjustments'})
+    await require_columns(db, {('organizations', 'is_demo'), ('agent_funding_orders', 'credited_at')})
+    if os.getenv("OPENVEGAS_JOURNEY_ANALYTICS_ENABLED", "0") == "1":
+        await require_migration_min(db, "057_product_journeys")
+        await require_tables(db, {"product_journeys", "product_journey_events"})
+    if os.getenv("OPENVEGAS_REFERRALS_ENABLED", "0") == "1":
+        await require_migration_min(db, "052_referral_emote_promo")
+        await require_migration_min(db, "053_referral_paid_upgrade")
+        await require_tables(db, {"referral_identities", "referral_invites", "referral_attributions",
+                                  "referral_sessions", "referral_eligible_items", "referral_grants"})
+        await require_columns(db, {("cosmetic_entitlements", "source_referral_grant_id")})
+    # Enrollment can be off while existing subscriptions still receive webhooks.
+    if os.getenv("OPENVEGAS_TV_BILLING_ENABLED", "0") == "1" or await db.fetchval(
+        "SELECT to_regclass('public.tv_subscriptions') IS NOT NULL"
+    ):
+        await require_migration_min(db, "051_tv_billing")
+        await require_migration_min(db, "054_tv_event_ordering")
+        await require_columns(db, {("tv_subscriptions", "last_metadata_event_created")})
     await require_tables(
         db,
         {
@@ -277,6 +299,25 @@ async def assert_schema_compatible(db: Any, flags: FeatureFlags) -> None:
     await require_migration_min(db, "033_avatar_preferences")
     await require_migration_min(db, "036_profile_theme_preferences")
     await require_migration_min(db, "037_chat_file_uploads")
+    await require_migration_min(db, "038_private_runtime_rls")
+    await require_migration_min(db, "044_inference_route_commands")
+    await require_migration_min(db, "045_native_generation_ownership")
+    await require_migration_min(db, "046_native_generation_envelopes")
+    await require_migration_min(db, "047_native_continuation_revisions")
+    await require_migration_min(db, "048_native_mutation_preparations")
+    if os.getenv("OPENVEGAS_NATIVE_TASK_HANDOFF", "0") == "1":
+        if any(os.getenv(name, "0") != "1" for name in (
+            "OPENVEGAS_NATIVE_GENERATION_SCOPE", "OPENVEGAS_NATIVE_GENERATION_HISTORY",
+        )):
+            raise RuntimeError("Native task handoff requires native generation scope and history.")
+        await require_migration_min(db, "049_native_task_handoffs")
+        await require_tables(db, {"native_task_handoffs"})
+        await require_columns(db, {
+            ("native_task_handoffs", name) for name in (
+                "source_scope_json", "document_json", "document_sha256", "target_json",
+                "handoff_sha256", "expires_at", "destination_scope_json", "first_request_id", "first_dispatch_json",
+            )
+        } | {("agent_runs", "native_handoff_id")})
 
     await require_tables(
         db,
@@ -287,6 +328,8 @@ async def assert_schema_compatible(db: Any, flags: FeatureFlags) -> None:
             "horse_quote_idempotency",
             "provider_credentials",
             "inference_requests",
+            "inference_route_commands",
+            "native_generation_envelopes",
             "wallet_history_projection",
             "wrapper_reward_events",
             "org_runtime_policies",
@@ -315,6 +358,24 @@ async def assert_schema_compatible(db: Any, flags: FeatureFlags) -> None:
             ("profiles", "avatar_id"),
             ("profiles", "avatar_palette"),
             ("profiles", "dealer_skin_id"),
+            ("inference_route_commands", "native_run_id"),
+            ("inference_route_commands", "native_scope"),
+            ("inference_route_commands", "gateway_request_id"),
+            ("agent_runs", "native_generation_claim_id"),
+            ("inference_requests", "native_route_command_id"),
+            ("agent_runs", "native_history_revision"),
+            ("inference_route_commands", "native_history_revision"),
+            ("inference_route_commands", "previous_native_request_id"),
+            ("native_generation_envelopes", "request_id"),
+            ("native_generation_envelopes", "route_command_id"),
+            ("native_generation_envelopes", "runtime_session_id"),
+            ("native_generation_envelopes", "assistant_message_json"),
+            ("native_generation_envelopes", "assistant_sha256"),
+            ("native_generation_envelopes", "request_payload_json"),
+            ("native_generation_envelopes", "request_sha256"),
+            ("native_generation_envelopes", "history_inputs_json"),
+            ("native_generation_envelopes", "inputs_sha256"),
+            ("native_generation_envelopes", "public_binding"),
                 ("profiles", "theme"),
                 ("chat_file_uploads", "content_bytes"),
                 ("chat_file_uploads", "status"),
@@ -323,8 +384,12 @@ async def assert_schema_compatible(db: Any, flags: FeatureFlags) -> None:
         )
 
     if flags.store_enabled:
-        await require_migration_min(db, "009_inference_grant_usages_and_preauth")
-        await require_tables(db, {"store_orders", "inference_token_grants", "inference_grant_usages"})
+        await require_migration_min(db, "039_cosmetic_entitlements")
+        await require_tables(db, {
+            "store_orders", "inference_token_grants", "inference_grant_usages",
+            "cosmetic_entitlements", "cosmetic_equipment", "store_purchase_requests",
+            "cosmetic_entitlement_events",
+        })
 
     if flags.inference_enabled:
         await require_tables(db, {"inference_preauthorizations", "inference_usage"})
@@ -398,13 +463,19 @@ async def assert_schema_compatible(db: Any, flags: FeatureFlags) -> None:
 
 async def assert_db_ready() -> None:
     db = get_db()
-    await db.fetchrow("SELECT 1")
+    if isinstance(db, _Placeholder):
+        raise RuntimeError("Database is unavailable")
+    await asyncio.wait_for(db.fetchrow("SELECT 1"), timeout=5)
 
 
 async def assert_redis_ready() -> None:
     r = get_redis()
+    if isinstance(r, _Placeholder):
+        if _env_enabled("OPENVEGAS_REDIS_REQUIRED", "1" if _is_production_env() else "0"):
+            raise RuntimeError("Redis is required but unavailable")
+        return
     if hasattr(r, "ping"):
-        pong = await r.ping()
+        pong = await asyncio.wait_for(r.ping(), timeout=5)
         if pong is False:
             raise RuntimeError("Redis ping failed")
 
@@ -414,18 +485,26 @@ async def init_runtime_deps() -> None:
     global _db, _redis
 
     if os.getenv("OPENVEGAS_TEST_MODE", "0") == "1":
+        if _is_production_env():
+            raise RuntimeError("OPENVEGAS_TEST_MODE cannot be enabled in production")
         _db = _Placeholder()
         _redis = _Placeholder()
         return
 
     jwt_secret = os.getenv("SUPABASE_JWT_SECRET", "").strip()
-    if not jwt_secret:
-        raise RuntimeError("SUPABASE_JWT_SECRET is required in runtime mode")
+    auth_api_configured = bool(os.getenv("SUPABASE_URL", "").strip() and os.getenv("SUPABASE_ANON_KEY", "").strip())
+    if not jwt_secret and not auth_api_configured:
+        raise RuntimeError("SUPABASE_JWT_SECRET or SUPABASE_URL/SUPABASE_ANON_KEY is required in runtime mode")
 
     database_url = os.getenv("DATABASE_URL", "").strip()
     redis_url = os.getenv("REDIS_URL", "").strip()
+    if not redis_url and _env_enabled("OPENVEGAS_REDIS_REQUIRED", "1" if _is_production_env() else "0"):
+        raise RuntimeError("REDIS_URL is required for this runtime")
 
     if not database_url:
+        if not _db_fail_open_enabled():
+            raise RuntimeError("DATABASE_URL is required in strict runtime mode")
+        _log.warning("DATABASE_URL is missing; local preview only, readiness will fail")
         _db = _Placeholder()
         _redis = _Placeholder()
         return
@@ -438,6 +517,7 @@ async def init_runtime_deps() -> None:
             min_size=1,
             max_size=10,
             timeout=_db_connect_timeout_sec(),
+            statement_cache_size=int(os.getenv("OPENVEGAS_DB_STATEMENT_CACHE_SIZE", "100")),
         )
         _db = PostgresDB(pool)
     except Exception as exc:
@@ -447,7 +527,7 @@ async def init_runtime_deps() -> None:
             _log.warning(
                 "DB connect failed (%s). Starting in degraded mode with placeholder DB. "
                 "Set OPENVEGAS_DB_FAIL_OPEN=0 to enforce strict startup.",
-                exc,
+                type(exc).__name__,
             )
             _db = _Placeholder()
             _redis = _Placeholder()
@@ -460,12 +540,15 @@ async def init_runtime_deps() -> None:
     if redis_url:
         import redis.asyncio as redis
 
-        _redis = redis.from_url(redis_url, decode_responses=True)
+        _redis = redis.from_url(
+            redis_url, decode_responses=True, socket_connect_timeout=5, socket_timeout=5,
+        )
     else:
         _redis = _Placeholder()
 
     flags = current_flags()
-    await assert_schema_compatible(_db, flags)
+    await asyncio.wait_for(assert_schema_compatible(_db, flags), timeout=30)
+    await assert_redis_ready()
     if flags.human_casino_enabled:
         _log.info("human_casino=enabled schema_ready=true")
     else:
@@ -474,18 +557,26 @@ async def init_runtime_deps() -> None:
 
 async def close_runtime_deps() -> None:
     global _db, _redis
-    pool = getattr(_db, "pool", None)
+    db, redis_client = _db, _redis
+    _db, _redis = _Placeholder(), _Placeholder()
+    pool = getattr(db, "pool", None)
     if pool is not None:
-        await pool.close()
-
-    if hasattr(_redis, "close"):
-        close_fn = getattr(_redis, "close")
-        res = close_fn()
-        if hasattr(res, "__await__"):
-            await res
-
-    _db = _Placeholder()
-    _redis = _Placeholder()
+        try:
+            await asyncio.wait_for(pool.close(), timeout=5)
+        except Exception as exc:
+            _log.warning("Database shutdown required termination (%s)", type(exc).__name__)
+            try:
+                pool.terminate()
+            except Exception:
+                _log.warning("Database termination failed")
+    close_fn = getattr(redis_client, "aclose", None) or getattr(redis_client, "close", None)
+    if close_fn:
+        try:
+            res = close_fn()
+            if hasattr(res, "__await__"):
+                await asyncio.wait_for(res, timeout=5)
+        except Exception as exc:
+            _log.warning("Redis shutdown failed (%s)", type(exc).__name__)
 
 
 def get_wallet() -> WalletService:
@@ -506,6 +597,12 @@ def get_llm_mode_service() -> LLMModeService:
 
 def get_provider_thread_service() -> ProviderThreadService:
     return ProviderThreadService(get_db())
+
+
+def get_inference_replay_service():
+    from server.services.inference_replay import InferenceReplayService
+
+    return InferenceReplayService(get_db())
 
 
 def get_file_upload_service() -> FileUploadService:
@@ -573,12 +670,22 @@ def get_org_service():
 
 def get_store_service():
     from openvegas.store.service import StoreService
+    from server.services.local_cosmetic_tests import local_catalog
 
-    return StoreService(get_db(), get_wallet())
+    return StoreService(get_db(), get_wallet(), catalog=local_catalog())
 
 
 def get_billing_service() -> BillingService:
     return BillingService(get_db(), get_wallet(), _build_billing_gateway())
+
+
+class _UnavailableStripeGateway:
+    """Permit DB-only history without substituting fake payments when Stripe is absent."""
+
+    mode = "stripe"
+
+    def __getattr__(self, name):
+        raise BillingError("Payments are not configured on this backend")
 
 
 def _runtime_env_name() -> str:
@@ -596,6 +703,8 @@ def _stripe_configured() -> bool:
 def _build_billing_gateway():
     mode = str(os.getenv("OPENVEGAS_BILLING_PROVIDER", "hybrid")).strip().lower()
     if mode == "stripe":
+        if not _stripe_configured():
+            return _UnavailableStripeGateway()
         return StripeGateway()
     if mode == "simulated":
         return FakeGateway()

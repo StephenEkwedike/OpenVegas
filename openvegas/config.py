@@ -110,7 +110,8 @@ def ensure_config_dir() -> None:
 
 
 def load_config() -> dict:
-    ensure_config_dir()
+    # Reading defaults must work before a user has saved any local state.
+    # Persistence creates and secures the directory in save_config_atomic().
     current_default_backend_url = _current_default_backend_url()
     if CONFIG_FILE.exists():
         with open(CONFIG_FILE, encoding="utf-8") as f:
@@ -242,7 +243,7 @@ def _touchid_prompt_via_local_auth(reason: str = "Unlock OpenVegas session") -> 
     if sys.platform != "darwin":
         return False
     try:
-        # Optional dependency: pyobjc-framework-LocalAuthentication
+        # Declared macOS runtime dependency; still fail safely if damaged/missing.
         from LocalAuthentication import (  # type: ignore
             LAContext,
             LAPolicyDeviceOwnerAuthenticationWithBiometrics,
@@ -396,7 +397,8 @@ def invalidate_session_cache() -> None:
     clear_session_claim_cache()
 
 
-def save_session(access_token: str, refresh_token: str, access_expires_at: int | None = None) -> None:
+def save_session(access_token: str, refresh_token: str, access_expires_at: int | None = None,
+                 *, preserve_refresh_storage: bool = False) -> None:
     cfg = load_config()
     next_cfg = dict(cfg)
     # INTENTIONAL CLI-ONLY COMPROMISE (DO NOT REMOVE SILENTLY):
@@ -412,7 +414,11 @@ def save_session(access_token: str, refresh_token: str, access_expires_at: int |
         except Exception:
             session_payload["access_expires_at"] = 0
 
-    force_fallback = _force_config_refresh_storage()
+    # A host helper must not migrate an explicitly file-backed CLI session into
+    # the shared keychain merely because its environment differs from login.
+    force_fallback = _force_config_refresh_storage() or (
+        preserve_refresh_storage and (cfg.get("session") or {}).get("refresh_storage") == "config"
+    )
     platform_saved = False
     cfg_write_state = "untouched"  # untouched | write_attempted_unknown | replaced
     rollback_attempted = False
@@ -513,6 +519,8 @@ def get_default_model(provider: str) -> str:
     models = config.get("default_model_by_provider", {})
     if provider == "openai":
         return models.get(provider, DEFAULT_OPENAI_MODEL)
+    if provider in {"openrouter", "mistral"}:
+        return str(models.get(provider) or "")
     return models.get(provider, "gpt-4o-mini")
 
 

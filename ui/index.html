@@ -3,7 +3,8 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>OpenVegas | Top Up, Use, or Extend</title>
+    <title>OpenVegas | Keep Building with Claude Code and Codex</title>
+    <meta name="description" content="Use $V for separately billed AI requests in Claude Code and Codex, take an optional game break, and get back to your project. Games can win or lose credits; subscription quotas are unchanged." />
     <link rel="icon" type="image/svg+xml" href="/ui/assets/brand/favicon.svg" />
     <link rel="icon" type="image/jpeg" href="/ui/assets/brand/favicon.jpg" />
     <link rel="apple-touch-icon" href="/ui/assets/brand/openvegas-logo-circle.jpg" />
@@ -15,101 +16,111 @@
     />
     <link rel="stylesheet" href="/ui/assets/theme.css?v=20260330" />
     <link rel="stylesheet" href="/ui/assets/layout.css?v=20260330" />
+    <link rel="stylesheet" href="/ui/assets/growth.css?v=20261016" />
     <script defer src="/ui/assets/theme-fallback.js?v=20260330"></script>
-  </head>
-  <body>
+  <link rel="stylesheet" href="/ui/assets/home-clarity.css?v=20261028" />
+<link rel="stylesheet" href="/ui/assets/site-clarity.css?v=20261028" />
+</head>
+  <body class="home-clarity site-clarity">
     <nav class="top-nav">
       <a href="/ui" class="brand-link text-mono-sm">[ OPENVEGAS ]</a>
       <div style="display:flex; align-items:center; gap:14px;">
-        <div id="siteNav" class="nav-links"><a href="/ui">Home</a><a href="/ui/how-it-works">How it works</a><a href="/ui/pricing">Pricing</a><a href="/ui/balance">Balance</a><a href="/ui/faq">FAQ</a><a href="/ui/how-to-play">HOW TO PLAY</a><a href="/ui/contact">Contact</a></div>
+        <div id="siteNav" class="nav-links"><a href="/ui/how-it-works">How it works</a><a href="/ui/how-to-play">How to Play</a><a href="/ui/arena">Arena <span class="nav-soon">Soon</span></a><a href="/ui/pricing">Pricing</a><a href="/ui/emotes">Emotes</a><a href="/ui/balance">Balance</a></div>
         <div id="founderLinks" class="founder-links"></div>
         <button type="button" id="ov-theme-toggle" class="theme-toggle" role="switch" aria-label="Toggle light and dark mode" aria-checked="false"><span class="theme-toggle__icon" aria-hidden="true">☀</span><span class="theme-toggle__rail" aria-hidden="true"><span class="theme-toggle__thumb"></span></span><span class="theme-toggle__icon" aria-hidden="true">☾</span></button>
       </div>
     </nav>
 
-    <main class="container page-shell">
-      <header class="page-hero">
-        <div>
-          <div class="text-mono-xs" style="margin-bottom:1rem">AI CREDIT + GAME RUNTIME LAYER</div>
-          <h1 class="page-title">OpenVegas</h1>
-          <div class="cta-row">
-            <a class="btn btn-primary" href="/ui/pricing">View pricing</a>
-            <a class="btn" href="/ui/balance">Open balance</a>
-            <a class="btn" href="/ui/balance#play">See games</a>
-          </div>
+    <main class="container home-main">
+      <header class="home-hero">
+        <div class="home-intro">
+          <p class="home-eyebrow">AGENTIC ENTERTAINMENT</p>
+          <h1>Stake your compute.<br />Play for more.</h1>
+          <p class="home-lead">Put some $V on a hand of poker, blackjack or roulette. Keep your winnings as credits, then use them for more AI requests in Claude Code or Codex.</p>
+          <a class="home-primary" href="#install">Bring OpenVegas to your terminal</a>
+          <p class="home-billing-note">Your stake can be lost. Games are optional; you can fund AI directly. $V pays for separate API usage, not subscription refills.</p>
         </div>
-        <div>
-          <p class="text-mono-sm page-lead">
-            Buy credits, keep working, or play to extend your balance. OpenVegas gives users a way to fund AI
-            usage, redeem credits for compute, and use games as an optional path to stretch runtime further.
-            In some usage patterns, this can extend runtime well beyond direct top-up alone.
-          </p>
-        </div>
+        <aside class="home-flow" aria-label="How OpenVegas fits your workflow">
+          <h2>A hand. Then back to the build.</h2>
+          <ol class="home-steps">
+            <li><span class="home-step-number">01</span><div><strong>Choose your stake</strong><p>Set the $V you're willing to risk. One round, your call.</p></div></li>
+            <li><span class="home-step-number">02</span><div><strong>Play your hand</strong><p>Poker, blackjack, roulette and more. No autoplay.</p>
+              <div class="home-card-fan" aria-hidden="true"><span class="home-card home-card--left">A<span>♠</span></span><span class="home-card home-card--middle">K<span>♥</span></span><span class="home-card home-card--right">Q<span>♣</span></span></div>
+            </div></li>
+            <li><span class="home-step-number">03</span><div><strong>Keep building</strong><p>Choose $V-funded mode in Claude Code or Codex. Same project, separate AI billing.</p><span class="home-host-label">CLAUDE CODE <span aria-hidden="true">/</span> CODEX</span></div></li>
+          </ol>
+          <a href="/ui/how-it-works#inference">How $V-funded usage works</a>
+          <span class="home-sprite home-flow-pet" aria-hidden="true"><img src="/ui/assets/emotes/pixel-courier/sheet.png" width="512" height="80" alt="Pixel Courier decorative companion" /></span>
+        </aside>
       </header>
 
-      <section class="section-grid-3">
-        <article class="card border-r">
-          <div class="tag">REAL-TIME COMPUTE</div>
-          <h2 class="card-title">Buy credits. Use them directly.</h2>
-          <p class="card-copy">
-            Fund your balance once, then redeem credits for AI usage without constantly stopping to re-up inside
-            separate tools.
-          </p>
-          <div class="spec-row"><span class="text-mono-xs">FLOW</span><span class="text-mono-xs c-aqua">TOP UP -> REDEEM -> RUN</span></div>
-          <div class="spec-row"><span class="text-mono-xs">SUPPORT</span><span class="text-mono-xs">OPENAI / ANTHROPIC / MORE</span></div>
-          <div class="spec-row"><span class="text-mono-xs">CONTROL</span><span class="text-mono-xs c-lime">WALLET + BALANCE</span></div>
-        </article>
-
-        <article class="card border-r">
-          <div class="tag" style="border-color:var(--white); color:var(--white);">EXTENDED RUNTIME</div>
-          <h2 class="card-title">Stretch your compute with games.</h2>
-          <p class="card-copy">
-            OpenVegas is not just a billing page. Users can also play games for a chance to win more credits and keep
-            going without immediately buying again.
-          </p>
-          <div class="spec-row"><span class="text-mono-xs">GAMES</span><span class="text-mono-xs c-aqua">HORSE / BLACKJACK / ROULETTE / MORE</span></div>
-          <div class="spec-row"><span class="text-mono-xs">OUTCOME</span><span class="text-mono-xs">WIN OR LOSE CREDITS</span></div>
-          <div class="spec-row"><span class="text-mono-xs">MODE</span><span class="text-mono-xs c-lime">OPTIONAL, NOT REQUIRED</span></div>
-        </article>
-
-        <article class="card">
-          <div class="tag" style="border-color:var(--grey-mid); color:var(--grey-light);">OPERATIONAL UX</div>
-          <h2 class="card-title">Clear balance. Clear status. Clear next step.</h2>
-          <p class="card-copy">
-            Wallet, top-ups, activity, and game outcomes are shown in one place so users always know what they have
-            left and what they can do next.
-          </p>
-          <div class="spec-row"><span class="text-mono-xs">BALANCE</span><span class="text-mono-xs c-aqua">LIVE</span></div>
-          <div class="spec-row"><span class="text-mono-xs">HISTORY</span><span class="text-mono-xs">TOP-UPS + GAMEPLAY</span></div>
-          <div class="spec-row"><span class="text-mono-xs">STATES</span><span class="text-mono-xs c-lime">PAID / FAILED / WON / LOST</span></div>
-        </article>
-      </section>
-
-      <section class="footer-meta">
+      <section class="home-showcase" aria-labelledby="companions-title">
         <div>
-          <div class="text-mono-xs">DIRECT PATH</div>
-          <div class="text-mono-sm" style="color:var(--white); margin-top:.5rem;">BUY CREDITS -> REDEEM FOR COMPUTE</div>
+          <h2 id="companions-title">A little company, too.</h2>
+          <p>Companions for quiet moments. Emotes for the finish. Personality, not extra model power.</p>
+          <a href="/ui/emotes">Browse emote previews</a>
         </div>
-        <div>
-          <div class="text-mono-xs">GAME PATH</div>
-          <div class="text-mono-sm" style="color:var(--white); margin-top:.5rem;">PLAY FOR A CHANCE TO WIN MORE</div>
-        </div>
-        <div>
-          <div class="text-mono-xs">BALANCE PATH</div>
-          <div class="text-mono-sm" style="color:var(--white); margin-top:.5rem;">TRACK TOP-UPS, GAMEPLAY, AND STATUS</div>
-        </div>
-        <div>
-          <div class="text-mono-xs">RUNTIME POTENTIAL</div>
-          <div class="text-mono-sm c-aqua" style="margin-top:.5rem;">IN SOME USAGE PATTERNS, 3X+ VS DIRECT SPEND</div>
+        <div class="home-preview-strip" aria-label="More cosmetic previews">
+          <figure>
+            <span class="home-sprite"><img src="/ui/assets/emotes/visor-explorer/sheet.png" width="512" height="80" loading="lazy" alt="Visor Explorer with a bright visor" /></span>
+            <figcaption>Visor Explorer</figcaption>
+          </figure>
+          <figure>
+            <span class="home-sprite"><img src="/ui/assets/emotes/beat-maker/sheet.png" width="512" height="80" loading="lazy" alt="Beat Maker wearing headphones" /></span>
+            <figcaption>Beat Maker</figcaption>
+          </figure>
+          <figure>
+            <span class="home-sprite"><img src="/ui/assets/emotes/pixel-courier/sheet.png" width="512" height="80" loading="lazy" alt="Pixel Courier companion preview" /></span>
+            <figcaption>Pixel Courier</figcaption>
+          </figure>
         </div>
       </section>
+
+      <section class="home-install" id="install" aria-labelledby="install-title">
+        <h2 id="install-title">Start in your terminal</h2>
+        <p>Run the launcher, connect your account, then approve the host integration.</p>
+        <pre><code>npx openvegas-ai</code></pre>
+        <a href="/ui/how-it-works">Walk through setup</a>
+      </section>
+
+      <section class="home-questions" aria-labelledby="questions-title">
+        <h2 id="questions-title">Before you start</h2>
+        <div class="home-disclosures">
+          <details>
+            <summary>What do I need?</summary>
+            <div class="home-answer">
+              <p>Node.js/npm and an installed Claude Code or Codex CLI. Native features require a compatible OpenVegas release and enabled backend; older published builds may not include them yet.</p>
+              <p>Animations depend on your host version and graphics terminal. Text controls or a separate companion pane are the fallback.</p>
+              <a href="/ui/how-it-works">Check setup and compatibility</a>
+            </div>
+          </details>
+          <details>
+            <summary>Does this change my AI billing?</summary>
+            <div class="home-answer">
+              <p>Your native subscription billing stays unchanged. OpenVegas does not refill Claude Code or Codex subscription limits. Your host stays in charge of coding, tools and permissions.</p>
+              <p>Separately funded inference uses $V only where enabled. Review model pricing and confirm a spending limit before starting.</p>
+              <a href="/ui/how-it-works#inference">Understand separate AI funding</a>
+            </div>
+          </details>
+          <details>
+            <summary>What about games and credits?</summary>
+            <div class="home-answer">
+              <p>Games are optional. Wagers can lose credits; there are no guaranteed earnings or cheaper AI. Coding activity does not earn $V rewards.</p>
+              <a href="/ui/how-to-play">Read the game rules and risks</a>
+            </div>
+          </details>
+        </div>
+      </section>
+
+
     </main>
 
     <script type="module">
-      import { renderTopNav, renderFounderLinks, installAssetGuard } from "/ui/assets/site.js?v=20260330";
+      import { renderTopNav, renderFounderLinks, installAssetGuard } from "/ui/assets/site.js?v=20261028";
       installAssetGuard();
       renderTopNav("siteNav");
       renderFounderLinks("founderLinks");
     </script>
-  </body>
+  <footer class="site-footer"><div><strong>OpenVegas. Agentic Entertainment.</strong><p>A hand. Then back to the build.</p></div><a class="partnership-cta" href="/ui/data-partnerships">Data Partnerships <span aria-hidden="true">&nbsp;↗</span></a><div class="site-footer-links"><a href="/ui/how-to-play">How to Play</a><a href="/ui/arena">Arena · Soon</a><a href="/ui/agents">Agents</a><a href="/ui/faq">FAQ</a><a href="/ui/security">Security</a><a href="/ui/contact">Contact</a></div></footer>
+</body>
 </html>

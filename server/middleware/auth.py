@@ -68,6 +68,9 @@ async def get_current_user(request: Request) -> dict:
         raise HTTPException(401, "Missing bearer token")
 
     token = auth.removeprefix("Bearer ")
+    if token.startswith('ov_game_'):
+        from server.services.game_login import resolve_game_user
+        return await resolve_game_user(request,token)
     alg = ""
     try:
         header = jwt.get_unverified_header(token)
@@ -116,10 +119,12 @@ async def get_current_agent(request: Request) -> dict:
                   aa.org_id, aa.name AS agent_name, aa.status AS agent_status
            FROM agent_tokens at
            JOIN agent_accounts aa ON at.agent_account_id = aa.id
+           JOIN organizations o ON o.id = aa.org_id
            WHERE at.token_hash = $1
              AND at.revoked_at IS NULL
              AND at.expires_at > now()
-             AND aa.status = 'active'""",
+             AND aa.status = 'active'
+             AND o.status = 'active' AND o.is_demo = FALSE""",
         token_hash,
     )
     if not row:

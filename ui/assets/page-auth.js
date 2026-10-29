@@ -5,8 +5,14 @@ let bootstrapAttempted = false;
 let walletBootstrapDone = false;
 let authState = "signed_out"; // signed_out | refreshing | signed_in
 let authStateVersion = 0;
+let confirmedAnonymous = false;
+let authGeneration = 0;
+let invalidationChannel = null;
+let invalidationStorage = null;
+const seenInvalidations = new Set();
 const authStateListeners = new Set();
 const SESSION_STORAGE_KEY = "ov_browser_access_session";
+const INVALIDATION_KEY = "ov_auth_invalidation_v1";
 
 function nowUnix() {
   return Math.floor(Date.now() / 1000);
@@ -28,6 +34,10 @@ export function subscribeAuthState(listener) {
   if (typeof listener !== "function") return () => {};
   authStateListeners.add(listener);
   return () => authStateListeners.delete(listener);
+}
+
+export function getAuthStateSnapshot() {
+  return { authState, version: authStateVersion };
 }
 
 function normalizeToken(raw) {
@@ -88,6 +98,7 @@ function persistSessionToStorage() {
 }
 
 function setAccessToken(rawToken, expiresAtUnix = 0) {
+  confirmedAnonymous = false;
   accessToken = normalizeToken(rawToken);
   accessExpUnix = normalizeExpiresAt(expiresAtUnix);
   persistSessionToStorage();
@@ -105,14 +116,19 @@ function expiresSoon(leewaySec = 300) {
 }
 
 async function refreshAccessToken(trigger = "retry_401", opts = {}) {
-  const timeoutMs = Number(opts.timeoutMs || 4000);
-  if (refreshInFlight) return refreshInFlight;
-
-  refreshInFlight = (async () => {
-    setAuthState("refreshing");
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-    try {
+  if (refreshInFlight) return refreshInFlight.promise;
+  const timeoutMs = Math.min(4000, Math.max(1, Number(opts.timeoutMs) || 4000));
+  const generation = authGeneration;
+  const ctrl = new AbortController();
+  const cancelled = new Promise((_, reject) => {
+    ctrl.signal.addEventListener("abort", () => reject(new Error("refresh_cancelled")), { once: true });
+  });
+  const operation = { cancel() { ctrl.abort(); } };
+  const current = () => generation === authGeneration && !ctrl.signal.aborted;
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  // Defer work until the operation is installed, including for reentrant subscribers.
+  const request = Promise.resolve().then(async () => {
+      if (!current()) throw new Error("refresh_cancelled");
       const res = await fetch("/ui/auth/refresh", {
         method: "POST",
         credentials: "include",
@@ -123,6 +139,10 @@ async function refreshAccessToken(trigger = "retry_401", opts = {}) {
         signal: ctrl.signal,
       });
       if (!res.ok) {
+        const rejection = await res.json().catch(() => ({}));
+        if (!current()) throw new Error("refresh_cancelled");
+        // A network failure or expired credential is not consent to record a user.
+        confirmedAnonymous = res.status === 401 && rejection.detail === "No refresh session" && !accessToken;
         emit_metric("auth_refresh_attempt_total", {
           surface: "browser",
           trigger,
@@ -132,6 +152,7 @@ async function refreshAccessToken(trigger = "retry_401", opts = {}) {
         throw new Error(`refresh_failed_${res.status}`);
       }
       const body = await res.json().catch(() => ({}));
+      if (!current()) throw new Error("refresh_cancelled");
       const token = normalizeToken(body?.access_token);
       const expUnix = normalizeExpiresAt(body?.expires_at);
       if (!token || !expUnix) {
@@ -150,57 +171,145 @@ async function refreshAccessToken(trigger = "retry_401", opts = {}) {
         outcome: "success",
       });
       return token;
-    } catch (err) {
-      if (String(err).includes("AbortError")) {
-        emit_metric("auth_refresh_attempt_total", {
-          surface: "browser",
-          trigger,
-          outcome: "failure",
-          reason: "refresh_timeout",
-        });
-        throw new Error("refresh_timeout");
+  });
+  operation.promise = Promise.race([request, cancelled]).catch((err) => {
+      if (generation === authGeneration) {
+        accessToken = "";
+        accessExpUnix = 0;
+        walletBootstrapDone = false;
+        persistSessionToStorage();
+        setAuthState("signed_out");
       }
       throw err;
-    } finally {
+    }).finally(() => {
       clearTimeout(timer);
-    }
-  })();
+      if (refreshInFlight === operation) refreshInFlight = null;
+    });
+  refreshInFlight = operation;
+  confirmedAnonymous = false;
+  setAuthState("refreshing");
+  return operation.promise;
+}
 
+function invalidateSession() {
+  authGeneration += 1;
+  refreshInFlight?.cancel();
+  refreshInFlight = null;
+  confirmedAnonymous = false;
+  accessToken = "";
+  accessExpUnix = 0;
+  bootstrapAttempted = false;
+  walletBootstrapDone = false;
+  persistSessionToStorage();
+  setAuthState("signed_out");
+}
+
+function rememberInvalidation(nonce) {
+  seenInvalidations.add(nonce);
+  if (seenInvalidations.size > 32) seenInvalidations.delete(seenInvalidations.values().next().value);
+}
+
+function broadcastInvalidation() {
+  // Ephemeral deduplication only: never transmit a token, account, URL or auth state.
+  const message = { type: "auth-invalidated", nonce: `${Date.now()}-${Math.random()}` };
+  rememberInvalidation(message.nonce);
+  try { invalidationChannel?.postMessage(message); } catch { invalidationChannel = null; }
   try {
-    return await refreshInFlight;
-  } finally {
-    refreshInFlight = null;
-  }
+    invalidationStorage?.setItem(INVALIDATION_KEY, JSON.stringify(message));
+    invalidationStorage?.removeItem(INVALIDATION_KEY);
+  } catch { invalidationStorage = null; }
+  if (!invalidationChannel && !invalidationStorage) setAuthState(authState);
+}
+
+function receiveInvalidation(message) {
+  if (!message || message.type !== "auth-invalidated" || typeof message.nonce !== "string"
+      || message.nonce.length > 80 || Object.keys(message).length !== 2
+      || seenInvalidations.has(message.nonce)) return;
+  rememberInvalidation(message.nonce);
+  invalidateSession();
+  if (!browserHidden()) void refreshSessionSummary();
+}
+
+function browserHidden() {
+  return typeof document !== "undefined" && document.visibilityState === "hidden";
+}
+
+export function isAnalyticsSessionReady() {
+  return Boolean(invalidationChannel || invalidationStorage) && !browserHidden();
+}
+
+// Unlike bootstrap, this always checks the shared HTTP-only session with the server.
+export async function refreshSessionSummary() {
+  bootstrapAttempted = true;
+  try { await refreshAccessToken("session_check", { timeoutMs: 2500 }); } catch { /* Unknown stays off. */ }
+  return getSessionSummary();
+}
+
+function installSessionInvalidation() {
+  try {
+    invalidationChannel = new window.BroadcastChannel(INVALIDATION_KEY);
+    invalidationChannel.onmessage = (event) => receiveInvalidation(event.data);
+  } catch { invalidationChannel = null; }
+  try {
+    const storage = window.localStorage;
+    storage.setItem(`${INVALIDATION_KEY}_probe`, "1");
+    storage.removeItem(`${INVALIDATION_KEY}_probe`);
+    invalidationStorage = storage;
+  } catch { invalidationStorage = null; }
+  window.addEventListener?.("storage", (event) => {
+    if (event.key !== INVALIDATION_KEY || !event.newValue || event.newValue.length > 256) return;
+    try { receiveInvalidation(JSON.parse(event.newValue)); } catch { /* Ignore malformed notices. */ }
+  });
+  const recheck = () => {
+    if (browserHidden() || refreshInFlight) return;
+    invalidateSession();
+    void refreshSessionSummary();
+  };
+  window.addEventListener?.("focus", recheck);
+  window.addEventListener?.("pageshow", (event) => { if (event.persisted) recheck(); });
+  if (typeof document !== "undefined") document.addEventListener?.("visibilitychange", () => {
+    if (browserHidden()) invalidateSession();
+    else recheck();
+  });
 }
 
 export function getBrowserToken() {
   return accessToken;
 }
 
+export function isConfirmedAnonymous() {
+  return isAnalyticsSessionReady() && confirmedAnonymous && !accessToken && authState === "signed_out";
+}
+
 export function setBrowserToken(rawToken, expiresAtUnix = 0) {
   const token = normalizeToken(rawToken);
   if (!token) return false;
+  invalidateSession();
   setAccessToken(token, expiresAtUnix);
+  broadcastInvalidation();
   return true;
 }
 
 export function clearBrowserToken() {
-  accessToken = "";
-  accessExpUnix = 0;
-  walletBootstrapDone = false;
-  persistSessionToStorage();
-  setAuthState("signed_out");
+  invalidateSession();
+  broadcastInvalidation();
 }
 
 export async function logoutBrowserSession() {
+  clearBrowserToken();
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 4000);
   try {
     await fetch("/ui/auth/logout", {
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
+      signal: ctrl.signal,
     });
   } catch {
     // Best-effort remote logout; local clear always runs.
+  } finally {
+    clearTimeout(timer);
   }
   clearBrowserToken();
 }
@@ -212,7 +321,6 @@ export async function bootstrapBrowserSession() {
     await refreshAccessToken("bootstrap", { timeoutMs: 2500 });
     return true;
   } catch {
-    clearBrowserToken();
     return false;
   }
 }
@@ -350,4 +458,5 @@ export function showAuthedContent({ panelId = "authState", contentId = "authCont
 
 if (typeof window !== "undefined") {
   loadSessionFromStorage();
+  installSessionInvalidation();
 }

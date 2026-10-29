@@ -1,0 +1,64 @@
+{
+  "approval": "concept-approved; terminal-animation-review-pending",
+  "source_sha256": "275b8a2570b28e7d710a6a9f21e1f841792272817e85e7a9ef260ef775dc0e53",
+  "grid": [
+    4,
+    2
+  ],
+  "version": "0.1.1",
+  "cleanup": "exterior neutral matte/shadow plus distant tiny alpha islands",
+  "cleanup_parameters": {
+    "neutral_floor": 96,
+    "neutral_spread": 35,
+    "island_max_area": 6,
+    "island_min_gap": 3,
+    "protected_legacy_highlights_min_channel": 200,
+    "island_area_ratio": "at most 1/150 of largest component"
+  },
+  "geometry": "v0.1.0 crop, shared proportional scale, centering and baseline preserved",
+  "frame_cleanup": [
+    {
+      "baseline_visible_pixels": 1432,
+      "matte_pixels_removed": 7,
+      "island_pixels_removed": 0
+    },
+    {
+      "baseline_visible_pixels": 1202,
+      "matte_pixels_removed": 10,
+      "island_pixels_removed": 0
+    },
+    {
+      "baseline_visible_pixels": 1428,
+      "matte_pixels_removed": 7,
+      "island_pixels_removed": 0
+    },
+    {
+      "baseline_visible_pixels": 1209,
+      "matte_pixels_removed": 15,
+      "island_pixels_removed": 0
+    },
+    {
+      "baseline_visible_pixels": 1380,
+      "matte_pixels_removed": 9,
+      "island_pixels_removed": 0
+    },
+    {
+      "baseline_visible_pixels": 1166,
+      "matte_pixels_removed": 1,
+      "island_pixels_removed": 0
+    },
+    {
+      "baseline_visible_pixels": 1368,
+      "matte_pixels_removed": 19,
+      "island_pixels_removed": 0
+    },
+    {
+      "baseline_visible_pixels": 1447,
+      "matte_pixels_removed": 11,
+      "island_pixels_removed": 0
+    }
+  ],
+  "frame_count": 8,
+  "unique_frames": 8,
+  "purchasable": false
+}

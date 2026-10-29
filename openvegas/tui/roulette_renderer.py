@@ -22,6 +22,9 @@ WHEEL_ORDER = [
 ]
 N_SLOTS = len(WHEEL_ORDER)
 SECTOR_ARC = 2 * math.pi / N_SLOTS
+SPIN_DURATION_SEC = 8.0
+SPIN_TURNS = 1
+SPIN_WAIT_SECTORS_PER_SEC = 12.0
 
 
 @dataclass(frozen=True)
@@ -46,6 +49,10 @@ def _window_for_width(width: int) -> int:
 
 
 def _geometry_for_window(window: int) -> _Geometry:
+    if window == 1:
+        return _Geometry(canvas_w=26, canvas_h=10, aspect=2.5,
+                         outer_rim_r=4.2, pocket_outer=3.9, pocket_inner=2.5,
+                         inner_rim_r=2.3, spoke_r=1.8, center_r=0.6)
     if window >= 13:
         return _Geometry(
             canvas_w=52,
@@ -121,10 +128,10 @@ def render_result(result: int, bet_type: str, hit: bool, payout_mult: str) -> st
 def _number_styles(n: int) -> tuple[str, str]:
     """Return (label_style, pocket_bg_style)."""
     if n == 0:
-        return ("bold white on green", "on green")
+        return ("bold white on #17805b", "on #17805b")
     if n in RED_NUMBERS:
-        return ("bold white on red", "on red")
-    return ("bold white on grey11", "on grey11")
+        return ("bold white on #b62b3e", "on #b62b3e")
+    return ("bold white on #192321", "on #192321")
 
 
 def _cell_dist(x: int, y: int, *, cx: int, cy: int, aspect: float) -> float:
@@ -140,8 +147,9 @@ def _cell_angle(x: int, y: int, *, cx: int, cy: int, aspect: float) -> float:
 
 
 def _sector_index(angle: float, rotation: int) -> int:
-    # Top pointer is the 0-angle for visible wheel index.
-    a = (-angle + math.pi / 2) % (2 * math.pi)
+    # Twelve o'clock is the 0-angle for visible wheel index.
+    # Screen y grows downwards, matching the clockwise label positions below.
+    a = (angle + math.pi / 2) % (2 * math.pi)
     visible_idx = int(a / SECTOR_ARC) % N_SLOTS
     return (visible_idx + rotation) % N_SLOTS
 
@@ -201,8 +209,16 @@ def _build_frame(rotation: int, *, ball_sector: int | None, window: int) -> str:
                 cell_char[y][x] = " "
                 cell_style[y][x] = "on rgb(30,50,30)"
 
-    # Place all 37 labels so the wheel looks full and legible.
-    for visible_idx, (lx, ly) in enumerate(_label_positions(geom)):
+    # Reserve the ball label first. Rounded terminal cells can put adjacent
+    # pockets on the same row; a later label must never turn "19" into "1".
+    positions = _label_positions(geom)
+    selected = (ball_sector - rotation) % N_SLOTS if ball_sector is not None else None
+    order = ([selected] if selected is not None else []) + [i for i in range(N_SLOTS) if i != selected]
+    occupied: set[tuple[int, int]] = set()
+    for visible_idx in order:
+        if window == 1 and visible_idx != selected:
+            continue
+        lx, ly = positions[visible_idx]
         wheel_idx = (visible_idx + rotation) % N_SLOTS
         number = WHEEL_ORDER[wheel_idx]
         is_ball = ball_sector is not None and wheel_idx == ball_sector
@@ -210,6 +226,13 @@ def _build_frame(rotation: int, *, ball_sector: int | None, window: int) -> str:
         label_style, _ = _number_styles(number)
         style = "bold black on yellow" if is_ball else label_style
         start = lx - len(label) // 2
+        if any((x, ly) in occupied for x in range(start, start + len(label))):
+            continue
+        occupied.update((x, ly) for x in range(start - 1, start + len(label) + 1))
+        if is_ball:
+            for x in (start - 1, start + len(label)):
+                if 0 <= x < geom.canvas_w:
+                    cell_char[ly][x] = " "
         for ci, ch in enumerate(label):
             xx = start + ci
             if 0 <= ly < geom.canvas_h and 0 <= xx < geom.canvas_w:
@@ -226,8 +249,6 @@ def _build_frame(rotation: int, *, ball_sector: int | None, window: int) -> str:
             cell_style[cy][xx] = "bold rgb(200,180,80) on rgb(30,50,30)"
 
     lines: list[str] = []
-    pointer_pad = " " * max(0, cx - 1)
-    lines.append(f"{pointer_pad}[bold yellow]▼[/bold yellow]")
 
     for y in range(geom.canvas_h):
         parts: list[str] = []
@@ -240,11 +261,14 @@ def _build_frame(rotation: int, *, ball_sector: int | None, window: int) -> str:
                 parts.append(ch)
         lines.append("".join(parts))
 
+    if window == 1:
+        lines.append("[bold yellow]Yellow = ball[/bold yellow]")
+        return "\n".join(lines)
     lines.append("")
     lines.append(
-        "  [bold white on green] 0 [/bold white on green] green   "
-        "[bold white on red]   [/bold white on red] red   "
-        "[bold white on grey11]   [/bold white on grey11] black   "
+        "  [bold white on #17805b] 0 [/bold white on #17805b] green   "
+        "[bold white on #b62b3e]   [/bold white on #b62b3e] red   "
+        "[bold white on #192321]   [/bold white on #192321] black   "
         "[bold black on yellow] ● [/bold black on yellow] ball"
     )
     return "\n".join(lines)
@@ -268,8 +292,17 @@ def _phase_label(progress: float) -> str:
     return "Ball drops into pocket"
 
 
-def _ease_out_quint(t: float) -> float:
-    return 1.0 - (1.0 - t) ** 5
+def _coast_progress(t: float) -> float:
+    # Constant angular deceleration. A quintic front-loaded almost all travel.
+    return t * (2.0 - t)
+
+
+def spin_position(elapsed: float, target: int, *, start: int = 0,
+                  duration: float = SPIN_DURATION_SEC) -> float:
+    """Unwrapped clockwise travel: decelerate to the server pocket without a jump."""
+    progress = max(0.0, min(1.0, elapsed / duration)) if duration > 0 else 1.0
+    distance = N_SLOTS * SPIN_TURNS + (target - start) % N_SLOTS
+    return start + distance * _coast_progress(progress)
 
 
 async def animate_spin(
@@ -288,26 +321,18 @@ async def animate_spin(
 
     if duration_sec is None:
         # Default gameplay pacing.
-        duration_sec = 8.0 if frames is None else max(0.25, frames / 40)
+        duration_sec = SPIN_DURATION_SEC if frames is None else max(0.25, frames / 40)
 
     total_frames = max(1, int(frames) if frames is not None else int(duration_sec * fps))
     frame_delay = max(0.005, duration_sec / max(1, total_frames))
     target_idx = WHEEL_ORDER.index(int(result_number)) if int(result_number) in WHEEL_ORDER else 0
     window = _window_for_width(int(getattr(console, "width", 80) or 80))
 
-    total_rotation = N_SLOTS * 4
-    full_rotations = total_rotation - (total_rotation % N_SLOTS)
-    total_rotation = full_rotations + target_idx
-
     with Live(console=console, refresh_per_second=max(1, fps), transient=False) as live:
         for frame in range(total_frames):
-            if frame >= total_frames - 4:
-                # Last frames must settle exactly on backend result.
-                current = (target_idx - (total_frames - 1 - frame)) % N_SLOTS
-            else:
-                progress = frame / max(1, total_frames - 1)
-                eased = _ease_out_quint(progress)
-                current = int(eased * total_rotation) % N_SLOTS
+            progress = frame / max(1, total_frames - 1) if total_frames > 1 else 1.0
+            current = int(spin_position(progress * duration_sec, target_idx,
+                                        duration=duration_sec)) % N_SLOTS
 
             phase = _phase_label(frame / max(1, total_frames))
             frame_text = _spin_frame(current, window=window)

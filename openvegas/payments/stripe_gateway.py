@@ -26,6 +26,8 @@ class StripeGateway:
         if not key:
             raise RuntimeError("STRIPE_SECRET_KEY is required for billing operations")
         self.stripe.api_key = key
+        if hasattr(self.stripe, 'RequestsClient'):
+            self.stripe.default_http_client = self.stripe.RequestsClient(timeout=15)
 
     def _session_create(self, *, idempotency_key: str, **params) -> dict:
         """Create checkout session with SDK-compatible idempotency options."""
@@ -95,6 +97,47 @@ class StripeGateway:
 
     def retrieve_customer(self, *, customer_id: str) -> dict:
         return self.stripe.Customer.retrieve(customer_id)
+
+    def create_agent_customer(self, *, user_id, email, livemode):
+        return self.stripe.Customer.create(email=email, metadata={'user_id':str(user_id)},
+            idempotency_key=f'agent-customer:{user_id}:{int(livemode)}')
+
+    def create_agent_checkout(self, *, customer_id, amount_usd, order_id, return_url, save_card=False):
+        metadata = {"agent_funding_id": order_id}
+        intent = {"metadata": metadata}
+        if save_card:
+            intent["setup_future_usage"] = "off_session"
+        return self._session_create(
+            idempotency_key=f"agent-checkout:{order_id}", mode="payment", customer=customer_id,
+            client_reference_id=order_id, payment_method_types=["card"],
+            line_items=[{"price_data": {"currency": "usd", "unit_amount": int(amount_usd * 100),
+                "product_data": {"name": "OpenVegas agent $V funding"}}, "quantity": 1}],
+            metadata=metadata, payment_intent_data=intent,
+            success_url=return_url, cancel_url=return_url,
+        )
+
+    def charge_agent(self, *, customer_id, payment_method_id, amount_usd, order_id):
+        try:
+            return self._payment_intent_create(
+                idempotency_key=f"agent-auto:{order_id}", amount=int(amount_usd * 100), currency="usd",
+                customer=customer_id, payment_method=payment_method_id,
+                off_session=True, confirm=True, metadata={"agent_funding_id": order_id},
+            )
+        except self.stripe.CardError as exc:
+            intent=(exc.json_body or {}).get('error',{}).get('payment_intent')
+            if isinstance(intent,dict):
+                return intent
+            raise
+
+    def retrieve_agent_intent(self, *, payment_intent_id):
+        return self.stripe.PaymentIntent.retrieve(payment_intent_id)
+
+    def retrieve_agent_checkout(self, *, checkout_id):
+        return self.stripe.checkout.Session.retrieve(checkout_id)
+
+    def cancel_agent_intent(self, *, payment_intent_id, order_id):
+        return self.stripe.PaymentIntent.cancel(payment_intent_id,
+            idempotency_key=f'agent-cancel:{order_id}')
 
     def list_customer_card_payment_methods(self, *, customer_id: str, limit: int = 5) -> dict:
         return self.stripe.PaymentMethod.list(

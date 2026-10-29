@@ -17,12 +17,14 @@
       .contact-grid { display:grid; grid-template-columns: 1fr 1fr; gap: 16px; border-top:1px solid var(--grey-dark); }
       @media (max-width: 900px){ .contact-grid{ grid-template-columns:1fr; } }
     </style>
-  </head>
-  <body>
+  <link rel="stylesheet" href="/ui/assets/home-clarity.css?v=20261028" />
+<link rel="stylesheet" href="/ui/assets/site-clarity.css?v=20261028" />
+</head>
+  <body class="site-clarity">
     <nav class="top-nav">
       <a href="/ui" class="brand-link text-mono-sm">[ OPENVEGAS ]</a>
       <div style="display:flex; align-items:center; gap:14px;">
-        <div id="siteNav" class="nav-links"><a href="/ui">Home</a><a href="/ui/how-it-works">How it works</a><a href="/ui/pricing">Pricing</a><a href="/ui/balance">Balance</a><a href="/ui/faq">FAQ</a><a href="/ui/how-to-play">HOW TO PLAY</a><a href="/ui/contact">Contact</a></div>
+        <div id="siteNav" class="nav-links"><a href="/ui/how-it-works">How it works</a><a href="/ui/how-to-play">How to Play</a><a href="/ui/arena">Arena <span class="nav-soon">Soon</span></a><a href="/ui/pricing">Pricing</a><a href="/ui/emotes">Emotes</a><a href="/ui/balance">Balance</a></div>
         <div id="founderLinks" class="founder-links"></div>
         <button type="button" id="ov-theme-toggle" class="theme-toggle" role="switch" aria-label="Toggle light and dark mode" aria-checked="false"><span class="theme-toggle__icon" aria-hidden="true">☀</span><span class="theme-toggle__rail" aria-hidden="true"><span class="theme-toggle__thumb"></span></span><span class="theme-toggle__icon" aria-hidden="true">☾</span></button>
       </div>
@@ -52,20 +54,21 @@
             </a>
           </div>
         </article>
-        <article class="card">
-          <div class="tag">INVESTORS</div>
-          <h2 class="card-title">Infrastructure + fintech + agent systems</h2>
-          <p class="card-copy">OpenVegas is Stripe-for-AI-credits on the surface, and future agent treasury infrastructure underneath.</p>
+        <article class="card" id="partnerships">
+          <div class="tag">PARTNERSHIPS</div>
+          <h2 class="card-title">Investors and data labs</h2>
+          <p class="card-copy">Interested in backing OpenVegas or designing an agent evaluation pilot? Tell us what you want to build or measure.</p>
           <div class="spec-row"><span class="text-mono-xs">Email</span><span class="text-mono-xs">founders@openvegas.ai</span></div>
         </article>
       </section>
     </main>
 
     <script type="module">
-      import { renderTopNav, renderFounderLinks, installAssetGuard } from "/ui/assets/site.js?v=20260330";
+      import { renderTopNav, renderFounderLinks, installAssetGuard } from "/ui/assets/site.js?v=20261028";
       installAssetGuard();
       renderTopNav("siteNav");
       renderFounderLinks("founderLinks");
     </script>
-  </body>
+  <footer class="site-footer"><div><strong>OpenVegas. Agentic Entertainment.</strong><p>A hand. Then back to the build.</p></div><a class="partnership-cta" href="/ui/data-partnerships">Data Partnerships <span aria-hidden="true">&nbsp;↗</span></a><div class="site-footer-links"><a href="/ui/how-to-play">How to Play</a><a href="/ui/arena">Arena · Soon</a><a href="/ui/agents">Agents</a><a href="/ui/faq">FAQ</a><a href="/ui/security">Security</a><a href="/ui/contact">Contact</a></div></footer>
+</body>
 </html>

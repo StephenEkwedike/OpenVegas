@@ -164,6 +164,8 @@ async def action_round(round_id: str, req: ActionRequest, user: dict = Depends(g
             idempotency_key=req.idempotency_key,
         )
         return _json_response(resp.status_code, resp.body_text)
+    except InsufficientBalance as e:
+        raise HTTPException(status_code=400, detail='Not enough $V for that extra stake. Choose hit or stand.')
     except ValueError as e:
         raise _map_value_error(e)
     except UndefinedTableError as e:

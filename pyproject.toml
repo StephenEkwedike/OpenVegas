@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
+requires = ["setuptools>=77.0.3", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -13,10 +13,13 @@ dependencies = [
     "rich>=13.0",
     "prompt-toolkit>=3.0",
     "keyring>=25.0",
+    "pyobjc-framework-LocalAuthentication>=12.2.2,<13; sys_platform == 'darwin'",
     "Pillow>=10.0",
     "qrcode[pil]>=7.4",
     "textual>=0.50",
+    "textual-image==0.12.0",
     "httpx>=0.27",
+    "python-dotenv>=1.0",
     "supabase>=2.0",
     "websockets>=15,<16",
     "python-jose[cryptography]>=3.3",
@@ -26,6 +29,7 @@ dependencies = [
     "stripe==14.3.0",
     "redis[hiredis]>=5.0",
     "celery>=5.3",
+    "mcp==2.3.0",
 ]
 
 [project.optional-dependencies]
@@ -33,12 +37,14 @@ server = [
     "fastapi>=0.110",
     "uvicorn[standard]>=0.29",
     "asyncpg>=0.29",
+    "pypdf>=6.19,<7",
 ]
 audio = [
     "numpy>=1.26",
     "sounddevice>=0.4",
 ]
 dev = [
+    "jsonschema>=4.0",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "ruff>=0.3",
@@ -46,9 +52,15 @@ dev = [
 
 [project.scripts]
 openvegas = "openvegas.cli:cli"
+ov = "openvegas.cli:cli"
 
 [tool.setuptools.packages.find]
 include = ["openvegas*", "server*"]
+
+[tool.setuptools.package-data]
+"openvegas.emotes" = ["assets/*/manifest.json", "assets/*/sheet.png", "assets/*/provenance.json"]
+"openvegas.integrations" = ["assets/*.js", "assets/*.md"]
+"openvegas.tv" = ["assets/*.json"]
 
 [tool.ruff]
 target-version = "py311"

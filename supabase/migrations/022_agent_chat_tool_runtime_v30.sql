@@ -72,9 +72,11 @@ BEGIN
   END IF;
 
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_tool_started_requires_claim') THEN
+    -- Pre-022 rows have no claim metadata. Preserve their history without inventing it;
+    -- NOT VALID still enforces the constraint on every new or updated row.
     ALTER TABLE agent_run_tool_calls
       ADD CONSTRAINT ck_tool_started_requires_claim
-      CHECK (status <> 'started' OR (claimed_at IS NOT NULL AND started_at IS NOT NULL));
+      CHECK (status <> 'started' OR (claimed_at IS NOT NULL AND started_at IS NOT NULL)) NOT VALID;
   END IF;
 
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_tool_terminal_requires_finished') THEN
@@ -97,10 +99,11 @@ BEGIN
         OR
         (
           terminal_response_status IS NOT NULL
+          AND terminal_response_content_type IS NOT NULL
           AND terminal_response_content_type = 'application/json'
           AND terminal_response_body_text IS NOT NULL
         )
-      );
+      ) NOT VALID;
   END IF;
 
   IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_tool_terminal_response_hash') THEN

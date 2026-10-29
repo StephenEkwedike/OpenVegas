@@ -38,12 +38,14 @@
         .mini-grid { grid-template-columns: 1fr; }
       }
     </style>
-  </head>
-  <body>
+  <link rel="stylesheet" href="/ui/assets/home-clarity.css?v=20261028" />
+<link rel="stylesheet" href="/ui/assets/site-clarity.css?v=20261028" />
+</head>
+  <body class="site-clarity">
     <nav class="top-nav">
       <a href="/ui" class="brand-link text-mono-sm">[ OPENVEGAS ]</a>
       <div style="display:flex; align-items:center; gap:14px;">
-        <div id="siteNav" class="nav-links"><a href="/ui">Home</a><a href="/ui/how-it-works">How it works</a><a href="/ui/pricing">Pricing</a><a href="/ui/balance">Balance</a><a href="/ui/faq">FAQ</a><a href="/ui/how-to-play">HOW TO PLAY</a><a href="/ui/contact">Contact</a></div>
+        <div id="siteNav" class="nav-links"><a href="/ui/how-it-works">How it works</a><a href="/ui/how-to-play">How to Play</a><a href="/ui/arena">Arena <span class="nav-soon">Soon</span></a><a href="/ui/pricing">Pricing</a><a href="/ui/emotes">Emotes</a><a href="/ui/balance">Balance</a></div>
         <div id="founderLinks" class="founder-links"></div>
         <button type="button" id="ov-theme-toggle" class="theme-toggle" role="switch" aria-label="Toggle light and dark mode" aria-checked="false"><span class="theme-toggle__icon" aria-hidden="true">☀</span><span class="theme-toggle__rail" aria-hidden="true"><span class="theme-toggle__thumb"></span></span><span class="theme-toggle__icon" aria-hidden="true">☾</span></button>
       </div>
@@ -96,6 +98,19 @@
                 <button id="createCheckout" class="btn btn-primary" type="button">Top up now</button>
                 <button id="openSubscription" class="btn" type="button">Monthly subscription</button>
               </div>
+              <p class="text-mono-sm"><a href="/billing/tv/manage">Cancel an existing OVTV subscription</a>. This does not start a new subscription.</p>
+            </article>
+
+            <article id="promotion" class="card" hidden>
+              <div class="text-mono-xs">PROMOTION</div>
+              <h2 class="card-title">Have an OpenVegas code?</h2>
+              <p class="card-copy">Redeem an eligible code for 50 $V. Codes expire within seven days. One redemption per verified account per campaign; no purchase or wager required.</p>
+              <form id="promotionForm">
+                <label for="promotionCode">Promotion code</label>
+                <input id="promotionCode" name="code" type="text" required maxlength="68" autocomplete="off" spellcheck="false" pattern="ovp_[a-f0-9]{64}" style="width:100%;box-sizing:border-box;margin:12px 0" />
+                <button id="promotionSubmit" class="btn" type="submit">Redeem code</button>
+              </form>
+              <p id="promotionStatus" class="text-mono-sm" role="status" aria-live="polite"></p>
             </article>
 
             <article id="transactions" class="card">
@@ -124,7 +139,8 @@
     </main>
 
     <script type="module">
-      import { renderTopNav, renderFounderLinks, installAssetGuard, byId } from "/ui/assets/site.js?v=20260330";
+      import {money} from '/ui/assets/currency.js';
+      import { renderTopNav, renderFounderLinks, installAssetGuard, byId } from "/ui/assets/site.js?v=20261028";
       import { apiJson, bootstrapBrowserSession, clearBrowserToken, getBrowserToken, getLoginHref, getSignupHref, showAuthedContent, showSignedOutPanel } from "/ui/assets/page-auth.js?v=20260330";
 
       installAssetGuard();
@@ -136,10 +152,31 @@
       const signupLink = byId("signupLink");
       if (signupLink) signupLink.href = getSignupHref("/ui/balance");
 
+      fetch("/promotions/config", { cache: "no-store" }).then(r => r.ok ? r.json() : null)
+        .then(config => { byId("promotion").hidden = config?.enabled !== true; }).catch(() => {});
+      byId("promotionForm").addEventListener("submit", async event => {
+        event.preventDefault();
+        const button = byId("promotionSubmit");
+        if (button.disabled) return;
+        button.disabled = true;
+        byId("promotionStatus").textContent = "Checking code...";
+        try {
+          const result = await apiJson("/promotions/redeem", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ code: byId("promotionCode").value.trim() })
+          });
+          byId("promotionStatus").textContent = result.replayed ? "This code was already credited to your account." : "$V 50.00 added to your balance.";
+          byId("promotionCode").value = "";
+          await loadWallet();
+        } catch (err) {
+          byId("promotionStatus").textContent = err?.message || "Code could not be redeemed. Try again safely.";
+        } finally { button.disabled = false; }
+      });
+
       function renderBalance(data) {
         const raw = String(data?.balance ?? "0");
         const n = Number.parseFloat(raw);
-        byId("balanceV").textContent = Number.isFinite(n) ? `${n.toFixed(2)} $V` : `${raw} $V`;
+        byId("balanceV").textContent = money(raw);
         byId("balanceMeta").textContent = `tier=${data?.tier ?? "free"}`;
       }
 
@@ -150,7 +187,7 @@
         if (fx) {
           const vPerUsd = conv?.v_per_usd || "?";
           const usdPerV = conv?.usd_per_v || "?";
-          fx.textContent = `Conversion rate: 1 USD = ${vPerUsd} $V · 1 $V = ${usdPerV} USD`;
+          fx.textContent = `Conversion rate: 1 USD = ${money(vPerUsd)} · $V 1.00 = ${usdPerV} USD`;
         }
         const body = byId("txBody");
         if (!body) return;
@@ -167,11 +204,11 @@
               const vv = e.amount_v_2dp ?? e.amount_v ?? "0.00";
               const n = Number.parseFloat(String(vv));
               const signed = Number.isFinite(n) ? `${n > 0 ? "+" : ""}${n.toFixed(2)}` : String(vv);
-              amount = `${signed} $V`;
+              amount = money(vv);
             } else {
               const usd = e.amount_usd ? `$${e.amount_usd}` : "$0.00";
               const vv = e.amount_v_2dp ?? e.amount_v ?? "0.00";
-              amount = `${usd} · +${vv} $V`;
+              amount = `${usd} · ${money(vv)}`;
             }
             return `<tr><td>${t}</td><td>${kind}</td><td>${amount}</td><td>${e.status || "n/a"}</td></tr>`;
           })
@@ -252,5 +289,6 @@
         }
       })();
     </script>
-  </body>
+  <footer class="site-footer"><div><strong>OpenVegas. Agentic Entertainment.</strong><p>A hand. Then back to the build.</p></div><a class="partnership-cta" href="/ui/data-partnerships">Data Partnerships <span aria-hidden="true">&nbsp;↗</span></a><div class="site-footer-links"><a href="/ui/how-to-play">How to Play</a><a href="/ui/arena">Arena · Soon</a><a href="/ui/agents">Agents</a><a href="/ui/faq">FAQ</a><a href="/ui/security">Security</a><a href="/ui/contact">Contact</a></div></footer>
+</body>
 </html>

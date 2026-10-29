@@ -11,6 +11,7 @@ import re
 import subprocess
 import tempfile
 import uuid
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -353,8 +354,11 @@ class FileUploadService:
         except Exception as exc:
             raise FileUploadError(400, "invalid_base64", "content_base64 is not valid base64") from exc
 
+        # Cleanup may lock unrelated expired rows. Release those locks before
+        # acquiring the requested upload, matching the inference resolver.
+        async with self.db.transaction() as cleanup_tx:
+            await self._cleanup_expired(cleanup_tx)
         async with self.db.transaction() as tx:
-            await self._cleanup_expired(tx)
             row = await tx.fetchrow(
                 """
                 SELECT id, user_id, filename, mime_type, size_bytes, sha256, status, expires_at, completed_at
@@ -461,6 +465,7 @@ class FileUploadService:
         *,
         user_id: str,
         file_ids: list[str],
+        tx: Any = None,
     ) -> list[dict[str, Any]]:
         requested_ids: list[str] = []
         seen: set[str] = set()
@@ -480,10 +485,16 @@ class FileUploadService:
                 f"Attachment count exceeds max {self._max_attachments_per_turn()}",
             )
 
-        out: list[dict[str, Any]] = []
-        async with self.db.transaction() as tx:
-            await self._cleanup_expired(tx)
-            for file_id in requested_ids:
+        by_requested_id: dict[str, dict[str, Any]] = {}
+        # An owned coordinator transaction must not acquire a second pool
+        # connection. Its resolver locks requested IDs in global sorted order;
+        # unrelated expiry cleanup belongs to standalone upload operations.
+        own_transaction = tx is None
+        if own_transaction:
+            async with self.db.transaction() as cleanup_tx:
+                await self._cleanup_expired(cleanup_tx)
+        async with (self.db.transaction() if own_transaction else nullcontext(tx)) as tx:
+            for file_id in sorted(requested_ids):
                 row = await tx.fetchrow(
                     """
                     SELECT id, user_id, filename, mime_type, size_bytes, status, content_bytes, expires_at
@@ -527,16 +538,14 @@ class FileUploadService:
                 else:
                     raise FileUploadError(409, "file_content_invalid", f"file_id content invalid: {file_id}")
 
-                out.append(
-                    {
-                        "file_id": str(self._row_get(row, "id") or file_id),
-                        "filename": str(self._row_get(row, "filename") or ""),
-                        "mime_type": str(self._row_get(row, "mime_type") or ""),
-                        "size_bytes": int(self._row_get(row, "size_bytes") or 0),
-                        "content_bytes": content_bytes,
-                    }
-                )
-        return out
+                by_requested_id[file_id] = {
+                    "file_id": str(self._row_get(row, "id") or file_id),
+                    "filename": str(self._row_get(row, "filename") or ""),
+                    "mime_type": str(self._row_get(row, "mime_type") or ""),
+                    "size_bytes": int(self._row_get(row, "size_bytes") or 0),
+                    "content_bytes": content_bytes,
+                }
+        return [by_requested_id[ident] for ident in requested_ids]
 
     async def search_uploaded_text(
         self,

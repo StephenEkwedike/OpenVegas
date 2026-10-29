@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import hashlib
+import io
+import math
 import random
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 
 from rich.cells import cell_len
 from rich.console import Console, Group, RenderableType
 from rich.live import Live
 from rich.panel import Panel
 from rich.segment import Segment
+from rich.style import Style
 from rich.text import Text
 
 _ASCII_GLYPHS = ("*", "+", "x", ".")
@@ -25,6 +29,48 @@ _CONFETTI_COLORS = (
 )
 _PANEL_MIN_WIDTH = 24
 _VERY_NARROW_FALLBACK_WIDTH = 28
+FALLING_CONFETTI_SECONDS = 3.5
+_PAPER_GLYPHS = ("▰", "╲", "│", "╱", "▪", "─")
+
+
+@dataclass(frozen=True)
+class ConfettiCell:
+    piece: int
+    x: int
+    y: int
+    glyph: str
+    style: Style
+
+
+@lru_cache(maxsize=32)
+def _falling_pieces(seed: str, count: int):
+    rng = random.Random(seed)
+    return tuple((rng.random(), rng.uniform(0, .18), rng.uniform(.58, .78),
+                  rng.uniform(-1, 1), rng.uniform(0, math.tau), rng.uniform(.4, 1.4),
+                  rng.random() > .35) for _ in range(count))
+
+
+def falling_confetti_cells(*, width: int, height: int, elapsed: float,
+                          seed: str, ascii_safe: bool = False) -> list[ConfettiCell]:
+    """Seekable paper rain in viewport cells; no I/O, mutable simulation or timer."""
+    if width < 1 or height < 1 or not math.isfinite(elapsed) or not 0 <= elapsed < FALLING_CONFETTI_SECONDS:
+        return []
+    count = min(120, max(12, width * height // 24))
+    glyphs = _ASCII_GLYPHS if ascii_safe else _PAPER_GLYPHS
+    cells = []
+    for i, (x, delay, travel, drift, phase, flutter, near) in enumerate(_falling_pieces(seed, count)):
+        age = (elapsed / FALLING_CONFETTI_SECONDS - delay) / travel
+        if not 0 <= age <= 1:
+            continue
+        # Gravity, drag and flutter share a continuous trajectory across frames.
+        row = math.floor(-2 + (height + 3) * (.30 * age + .70 * age * age))
+        column = round(x * (width - 1) + drift * min(4, width * .06) * age
+                       + (math.sin(phase + age * 8) - math.sin(phase)) * flutter)
+        if 0 <= row < height and 0 <= column < width:
+            glyph = glyphs[int(phase + age * 12) % len(glyphs)]
+            cells.append(ConfettiCell(i, column, row, glyph,
+                Style(color=_CONFETTI_COLORS[i % len(_CONFETTI_COLORS)], bold=near, dim=not near)))
+    return cells
 
 
 @dataclass
@@ -61,6 +107,7 @@ def _build_panel(content: RenderableType, title: str, panel_width: int | None = 
 def _capture_panel_lines(console: Console, renderable: RenderableType) -> list[Text]:
     """Render panel into styled line objects for frame composition."""
     temp_console = Console(
+        file=io.StringIO(),
         width=max(20, console.width),
         record=True,
         force_terminal=True,
@@ -188,6 +235,16 @@ def _final_seed(layout: _FrameLayout, pad_y: int) -> int:
     )
     digest = hashlib.sha256(seed_text.encode("utf-8")).digest()
     return int.from_bytes(digest[:8], "big", signed=False)
+
+
+def result_confetti_frame(content: RenderableType, *, width: int, frame: int = 0) -> RenderableType:
+    """One in-memory frame for an existing UI owner; no Live, printing or sleep."""
+    console = Console(file=io.StringIO(), width=max(20, width), force_terminal=True,
+                      color_system='truecolor')
+    layout = _compute_layout(console, content, 'You win', None)
+    if layout is None:
+        return _build_panel(content, 'You win', max(4, width))
+    return _build_confetti_frame(layout, 1, random.Random(frame))
 
 
 def render_panel_with_confetti(

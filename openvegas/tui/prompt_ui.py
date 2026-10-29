@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from openvegas.integrations.game_result import amount as format_v
+
 import asyncio
 import inspect
 import json
@@ -176,6 +178,8 @@ class InlinePromptUI:
         console: Console | None = None,
         render_options: RenderOptions | None = None,
     ):
+        self._owns_client = client is None
+        self._runner = None
         self.client = client or OpenVegasClient()
         self.console = console or Console()
         self.state = WizardState()
@@ -215,15 +219,15 @@ class InlinePromptUI:
         allow_back: bool,
         display_labels: dict[str, str] | None = None,
     ) -> tuple[str | None, str | None]:
-        self.console.print(f"[bold blue]{label}[/bold blue]")
+        self.console.print(f"\n[bold]{label}[/bold]")
         for i, choice in enumerate(choices, start=1):
-            marker = "●" if choice == current else "○"
+            marker = ">" if choice == current else " "
             show = display_labels.get(choice, choice) if display_labels else choice
-            self.console.print(f"  [{i}] {marker} {show}")
-        footer = "Type number"
+            self.console.print(f"  {marker} {i}  {show}", style="bold cyan" if choice == current else "default", markup=False)
+        footer = "Number to select | Enter keeps selection"
         if allow_back:
-            footer += ", b=Back"
-        footer += ", q=Quit"
+            footer += " | b Back"
+        footer += " | q Quit"
         self.console.print(f"[dim]{footer}[/dim]")
         default_idx = str(choices.index(current) + 1) if current in choices else "1"
         allowed = [str(i) for i in range(1, len(choices) + 1)] + ["q"]
@@ -233,6 +237,7 @@ class InlinePromptUI:
             "Select option",
             choices=allowed,
             default=default_idx,
+            show_choices=False,
         )
         if picked == "q":
             return None, "quit"
@@ -313,7 +318,13 @@ class InlinePromptUI:
 
             if self.state.action == "Play":
                 amount_label = "Budget cap ($V)" if self.state.game == "horse" else "Stake ($V)"
-                value, signal = self._ask_input(amount_label, default=self.state.amount, allow_back=allow_back)
+                minimum = min_game_wager_v()
+                self.console.print(f"[dim]Minimum {format_v(minimum)}. Review before placing a wager; you can lose your stake.[/dim]")
+                try:
+                    default = str(max(Decimal(self.state.amount), minimum))
+                except InvalidOperation:
+                    default = str(minimum)
+                value, signal = self._ask_input(amount_label, default=default, allow_back=allow_back)
                 if signal:
                     return signal
                 self.state.amount = str(value)
@@ -323,10 +334,10 @@ class InlinePromptUI:
                     self.console.print("[red]Invalid stake. Use a number like 50 or 125.5.[/red]")
                     return "stay"
                 if stake < min_game_wager_v():
-                    self.console.print(f"[red]Stake must be at least {min_game_wager_v():.2f} $V. Try again.[/red]")
+                    self.console.print(f"[red]Stake must be at least {format_v(min_game_wager_v())}. Try again.[/red]")
                     return "stay"
                 if self.state.game == "horse":
-                    quote = asyncio.run(self._fetch_horse_quote())
+                    quote = self._run_async(self._fetch_horse_quote())
                     if quote is None:
                         return "stay"
                     self._print_horse_quote_board(quote)
@@ -883,7 +894,7 @@ class InlinePromptUI:
 
         if action == "Balance":
             data = await self.client.get_balance()
-            return f"Balance: {_format_v_amount(data.get('balance', '0'))} $V"
+            return f"Balance: {format_v(data.get('balance'))}"
 
         if action == "History":
             data = await self.client.get_billing_activity()
@@ -896,11 +907,11 @@ class InlinePromptUI:
                 status = str(e.get("status") or "")
                 if kind == "gameplay":
                     amount = str(e.get("amount_v_2dp") or e.get("amount_v") or "0.00")
-                    amount_label = f"{amount} $V"
+                    amount_label = f"{format_v(amount)}"
                 else:
                     usd = str(e.get("amount_usd") or "0.00")
                     amount_v = str(e.get("amount_v_2dp") or e.get("amount_v") or "0.00")
-                    amount_label = f"${usd} · +{amount_v} $V"
+                    amount_label = f"${usd} · {format_v(amount_v, signed=True)}"
                 lines.append(
                     f"{kind} {amount_label} {status} ref={str(e.get('reference_id', ''))[:12]}".strip()
                 )
@@ -1004,7 +1015,7 @@ class InlinePromptUI:
             balance_before = ""
             try:
                 bal = await self.client.get_balance()
-                balance_before = _format_v_amount(bal.get("balance", "0"))
+                balance_before = format_v(bal.get("balance", "0"))
             except Exception:
                 balance_before = ""
             if self.state.game in CARD_GAME_CHOICES:
@@ -1013,7 +1024,7 @@ class InlinePromptUI:
                     force_win_mode=force_win_mode,
                 )
                 if balance_before:
-                    return f"Balance before play: {balance_before} $V\n{out}"
+                    return f"Balance before play: {balance_before}\n{out}"
                 return out
             if self.state.game == "horse":
                 selected = self.state.horse_quote_selected or self._selected_horse_row()
@@ -1078,10 +1089,10 @@ class InlinePromptUI:
             if Decimal(str(data.get("net", "0"))) > 0:
                 self._last_is_win = True
 
-            prefix = f"Balance before play: {balance_before} $V\n" if balance_before else ""
+            prefix = f"Balance before play: {balance_before}\n" if balance_before else ""
             return prefix + (
                 f"{render_note}LIVE MODE\n"
-                f"Payout: {data.get('payout')} | Net: {data.get('net')}\n"
+                f"Payout: {format_v(data.get('payout'))} | Net: {format_v(data.get('net'), signed=True)}\n"
                 f"Game ID: {data.get('game_id')}\n"
                 f"Verify: {verify_hint_for_result(str(data.get('game_id', '')), False)}"
             )
@@ -1116,9 +1127,27 @@ class InlinePromptUI:
                 return "Session missing/expired. Run: openvegas login"
             return "Something went wrong. Please try again."
 
+    def _run_async(self, coroutine):
+        return self._runner.run(coroutine) if self._runner else asyncio.run(coroutine)
+
     def run(self) -> None:
-        self.console.print("[bold cyan]OpenVegas Inline UI[/bold cyan] [dim](Ctrl+C to exit)[/dim]")
-        if not asyncio.run(self._ensure_auth()):
+        # The HTTP pool must live and close on the same loop as every request.
+        with asyncio.Runner() as runner:
+            self._runner = runner
+            try:
+                self._run_loop()
+            except (KeyboardInterrupt, EOFError):
+                self.console.print("\n[dim]Back to your terminal.[/dim]")
+            finally:
+                try:
+                    if self._owns_client:
+                        runner.run(self.client.aclose())
+                finally:
+                    self._runner = None
+
+    def _run_loop(self) -> None:
+        self.console.print(Panel("[bold]OPENVEGAS[/bold]  /  Games & wallet\n[dim]Choose an action. Nothing is wagered until you confirm.\nq Quit  |  Ctrl+C Exit[/dim]", border_style="dim", expand=False))
+        if not self._run_async(self._ensure_auth()):
             return
         while True:
             try:
@@ -1139,7 +1168,7 @@ class InlinePromptUI:
                         break
                     step_index += 1
 
-                message = asyncio.run(self.run_once())
+                message = self._run_async(self.run_once())
                 render_result_panel(
                     self.console,
                     message,

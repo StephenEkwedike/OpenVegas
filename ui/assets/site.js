@@ -1,11 +1,10 @@
 const NAV_LINKS = [
-  ["/ui", "Home"],
   ["/ui/how-it-works", "How it works"],
+  ["/ui/how-to-play", "How to Play"],
+  ["/ui/arena", "Arena"],
   ["/ui/pricing", "Pricing"],
-  ["/ui/balance", "Balance"],
-  ["/ui/faq", "FAQ"],
-  ["/ui/how-to-play", "HOW TO PLAY"],
-  ["/ui/contact", "Contact"]
+  ["/ui/emotes", "Emotes"],
+  ["/ui/balance", "Balance"]
 ];
 
 const THEME_KEY = "ov_theme";
@@ -18,6 +17,38 @@ let storageListenerInstalled = false;
 let profileThemeSyncAttempted = false;
 let navAuthHydrationInFlight = false;
 let navAuthListenerBound = false;
+const tvNavRequests = new WeakMap();
+
+export async function renderTvNav(nav) {
+  const generation = (tvNavRequests.get(nav) || 0) + 1;
+  tvNavRequests.set(nav, generation);
+  for (const link of nav.querySelectorAll('a[href="/ui/tv"]')) link.remove();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 3000);
+  try {
+    const response = await fetch("/ui/features", {
+      cache: "no-store", credentials: "omit", signal: controller.signal,
+      headers: {Accept: "application/json"}
+    });
+    if (!response.ok) return;
+    const features = await response.json();
+    if (features?.ovtv !== true || tvNavRequests.get(nav) !== generation) return;
+    const link = document.createElement("a");
+    link.href = "/ui/tv";
+    link.textContent = "OVTV";
+    link.title = "OpenVegas TV - Agentic Entertainment";
+    link.setAttribute("aria-label", "OpenVegas TV");
+    const active = window.location.pathname === "/ui/tv";
+    link.classList.toggle("active", active);
+    if (active) link.setAttribute("aria-current", "page");
+    const emotes = nav.querySelector('a[href="/ui/emotes"]');
+    nav.insertBefore(link, emotes?.nextSibling || null);
+  } catch {
+    // Unavailable/older backends and invalid responses must not reveal the launch link.
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 function normalizeTheme(value) {
   return String(value || "").toLowerCase() === "dark" ? "dark" : "light";
@@ -255,8 +286,7 @@ function buildNavAuthButtons(nextPath) {
   wrap.dataset.ovNavAuth = "1";
   const next = encodeURIComponent(nextPath || "/ui");
   wrap.innerHTML = `
-    <a class="btn btn-primary" href="/ui/login?next=${next}">OpenVegas login</a>
-    <a class="btn" href="/ui/login?mode=signup&next=${next}">OpenVegas signup</a>
+    <a class="btn btn-primary" href="/ui/login?next=${next}">Sign in/up</a>
   `;
   return wrap;
 }
@@ -270,8 +300,7 @@ function shortenEmailForNav(email) {
 function renderSignedOutNav(authNode, nextPath) {
   const next = encodeURIComponent(nextPath || "/ui");
   authNode.innerHTML = `
-    <a class="btn btn-primary" href="/ui/login?next=${next}">OpenVegas login</a>
-    <a class="btn" href="/ui/login?mode=signup&next=${next}">OpenVegas signup</a>
+    <a class="btn btn-primary" href="/ui/login?next=${next}">Sign in/up</a>
   `;
 }
 
@@ -279,6 +308,7 @@ function renderSignedInNav(authNode, summary) {
   const email = shortenEmailForNav(summary?.email || "");
   authNode.innerHTML = `
     <span class="nav-auth-user text-mono-sm">Signed in as ${email}</span>
+    <a href="/ui/agents" class="btn">Agents</a>
     <button type="button" class="btn" data-ov-logout="1">Logout</button>
   `;
 }
@@ -378,21 +408,14 @@ export function renderTopNav(targetId = "siteNav") {
   const nav = document.getElementById(targetId);
   if (!nav) return;
   const current = window.location.pathname;
-  const existingAnchors = Array.from(nav.querySelectorAll("a[href]"));
-  if (existingAnchors.length) {
-    for (const anchor of existingAnchors) {
-      const href = anchor.getAttribute("href") || "";
-      const active = href === current;
-      anchor.classList.toggle("active", active);
-    }
-  } else {
-    nav.innerHTML = NAV_LINKS.map(([href, label]) => {
-      const active = current === href;
-      return `<a href="${href}" class="${active ? "active" : ""}">${label}</a>`;
-    }).join("");
-  }
+  nav.innerHTML = NAV_LINKS.map(([href, label]) => {
+    const active = current.replace(/\.html$/, "") === href;
+    const soon = href === "/ui/arena" ? ' <span class="nav-soon">Soon</span>' : '';
+    return `<a href="${href}" class="${active ? "active" : ""}"${active ? ' aria-current="page"' : ''}>${label}${soon}</a>`;
+  }).join("");
   renderNavAuthButtons(nav);
   renderThemeToggle();
+  void renderTvNav(nav);
 }
 
 export function renderFounderLinks(targetId = "founderLinks") {
@@ -429,6 +452,41 @@ export function byId(id) {
 
 if (typeof window !== "undefined") {
   initTheme();
+  const startJourney = () => {
+    void import('./journey-analytics.js?v=20261029').then(m => m.startJourneyAnalytics()).catch(() => {});
+  };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', startJourney, {once:true});
+  else startJourney();
+  let analyticsBootVersion = 0;
+  window.addEventListener("pagehide", () => { analyticsBootVersion += 1; });
+  const startPublicAnalytics = async () => {
+    const version = ++analyticsBootVersion;
+    let timer;
+    try {
+      const module = await Promise.race([
+        import("/ui/assets/analytics-session.js?v=20261020"),
+        new Promise((_, reject) => {
+          timer = window.setTimeout(() => reject(new Error("analytics_module_timeout")), 4000);
+        }),
+      ]);
+      if (version !== analyticsBootVersion) return;
+      // The coordinator starts independent, fail-closed controller/auth deadlines.
+      const session = module.startAnalyticsSession();
+      void session.ready.catch(() => session.dispose());
+    } catch {
+      // Optional analytics never blocks navigation or other site features.
+    } finally {
+      window.clearTimeout(timer);
+    }
+  };
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", startPublicAnalytics, {once: true});
+  } else {
+    void startPublicAnalytics();
+  }
+  window.addEventListener("pageshow", (event) => {
+    if (event.persisted) void startPublicAnalytics();
+  });
 }
 
 if (typeof window !== "undefined" && typeof window.openvegasEmitMetric !== "function") {

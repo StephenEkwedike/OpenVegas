@@ -2,6 +2,23 @@
 
 from __future__ import annotations
 
+from openvegas.integrations.game_result import amount as format_v
+
+import sys as _hook_sys
+
+# Packaged passive hooks must bypass auth, dotenv, network, and UI imports.
+if _hook_sys.argv[1:2] == ["--openvegas-emote-hook"]:
+    from openvegas.emotes.hook_dispatch import main as _hook_main
+
+    raise SystemExit(_hook_main(_hook_sys.argv[2:]))
+
+if _hook_sys.argv[1:3] == ["emote", "codex-transport"]:
+    from openvegas.emotes.codex_transport import main as _codex_transport_main
+
+    raise SystemExit(_codex_transport_main(_hook_sys.argv[3:]))
+
+del _hook_sys
+
 import asyncio
 import base64
 import difflib
@@ -19,6 +36,7 @@ import sys
 import time
 import uuid
 import webbrowser
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import Enum
@@ -37,12 +55,14 @@ try:  # Optional: richer in-line composer for chat input.
     from prompt_toolkit.history import InMemoryHistory
     from prompt_toolkit.key_binding import KeyBindings
     from prompt_toolkit.mouse_events import MouseEventType
+    from prompt_toolkit.patch_stdout import patch_stdout
     from prompt_toolkit.styles import Style as PromptStyle
 except Exception:  # pragma: no cover - exercised by runtime envs without prompt_toolkit
     PromptSession = None
     InMemoryHistory = None
     KeyBindings = None
     MouseEventType = None
+    patch_stdout = None
     PromptStyle = None
 
 from openvegas import __version__
@@ -56,7 +76,8 @@ from openvegas.agent.local_tools import (
 from openvegas.agent.runtime_contracts import ToolPolicyDecision, evaluate_tool_policy
 from openvegas.agent.runtime_contracts import result_submission_hash as compute_result_submission_hash
 from openvegas.agent.tool_cas import redact_hash_truncate
-from openvegas.capabilities import resolve_capability
+from openvegas.capabilities import REASONING_EFFORTS, resolve_capability
+from openvegas.tui.model_picker import ReviewedModelCapabilities, reviewed_capabilities  # noqa: E402 - Passive hook dispatch must run first.
 from openvegas.config import load_config, save_config
 from openvegas.events import mk_event
 from openvegas.ide.show_diff import (
@@ -250,6 +271,12 @@ def _load_openvegas_env_defaults_from_dotenv() -> None:
         Path.cwd() / ".env",
         Path(__file__).resolve().parents[1] / ".env",
     ]
+    explicit_env = os.getenv("OPENVEGAS_ENV_FILE")
+    if explicit_env is not None:
+        selected = Path(explicit_env).expanduser().resolve()
+        if not selected.is_file():
+            raise click.ClickException("Explicit OPENVEGAS_ENV_FILE does not exist")
+        candidates = [selected]
     loaded: set[str] = set()
     for env_path in candidates:
         try:
@@ -770,6 +797,17 @@ def _has_workspace_tooling_intent(text: str) -> bool:
         "ripgrep",
         "open file",
         "read file",
+        "parent directory",
+        "current directory",
+        "working directory",
+        "parent folder",
+        "current folder",
+        "run them yourself",
+        "run it yourself",
+        "run these commands",
+        "run this command",
+        "execute this command",
+        "execute code",
     )
     if any(token in msg for token in workspace_markers):
         return True
@@ -2086,11 +2124,25 @@ def _attachment_marker(name: str) -> str:
     return f"{{{str(name or '').strip()}}}"
 
 
+def _model_capability(
+    provider: str, model: str, feature: str,
+    remote_capabilities: ReviewedModelCapabilities | None = None,
+) -> bool:
+    if feature == "speech_to_text":
+        # Dictation is a separate managed service, not a property of the chat model.
+        speech_model = os.getenv("OPENVEGAS_CHAT_SPEECH_MODEL", "gpt-4o-mini-transcribe").strip()
+        return resolve_capability("openai", speech_model or "gpt-4o-mini-transcribe", feature)
+    if provider == "openrouter":
+        return bool(remote_capabilities and remote_capabilities.supports(provider, model, feature))
+    return resolve_capability(provider, model, feature)
+
+
 def _format_composer_attachment_status_row(
     attachments: list[PendingAttachment],
     *,
     provider: str | None = None,
     model: str | None = None,
+    remote_capabilities: ReviewedModelCapabilities | None = None,
     max_markers: int = 4,
 ) -> str | None:
     if not attachments:
@@ -2102,7 +2154,7 @@ def _format_composer_attachment_status_row(
     if image_count > 0:
         image_supported = True
         if provider and model:
-            image_supported = resolve_capability(provider, model, "image_input")
+            image_supported = _model_capability(provider, model, "image_input", remote_capabilities)
         if image_supported:
             parts.append(f"🖼 {image_count} image(s)")
         else:
@@ -2110,7 +2162,7 @@ def _format_composer_attachment_status_row(
     if audio_count > 0:
         stt_supported = True
         if provider and model:
-            stt_supported = resolve_capability(provider, model, "speech_to_text")
+            stt_supported = _model_capability(provider, model, "speech_to_text", remote_capabilities)
         if stt_supported:
             parts.append(f"◉ {audio_count} audio file(s)")
         else:
@@ -2131,11 +2183,13 @@ def _format_live_composer_status_row(
     attachments: list[PendingAttachment],
     provider: str | None,
     model: str | None,
+    remote_capabilities: ReviewedModelCapabilities | None = None,
 ) -> str | None:
     base = _format_composer_attachment_status_row(
         attachments,
         provider=provider,
         model=model,
+        remote_capabilities=remote_capabilities,
     )
     message = str(draft_text or "")
     if message.lstrip().startswith("/"):
@@ -2164,17 +2218,42 @@ def _preflight_filter_attachments_for_capabilities(
     *,
     provider: str,
     model: str,
+    remote_capabilities: ReviewedModelCapabilities | None = None,
 ) -> tuple[list[PendingAttachment], int, bool]:
+    """Return the entire queue and a blocking count, never a text-only subset."""
     if not pending_attachments:
         return list(pending_attachments), 0, False
-    image_supported = resolve_capability(provider, model, "image_input")
+    if provider == "openrouter":
+        # Mirrors the backend attachment decoder, not a promise of model support.
+        allowed_mimes = {
+            "text/plain", "text/markdown", "text/csv", "text/tab-separated-values",
+            "text/x-python", "text/javascript", "text/html", "text/css", "text/xml",
+            "application/json", "application/xml", "application/javascript",
+            "application/x-yaml", "text/yaml", "image/png", "image/jpeg",
+            "image/webp", "application/pdf",
+        }
+        if any(_attachment_is_audio(att) for att in pending_attachments):
+            console.print(
+                "This OpenVegas OpenRouter route does not accept attached audio. Remove it with /detach; "
+                "use /voice to record new speech for dictation, or attach a text transcript. "
+                "/voice does not transcribe the attached file.",
+                markup=False,
+            )
+        image_supported = _model_capability(provider, model, "image_input", remote_capabilities)
+        if not _model_capability(provider, model, "file_upload", remote_capabilities):
+            return list(pending_attachments), len(pending_attachments), True
+        unsupported = sum(
+            str(att.mime_type or _sniff_mime_type(att.path)).strip().lower() not in allowed_mimes
+            or (_attachment_is_image(att) and not image_supported)
+            for att in pending_attachments
+        )
+        return list(pending_attachments), unsupported, unsupported > 0
+    image_supported = _model_capability(provider, model, "image_input", remote_capabilities)
     if image_supported:
         return list(pending_attachments), 0, False
 
-    kept = [att for att in pending_attachments if not _attachment_is_image(att)]
-    dropped = len(pending_attachments) - len(kept)
-    blocked = dropped > 0 and not kept
-    return kept, max(0, dropped), blocked
+    unsupported = sum(_attachment_is_image(att) for att in pending_attachments)
+    return list(pending_attachments), unsupported, unsupported > 0
 
 
 def _inject_attachment_markers_into_message(message: str, attachments: list[PendingAttachment]) -> str:
@@ -2984,19 +3063,9 @@ def _has_patch_intent(msg: str) -> bool:
         r"\b(patch|edit|modify|update|change|add|remove|delete|fix|refactor|implement|rewrite|replace|insert|append|rename|move|extract|create|make|write|generate|overwrite)\b",
         text,
     )
-    read_only_verbs = re.search(
-        r"\b(show|explain|read|describe|list|display|summarize|review|search|inspect|view|open)\b",
-        text,
-    )
-    has_file_target = _has_explicit_file_target(msg)
-
     if edit_verbs:
         return True
-    # File-targeted prompts default to edit intent unless explicitly read-only.
-    if has_file_target:
-        if read_only_verbs and not edit_verbs:
-            return False
-        return True
+    # A file reference is not authorization to modify it.
     return False
 
 
@@ -3935,6 +4004,71 @@ def _deep_find_keyed_string(
     return None
 
 
+def _provider_call_identity(value: Any) -> dict[str, str]:
+    # Opaque correlation metadata only. Runtime ownership/approval is separate.
+    if (
+        isinstance(value, str)
+        and re.fullmatch(r"[A-Za-z0-9_.:-]{1,256}", value)
+        and not value.lower().startswith("sk-")
+    ):
+        return {"provider_call_id": value}
+    return {}
+
+
+def _local_tool_usage_prompt(provider: str, model: str) -> str:
+    if provider == "openrouter":
+        from openvegas.gateway.openrouter import local_tool_definitions
+
+        # Use the advertised native schema, not the generic dispatcher's aliases.
+        lines = []
+        for tool in local_tool_definitions(model):
+            function = tool["function"]
+            schema = function["parameters"]
+            required = set(schema["required"])
+            fields = ", ".join(
+                field if field in required else field + "?"
+                for field in schema["properties"]
+            )
+            lines.append(f"  - {function['name']}({{ {fields} }})\n")
+        return "".join(lines)
+    return (
+        "  - Read({ filepath })\n"
+        "  - Search({ pattern, path? })\n"
+        "  - FindAndReplace({ filepath, old_string, new_string, replace_all? })\n"
+        "  - InsertAtEnd({ filepath, content })\n"
+        "  - Write({ filepath, content, write_mode? })\n"
+        "  - Bash({ command })\n"
+        "  - List({ path? })\n"
+    )
+
+
+def _native_inference_identity(value: Any) -> dict[str, str]:
+    if not isinstance(value, str) or len(value) != 36:
+        return {}
+    try:
+        if str(uuid.UUID(value)) == value:
+            return {"native_inference_request_id": value}
+    except ValueError:
+        pass
+    return {}
+
+
+def _native_tool_proposal_metadata(
+    tool_req: dict[str, Any], *, enabled: bool = False,
+) -> dict[str, str]:
+    """Select receipt references, never approval, from a prepared native call."""
+    if not enabled:
+        return {}
+    metadata = _native_inference_identity(tool_req.get("native_inference_request_id"))
+    if not metadata:
+        return {}
+    provider = _provider_call_identity(tool_req.get("provider_call_id"))
+    if provider:
+        metadata["native_provider_call_id"] = provider["provider_call_id"]
+    # Keep a native half-pair visible for server rejection, not legacy downgrade.
+    return metadata
+
+
 def _collect_tool_call_candidates(tool_calls_payload: Any, fallback_text: str) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     if isinstance(tool_calls_payload, list):
@@ -3958,6 +4092,8 @@ def _collect_tool_call_candidates(tool_calls_payload: Any, fallback_text: str) -
                         "arguments": args,
                         "shell_mode": item.get("shell_mode", "read_only"),
                         "timeout_sec": item.get("timeout_sec", 30),
+                        **_provider_call_identity(item.get("provider_call_id")),
+                        **_native_inference_identity(item.get("native_inference_request_id")),
                     }
                 )
                 continue
@@ -3984,7 +4120,7 @@ def _collect_tool_call_candidates(tool_calls_payload: Any, fallback_text: str) -
             args_obj = parsed.get("arguments", {})
             if not isinstance(args_obj, dict):
                 args_obj = {}
-            if not args_obj:
+            if not args_obj and "arguments" not in parsed:
                 # Native function-call payloads may place arguments at the top level.
                 top_level = {k: v for k, v in parsed.items() if k not in {"tool_name", "shell_mode", "timeout_sec"}}
                 if isinstance(top_level, dict) and top_level:
@@ -3996,6 +4132,8 @@ def _collect_tool_call_candidates(tool_calls_payload: Any, fallback_text: str) -
                     "arguments": args_obj,
                     "shell_mode": parsed.get("shell_mode", "read_only"),
                     "timeout_sec": parsed.get("timeout_sec", 30),
+                    **_provider_call_identity(item.get("id")),
+                    **_native_inference_identity(item.get("native_inference_request_id")),
                 }
             )
 
@@ -4004,7 +4142,14 @@ def _collect_tool_call_candidates(tool_calls_payload: Any, fallback_text: str) -
 
     fallback_req, _ = extract_tool_instruction(fallback_text)
     if isinstance(fallback_req, dict):
-        candidates.append(fallback_req)
+        # Model-authored prose is not a source of native provider correlation IDs.
+        candidates.append({
+            key: value for key, value in fallback_req.items()
+            if key not in {
+                "native_inference_request_id", "native_provider_call_id",
+                "provider_call_id", "provider_request_id", "request_id",
+            }
+        })
     return candidates
 
 
@@ -4068,7 +4213,25 @@ def _preprocess_tool_request_for_runtime(
     workspace_root: str,
     tool_observations: list[dict[str, Any]],
     force_patch_intent: bool = False,
+    native_exact: bool = False,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    if native_exact:
+        from openvegas.agent.native_history import expected_runtime_call
+        from openvegas.contracts.errors import ContractError
+
+        def normalize(*, tool_name, arguments):
+            args = dict(arguments)
+            if tool_name == "fs_read" and "path" not in args and "filepath" in args:
+                args["path"] = args["filepath"]
+            if tool_name in {"fs_list", "fs_search"}:
+                args.setdefault("path", ".")
+            return args
+
+        try:
+            name, args, mode = expected_runtime_call(tool_req, normalize)
+            return {**tool_req, "tool_name": name, "arguments": args, "shell_mode": mode}, None
+        except ContractError as exc:
+            return None, {"status": "blocked", "error": exc.code.value, "detail": exc.detail}
     tool_name_raw = str(tool_req.get("tool_name", "")).strip()
     raw_token = tool_name_raw.lower().replace("-", "_")
     if tool_name_raw and _tool_abi_mode() == "strict":
@@ -4367,6 +4530,9 @@ def _preprocess_tool_request_for_runtime(
         "arguments": arguments,
         "shell_mode": shell_mode,
         "timeout_sec": timeout_sec,
+        **_provider_call_identity(tool_req.get("provider_call_id")),
+        # Preserve provenance through rewrites; the server checks the exact payload.
+        **_native_inference_identity(tool_req.get("native_inference_request_id")),
     }
     if write_meta is not None:
         prepared["_write_meta"] = write_meta
@@ -4377,11 +4543,17 @@ def _preprocess_tool_request_for_runtime(
 # Root group
 # ---------------------------------------------------------------------------
 
-@click.group()
+from openvegas.product_analytics import ActivityGroup, analytics as analytics_command
+
+
+@click.group(cls=ActivityGroup)
 @click.version_option(version=__version__)
 def cli():
     """OpenVegas -- Terminal Arcade for Developers"""
     pass
+
+
+cli.add_command(analytics_command)
 
 
 # ---------------------------------------------------------------------------
@@ -4390,9 +4562,19 @@ def cli():
 
 @cli.command()
 @click.option("--otp", is_flag=True, help="Use magic link (OTP) login")
-def login(otp: bool):
+@click.option("--browser", is_flag=True, help="Connect native host integrations through the existing website.")
+@click.option("--allow-file-credential", is_flag=True, help="Accept POSIX 0600 integration credential storage if keychain is unavailable.")
+def login(otp: bool, browser: bool = False, allow_file_credential: bool = False):
     """Log in to OpenVegas."""
     _load_openvegas_env_defaults_from_dotenv()
+    if browser:
+        from openvegas.integrations.commands import browser_login
+        from openvegas.integrations.credentials import IntegrationError
+        try:
+            run_async(browser_login(allow_file=allow_file_credential))
+        except IntegrationError as exc:
+            raise click.ClickException(str(exc)) from None
+        return
     from openvegas.auth import SupabaseAuth, AuthError
     from openvegas.config import (
         get_session,
@@ -4406,8 +4588,7 @@ def login(otp: bool):
     try:
         auth = SupabaseAuth()
     except AuthError as e:
-        console.print(f"[red]{e}[/red]")
-        return
+        raise click.ClickException(str(e)) from e
 
     if not otp:
         try:
@@ -4448,7 +4629,7 @@ def login(otp: bool):
                 f"[dim]user_id: {result.get('user_id', '')}[/dim]"
             )
         except Exception as e:
-            console.print(f"[red]Login failed: {e}[/red]")
+            raise click.ClickException("Login failed. Check your credentials and backend connectivity.") from e
 
 
 @cli.command("doctor-auth")
@@ -4495,7 +4676,18 @@ def whoami():
     session = get_session() or {}
     token = str(session.get("access_token", "") or "").strip()
     if not token:
-        console.print("[yellow]Not logged in.[/yellow]")
+        from openvegas.integrations.broker import Broker
+        from openvegas.integrations.credentials import IntegrationError
+        async def integration_identity():
+            broker = Broker()
+            try:
+                data = await broker.account()
+                console.print("user_id: " + data["user_id"] + " (browser integration login)")
+            except IntegrationError as exc:
+                console.print(str(exc), markup=False)
+            finally:
+                await broker.close()
+        run_async(integration_identity())
         return
 
     email = ""
@@ -4593,6 +4785,19 @@ def signup():
 @cli.command()
 def logout():
     """Log out of OpenVegas."""
+    from openvegas.integrations.broker import Broker
+    from openvegas.integrations.credentials import IntegrationError
+    async def revoke_integrations():
+        broker = Broker()
+        try:
+            if broker.credentials.load():
+                await broker.revoke()
+        finally:
+            await broker.close()
+    try:
+        run_async(revoke_integrations())
+    except IntegrationError as exc:
+        raise click.ClickException("Integration revocation failed; retry logout when the backend is reachable. " + str(exc)) from None
     from openvegas.auth import SupabaseAuth
     try:
         auth = SupabaseAuth()
@@ -4626,10 +4831,10 @@ def status():
             client = OpenVegasClient()
             data = await client.get_balance()
             console.print(Panel(
-                f"[bold]Balance:[/bold] {data.get('balance', '0.00')} $V\n"
+                f"[bold]Balance:[/bold] {format_v(data.get('balance', '0.00'))}\n"
                 f"[bold]Tier:[/bold] {data.get('tier', 'free')}\n"
-                f"[bold]Lifetime minted:[/bold] {data.get('lifetime_minted', '0.00')} $V\n"
-                f"[bold]Lifetime won:[/bold] {data.get('lifetime_won', '0.00')} $V",
+                f"[bold]Lifetime minted:[/bold] {format_v(data.get('lifetime_minted', '0.00'))}\n"
+                f"[bold]Lifetime won:[/bold] {format_v(data.get('lifetime_won', '0.00'))}",
                 title="OpenVegas Status",
                 border_style="cyan",
             ))
@@ -4650,10 +4855,25 @@ def balance():
     """Show your $V balance."""
     async def _balance():
         from openvegas.client import OpenVegasClient, APIError
+        from openvegas.config import get_session
+        session = get_session() or {}
+        if not (session.get("access_token") or session.get("refresh_token") or
+                session.get("refresh_storage") == "platform_credential_store"):
+            from openvegas.integrations.broker import Broker
+            from openvegas.integrations.credentials import IntegrationError
+            broker = Broker()
+            try:
+                data = await broker.account()
+                console.print(f"[bold]{format_v(data['balance'])}[/bold]")
+            except IntegrationError as exc:
+                raise click.ClickException(str(exc)) from None
+            finally:
+                await broker.close()
+            return
         try:
             client = OpenVegasClient()
             data = await client.get_balance()
-            console.print(f"[bold]{data.get('balance', '0.00')} $V[/bold]")
+            console.print(f"[bold]{format_v(data.get('balance', '0.00'))}[/bold]")
         except APIError as e:
             console.print(f"[red]{e.detail}[/red]")
 
@@ -4684,15 +4904,11 @@ def history():
                 kind = str(entry.get("type", "top_up"))
                 if kind == "gameplay":
                     vv = str(entry.get("amount_v_2dp") or entry.get("amount_v") or "0.00")
-                    try:
-                        vnum = Decimal(vv)
-                        amount = f"{'+' if vnum > 0 else ''}{vnum.quantize(Decimal('0.01'))} $V"
-                    except Exception:
-                        amount = f"{vv} $V"
+                    amount = format_v(vv, signed=True)
                 else:
                     usd = str(entry.get("amount_usd") or "0.00")
                     vv = str(entry.get("amount_v_2dp") or entry.get("amount_v") or "0.00")
-                    amount = f"${usd} · +{vv} $V"
+                    amount = f"${usd} · {format_v(vv, signed=True)}"
                 table.add_row(
                     str(entry.get("time", ""))[:19].replace("T", " "),
                     kind,
@@ -4736,9 +4952,9 @@ def deposit(amount: str, use_saved: bool):
                             preview = await client.preview_topup_checkout(amt)
                         console.print(
                             "[bold]Preview:[/bold] "
-                            f"gross={preview.get('v_credit_gross')} $V, "
-                            f"repay={preview.get('repay_v')} $V, "
-                            f"net={preview.get('net_credit_v')} $V"
+                            f"gross={format_v(preview.get('v_credit_gross'))}, "
+                            f"repay={format_v(preview.get('repay_v'))}, "
+                            f"net={format_v(preview.get('net_credit_v'))}"
                         )
                         with console.status("[bold cyan]Charging saved card via Stripe...[/bold cyan]", spinner="dots"):
                             charged = await client.charge_saved_topup(amt)
@@ -4749,9 +4965,9 @@ def deposit(amount: str, use_saved: bool):
             preview = await client.preview_topup_checkout(amt)
             console.print(
                 "[bold]Preview:[/bold] "
-                f"gross={preview.get('v_credit_gross')} $V, "
-                f"repay={preview.get('repay_v')} $V, "
-                f"net={preview.get('net_credit_v')} $V"
+                f"gross={format_v(preview.get('v_credit_gross'))}, "
+                f"repay={format_v(preview.get('repay_v'))}, "
+                f"net={format_v(preview.get('net_credit_v'))}"
             )
             console.print(
                 "[dim]Final repayment is computed at settlement and may differ "
@@ -4800,7 +5016,7 @@ def deposit_status(topup_id: str):
             data = await client.get_topup_status(topup_id)
             console.print(
                 f"[bold]Status:[/bold] {data.get('status')} | "
-                f"[bold]Credit:[/bold] {data.get('v_credit', '0')} $V"
+                f"[bold]Credit:[/bold] {format_v(data.get('v_credit', '0'))}"
             )
             if data.get("checkout_url"):
                 console.print(f"[dim]Checkout URL: {data['checkout_url']}[/dim]")
@@ -4848,7 +5064,7 @@ def mint(amount: float, provider: str, mode: str):
                 f"[bold]Mint Mode:[/bold] {mode.title()} Mint ({rates_display[mode]})\n"
                 f"[bold]Provider:[/bold] {provider} ({challenge.get('model', '')})\n"
                 f"[bold]Target burn ceiling:[/bold] up to ~${amount:.2f} on your account\n"
-                f"[bold]Max $V credit cap:[/bold] {challenge.get('max_credit_v', '')} $V\n"
+                f"[bold]Max $V credit cap:[/bold] {format_v(challenge.get('max_credit_v'))}\n"
                 f"[bold]Note:[/bold] actual burn depends on generated token usage and may be lower.\n"
                 f"[bold]Your task:[/bold] {challenge.get('task_prompt', '')[:80]}...",
                 title="OpenVegas Mint",
@@ -4871,7 +5087,7 @@ def mint(amount: float, provider: str, mode: str):
             )
 
             console.print(
-                f"[bold green]Minted {result['v_credited']} $V[/bold green] "
+                f"[bold green]Minted {format_v(result['v_credited'])}[/bold green] "
                 f"(actual burn ~${float(result['cost_usd']):.4f} on {provider})"
             )
 
@@ -4918,22 +5134,40 @@ def keys_list():
 # ---------------------------------------------------------------------------
 
 @cli.command()
-@click.argument("game", type=click.Choice(["horse", "skillshot"]))
-@click.option("--stake", type=float, required=True, help="Budget cap for horse ($V) or stake for other games")
+@click.argument("game", required=False, type=click.Choice(["horse", "skillshot", "roulette", "blackjack", "poker", "baccarat", "slots"]))
+@click.option("--stake", type=float, help="Budget cap for horse ($V) or stake for skillshot; tables ask interactively")
 @click.option("--horse", type=int, default=None, help="Horse number (horse racing only)")
 @click.option(
     "--type", "bet_type",
     type=click.Choice(["win", "place", "show"]), default="win",
 )
 @click.option("--render/--no-render", default=True, help="Render terminal animation/reveal when available")
+@click.option("--preview", is_flag=True, help="No-network roulette table preview; no wallet or wager")
+@click.option("--reduced-motion", is_flag=True, help="Keep the foreground game table still")
 def play(
     game: str,
     stake: float,
     horse: int,
     bet_type: str,
     render: bool,
+    preview: bool = False,
+    reduced_motion: bool = False,
 ):
-    """Play a game and wager $V."""
+    """Quick Play against the house, or see Arena (coming soon).
+
+    In Claude use /openvegas play; in Codex use $openvegas play.
+    Games stay in the same configured terminal. Esc exits.
+    Quitting never refunds a placed wager. Use --preview to look without spending.
+    """
+    if game not in {"horse", "skillshot"}:
+        if stake is not None:
+            raise click.UsageError("Table wagers are entered and confirmed interactively; omit --stake.")
+        from openvegas.tui.game_screen import play as terminal_game_screen
+        return terminal_game_screen.callback(game, preview, reduced_motion or not render)
+    if preview:
+        raise click.UsageError("The no-network preview currently shows roulette only.")
+    if stake is None:
+        raise click.UsageError("Horse and skillshot require --stake.")
     _load_openvegas_env_defaults_from_dotenv()
 
     async def _play():
@@ -4952,13 +5186,13 @@ def play(
             try:
                 bal = await client.get_balance()
                 bal_v = Decimal(str(bal.get("balance", "0")))
-                balance_before_text = f"[dim]Balance before play: {bal_v.quantize(Decimal('0.01'))} $V[/dim]"
+                balance_before_text = f"[dim]Balance before play: {format_v(bal_v)}[/dim]"
             except Exception:
                 balance_before_text = ""
 
             min_wager = float(min_game_wager_v())
             if stake < min_wager:
-                console.print(f"[red]Stake must be at least {min_wager:.2f} $V.[/red]")
+                console.print(f"[red]Stake must be at least {format_v(min_wager)}.[/red]")
                 return
 
             if game == "horse":
@@ -5027,11 +5261,11 @@ def play(
 
                 console.print(Panel(
                     f"[bold]Quote ID:[/bold] {quote.get('quote_id')}\n"
-                    f"[bold]Budget:[/bold] {stake:.6f} $V\n"
+                    f"[bold]Budget:[/bold] {format_v(stake)}\n"
                     f"[bold]Horse:[/bold] #{selected.get('number')} {selected.get('name')}\n"
                     f"[bold]Odds:[/bold] {selected.get('odds')}\n"
-                    f"[bold]Debit:[/bold] {selected.get('debit_v')} $V\n"
-                    f"[bold]Payout If Hit:[/bold] {selected.get('payout_if_hit_v')} $V\n"
+                    f"[bold]Debit:[/bold] {format_v(selected.get('debit_v'))}\n"
+                    f"[bold]Payout If Hit:[/bold] {format_v(selected.get('payout_if_hit_v'))}\n"
                     f"[bold]Expires:[/bold] {quote.get('expires_at')}",
                     title="Horse Quote Review",
                     border_style="cyan",
@@ -5082,9 +5316,9 @@ def play(
 
             result_lines: list[str] = []
             if net > 0:
-                result_lines.append(f"[bold green]Won {payout} $V! (+{net} net)[/bold green]")
+                result_lines.append(f"[bold green]Won {format_v(payout)}! ({format_v(net, signed=True)} net)[/bold green]")
             else:
-                result_lines.append(f"[red]Lost {bet_amount} $V.[/red]")
+                result_lines.append(f"[red]Lost {format_v(bet_amount)}.[/red]")
 
             if result.get("provably_fair"):
                 result_lines.append(f"[dim]Verify: {verify_hint_for_result(game_id, False)}[/dim]")
@@ -5119,9 +5353,11 @@ def play(
 
 @cli.command()
 @click.argument("prompt")
-@click.option("--provider", default=None, help="Provider (openai/anthropic/gemini)")
+@click.option("--provider", default=None, help="Managed provider, including openrouter; see models.")
 @click.option("--model", default=None, help="Model ID")
-def ask(prompt: str, provider: str | None, model: str | None):
+@click.option("--reasoning-effort", type=click.Choice(REASONING_EFFORTS), default=None,
+              help="Reviewed OpenRouter effort only; omitted uses the provider default.")
+def ask(prompt: str, provider: str | None, model: str | None, reasoning_effort: str | None = None):
     """Use $V for AI inference."""
     from openvegas.config import get_default_provider, get_default_model
 
@@ -5131,15 +5367,23 @@ def ask(prompt: str, provider: str | None, model: str | None):
         provider = get_default_provider()
     if model is None:
         model = get_default_model(provider)
+    if not model:
+        raise click.ClickException(
+            f"Choose a model from `openvegas models --provider {provider}`, "
+            "then pass its exact ID with --model."
+        )
 
     async def _ask():
         from openvegas.client import OpenVegasClient, APIError
         try:
             client = OpenVegasClient()
-            result = await client.ask(prompt, provider, model)
+            result = await client.ask(
+                prompt, provider, model,
+                **({"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {}),
+            )
             console.print(result.get("text", ""))
             console.print(
-                f"\n[dim]Cost: {result.get('v_cost', '?')} $V | "
+                f"\n[dim]Cost: {format_v(result.get('v_cost', '?'))} | "
                 f"Model: {provider}/{model}[/dim]"
             )
         except APIError as e:
@@ -5189,12 +5433,12 @@ def _build_cli_sprite_renderer(*, dealer_sprite: bool, workspace_root: str):
 
 
 @cli.command()
-@click.option("--provider", default=None, help="Provider (openai/anthropic/gemini)")
+@click.option("--provider", default=None, help="Managed provider, including openrouter; see models.")
 @click.option("--model", default=None, help="Model ID")
 @click.option(
     "--dealer-sprite/--no-dealer-sprite",
     default=False,
-    help="Enable truecolor dealer sprite rendering (defaults to emoji/unicode style).",
+    help="Request experimental same-window developer/native-review mode, not certification; OPENVEGAS_CHAT_COMPOSITOR overrides this flag. Animations require verified equipment.",
 )
 def chat(provider: str | None, model: str | None, dealer_sprite: bool):
     """OpenVegas conversational shell with slash commands and /ui handoff."""
@@ -5205,11 +5449,41 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
 
     current_provider = provider or get_default_provider()
     current_model = model or get_default_model(current_provider)
+    if not current_model:
+        raise click.ClickException(
+            f"Choose a model from `openvegas models --provider {current_provider}`, "
+            "then pass its exact ID with --model."
+        )
     current_thread_id: str | None = None
+    current_reasoning_effort: str | None = None
+    current_reasoning_efforts: tuple[str, ...] = ()
+    current_model_capabilities: ReviewedModelCapabilities | None = None
     current_run_id: str | None = None
     current_run_version: int = 0
     current_signature: str = "sha256:"
     runtime_session_id: str = str(uuid.uuid4())
+    from openvegas.agent.native_scope_client import NativeGenerationSession
+
+    native_generation_session = NativeGenerationSession()
+    pending_native_handoff = None
+    pending_handoff_capabilities = None
+    from openvegas.emotes.bridge import ChatEmoteBridge
+    from openvegas.emotes.compositor import TurnCancelled, create_owned_chat
+    from openvegas.tui.voice_refresh import voice_refresh_during_prompt
+    from openvegas.agent import local_tools as model_switch_local_tools
+    from openvegas.tui.model_picker import (
+        ModelSelectionError, format_options, model_options, plan_switch, validate_selection,
+    )
+
+    owned_compositor = None
+
+    def _publish_chat_emote(event):
+        if owned_compositor is not None:
+            return owned_compositor.publish(event)
+        from openvegas.emotes.spool import publish_event
+        return publish_event(event)
+
+    emote_bridge = ChatEmoteBridge(runtime_session_id, publish=_publish_chat_emote)
     workspace_root = str(Path.cwd().resolve())
     workspace_git_root = workspace_root
     workspace_fp = workspace_fingerprint(workspace_root, workspace_git_root)
@@ -5217,7 +5491,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
     approval_mode = "ask"
     conversation_mode = "persistent"
     context_warning_emitted = False
-    web_search_requested = True
+    web_search_requested = str(os.getenv("OPENVEGAS_CHAT_WEB_SEARCH_DEFAULT", "1")).lower() in {"1", "true", "yes", "on"}
     last_web_search_effective = False
     last_web_search_used = False
     last_web_search_retry_without_tool = False
@@ -5277,6 +5551,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
     prompt_toolkit_unavailable_warned = False
     chat_prompt_session: Any | None = None
     chat_prompt_bindings: Any | None = None
+    pending_toolbar_draft: Any | None = None
     def _env_flag(name: str, default: str = "0") -> bool:
         return str(os.getenv(name, default)).strip().lower() in {"1", "true", "yes", "on"}
 
@@ -5286,7 +5561,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
     show_web_diagnostics = show_user_diagnostics and _env_flag("OPENVEGAS_CHAT_SHOW_WEB_DIAGNOSTICS", "0")
     show_stream_status = show_user_diagnostics and _env_flag("OPENVEGAS_CHAT_SHOW_STREAM_STATUS", "0")
     show_user_echo = _env_flag("OPENVEGAS_CHAT_SHOW_USER_ECHO", "1")
-    allow_model_switch = _env_flag("OPENVEGAS_CHAT_ALLOW_MODEL_SWITCH", "0")
+    allow_model_switch = _env_flag("OPENVEGAS_CHAT_ALLOW_MODEL_SWITCH", "1")
     preferred_openai_models = [
         "gpt-5.4",
         "gpt-5.1",
@@ -5319,7 +5594,12 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
     _ = cfg.get("approval_ui", "menu")  # retained for backward compatibility only
     session_approval = SessionApprovalState()
     dealer_enabled = str(os.getenv("OPENVEGAS_CLI_DEALER_ENABLED", "1")).strip().lower() not in {"0", "false", "no", "off"}
-    cli_sprite_renderer = _build_cli_sprite_renderer(dealer_sprite=bool(dealer_sprite), workspace_root=workspace_root)
+    # The old printer appended a complete sprite to scrollback on every status.
+    # Explicit experimental mode uses the owned compositor, never a second writer.
+    # Auto keeps same-window emotes off until a native surface is certified.
+    cli_sprite_renderer = None
+    if dealer_sprite:
+        console.print("[dim]Experimental same-window mode requested, not native-certified; OPENVEGAS_CHAT_COMPOSITOR may override it. Use /emote for actual status and manual companion setup.[/dim]")
     dealer_panel = DealerPanel(
         console=console,
         enabled=dealer_enabled,
@@ -5327,19 +5607,81 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
         sprite_renderer=cli_sprite_renderer,
     )
 
+    def _reasoning_status() -> str:
+        options = ", ".join(current_reasoning_efforts) or "none loaded; /reasoning refreshes"
+        return (
+            f"Reasoning effort: {current_reasoning_effort or 'default (provider-controlled)'}. "
+            f"Reviewed options: {options}. Hidden reasoning is never displayed."
+        )
+
+    def _chat_capability(feature: str) -> bool:
+        return _model_capability(current_provider, current_model, feature, current_model_capabilities)
+
+    def _use_model_capabilities(target: dict) -> None:
+        nonlocal current_model_capabilities, current_reasoning_efforts
+        current_model_capabilities = (
+            reviewed_capabilities(target, current_provider, current_model)
+            if current_provider == "openrouter" else None
+        )
+        current_reasoning_efforts = (
+            current_model_capabilities.reasoning_efforts if current_model_capabilities else ()
+        )
+
+    async def _refresh_model_capabilities() -> None:
+        nonlocal current_model_capabilities, current_reasoning_efforts
+        if current_provider != "openrouter":
+            return
+        # A failed refresh must not leave an older review authorizing a send.
+        current_model_capabilities, current_reasoning_efforts = None, ()
+        target = await validate_selection(client, current_provider, current_model)
+        _use_model_capabilities(target)
+
+    async def _validate_openrouter_request(
+        *, enable_tools: bool = False, enable_web_search: bool = False,
+        attachments: list[str] | None = None, reasoning_effort: str | None = None,
+    ) -> None:
+        if current_provider != "openrouter":
+            return
+        try:
+            await _refresh_model_capabilities()
+            if reasoning_effort is not None and reasoning_effort not in current_reasoning_efforts:
+                raise ModelSelectionError("Selected reasoning effort is no longer reviewed; use /reasoning to choose again.")
+            for feature, requested in (
+                ("tools", enable_tools), ("web_search", enable_web_search), ("file_upload", bool(attachments)),
+                ("image_input", bool(attachments) and any(_attachment_is_image(att) for att in pending_attachments)),
+            ):
+                if requested and not _chat_capability(feature):
+                    raise ModelSelectionError(f"Selected model does not currently support {feature}; request not sent.")
+        except ModelSelectionError as exc:
+            raise APIError(400, str(exc)) from exc
+
+    def _reasoning_for_model(target: dict) -> None:
+        nonlocal current_reasoning_effort
+        _use_model_capabilities(target)
+        if current_reasoning_effort is not None and current_reasoning_effort not in current_reasoning_efforts:
+            console.print("Previous reasoning effort is unavailable on this model; reset to provider default.")
+            current_reasoning_effort = None
+        console.print(_reasoning_status(), markup=False)
+
     def _show_help() -> None:
         console.print("Chat Commands:")
         console.print("/help - show commands")
+        console.print("/reasoning [effort|default] - show/select reviewed OpenRouter effort; default omits it")
+        console.print(_reasoning_status(), markup=False)
         if allow_model_switch:
-            console.print("/provider <openai|anthropic|gemini> [model] - switch provider")
+            console.print("/models [search] - list available models")
+            console.print("/provider <provider> [model] - list provider models or switch")
             console.print("/model <model_id> - switch model")
+            if _env_flag("OPENVEGAS_CHAT_NATIVE_TASK_HANDOFF", "0"):
+                console.print("/handoff retry|cancel - resolve a pending native model switch")
+            console.print("/continuity <on|off> - opt-in complete text-only history; no tools/attachments")
         console.print("/plan [on|off] - toggle plan mode (read-only intent)")
         console.print("/approve <ask|allow|exclude> - mutating tool approval mode")
         console.print("/style - deprecated (minimal style is always on)")
         console.print("/verbose-tools <on|off> - detailed tool event output")
         console.print("/approvals - show session approval overrides")
         console.print("/status - show current chat context")
-        console.print("/web - show effective web search status (always on)")
+        console.print("/web - show requested and reviewed web search status")
         console.print("/voice - start/stop voice capture mode")
         console.print("/mcp <list|health|call> - MCP server list/health/tool call")
         console.print("/attach <path> - attach a file for the next turn")
@@ -5404,7 +5746,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
         return f"{voice_chip}  {_icon('actions')} Actions"
 
     def _render_action_hint() -> None:
-        console.print(f"[dim]{_prompt_action_row()}[/dim]")
+        if not use_prompt_toolkit_chat:
+            console.print(f"[dim]{_prompt_action_row()}[/dim]")
 
     def _show_legend() -> None:
         if unicode_ok:
@@ -5774,7 +6117,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
 
         stt_effective = bool(
             voice_transcribe_requested
-            and resolve_capability(current_provider, current_model, "speech_to_text")
+            and _chat_capability("speech_to_text")
         )
         if not stt_effective:
             _render_capability_status("speech_to_text", "audio attached but speech-to-text unavailable")
@@ -5790,7 +6133,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 payload = await asyncio.wait_for(
                     client.speech_transcribe(
                         file_id=str(att.remote_file_id or ""),
-                        provider=current_provider,
+                        provider="openai",
                         model=voice_transcribe_model,
                         language=voice_transcribe_language,
                     ),
@@ -5847,6 +6190,12 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
 
     def _insert_voice_transcript_text(transcript: str) -> tuple[str, int]:
         nonlocal pending_voice_prefill, pending_voice_meta, prompt_input_active
+        if owned_compositor is not None:
+            if owned_compositor.insert_voice(transcript):
+                chars = len(str(transcript).strip())
+                emit_metric("voice_capture_phase_total", {"phase": "transcript_inserted_live"})
+                return "live", chars
+            return "none", 0
         pending_voice_prefill, mode, chars = _insert_or_queue_voice_transcript(
             transcript=transcript,
             chat_prompt_session=chat_prompt_session,
@@ -5951,7 +6300,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 stt = await asyncio.wait_for(
                     client.speech_transcribe(
                         file_id=remote_file_id,
-                        provider=current_provider,
+                        provider="openai",
                         model=voice_transcribe_model,
                         language=voice_transcribe_language,
                         prompt="Transcribe exactly; keep punctuation concise.",
@@ -5989,7 +6338,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     content_base64=base64.b64encode(file_bytes).decode("ascii"),
                     filename=file_path.name,
                     mime_type=mime_type,
-                    provider=current_provider,
+                    provider="openai",
                     model=voice_transcribe_model,
                     language=voice_transcribe_language,
                     prompt="Transcribe exactly; keep punctuation concise.",
@@ -6017,7 +6366,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             raise
 
     def _erase_prompt_line_if_possible() -> None:
-        if not use_prompt_toolkit_chat:
+        if not use_prompt_toolkit_chat or owned_compositor is not None:
             return
         try:
             if not bool(getattr(sys.stdout, "isatty", lambda: False)()):
@@ -6027,6 +6376,15 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             stream.flush()
         except Exception:
             return
+
+    async def _chat_modal(callback):
+        if owned_compositor is not None:
+            return await owned_compositor.run_external(callback)
+        return callback()
+
+    def _chat_drain_stdin() -> None:
+        if owned_compositor is None:
+            _drain_stdin_buffer(window_ms=0)
 
     def _render_usage_summary(payload: dict[str, Any]) -> None:
         if not show_token_usage:
@@ -6106,13 +6464,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             f"Plan mode: {'on' if plan_mode else 'off'}\n"
             f"Approval mode: {approval_mode}\n"
             "Available tools:\n"
-            "  - Read({ filepath })\n"
-            "  - Search({ pattern, path? })\n"
-            "  - FindAndReplace({ filepath, old_string, new_string, replace_all? })\n"
-            "  - InsertAtEnd({ filepath, content })\n"
-            "  - Write({ filepath, content, write_mode? })\n"
-            "  - Bash({ command })\n"
-            "  - List({ path? })\n"
+            f"{_local_tool_usage_prompt(current_provider, current_model)}"
             "Rules:\n"
             "1) If a tool is needed, emit a tool call via tool-calling (preferred).\n"
             "   Fallback only if tool-calling is unavailable: output ONE JSON tool_call object.\n"
@@ -6143,6 +6495,93 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
         nonlocal last_assistant_text_for_turn
 
         from openvegas.client import APIError
+        from openvegas.contracts.errors import ContractError
+
+        if pending_native_handoff is not None and pending_native_handoff.blocks_other_actions:
+            raise APIError(409, "Resolve the pending model switch with /handoff retry or /handoff cancel first.")
+        emote_turn = emote_bridge.current_turn
+
+        def _emote_response_is_final(response: dict[str, Any]) -> bool:
+            # Missing/null status is legacy compatibility, not permission to
+            # celebrate an explicit nonfinal status or pending tool calls.
+            status = response.get("completion_status")
+            calls = response.get("tool_calls")
+            return (
+                (status is None or (type(status) is str and status == "complete"))
+                and (calls is None or (type(calls) is list and not calls))
+            )
+
+        native_history_mode = bool(
+            current_provider == "openrouter"
+            and _env_flag("OPENVEGAS_CHAT_NATIVE_GENERATION_SCOPE", "0")
+            and _env_flag("OPENVEGAS_CHAT_NATIVE_GENERATION_HISTORY", "0")
+        )
+        if (native_generation_session.history_active or native_generation_session.prepared_handoff) and (
+            not native_history_mode or isinstance(getattr(client, "_canonical_chat", None), dict)
+        ):
+            raise APIError(409, "Native history cannot switch to a different provider or text-only history path. Start a fresh session explicitly.")
+        if native_history_mode and native_generation_session.history_active:
+            if native_generation_session.finalized:
+                if not _env_flag("OPENVEGAS_CHAT_NATIVE_TASK_HANDOFF", "0") or not allow_model_switch:
+                    raise APIError(409, "Previous task retained: native follow-up handoff is disabled. "
+                                   "Use /continuity off only to explicitly start fresh.")
+                try:
+                    target = await validate_selection(client, current_provider, current_model)
+                except (APIError, ModelSelectionError):
+                    raise APIError(409, "Previous task retained: follow-up model validation failed. No request was sent.") from None
+                if not all(_env_flag(name, "0") for name in (
+                    "OPENVEGAS_CHAT_NATIVE_TASK_HANDOFF", "OPENVEGAS_CHAT_NATIVE_GENERATION_SCOPE",
+                    "OPENVEGAS_CHAT_NATIVE_GENERATION_HISTORY",
+                )):
+                    raise APIError(409, "Previous task retained: native follow-up was disabled during validation.")
+                # A new user turn needs its own owned task, not a changed input
+                # inside the old native generation or an unbound history reset.
+                capabilities = reviewed_capabilities(target, current_provider, current_model)
+                followup_web_search = bool(
+                    web_search_requested
+                    and _should_enable_web_search_for_turn(
+                        user_message, has_uploaded_attachments=bool(attachment_file_ids_for_turn),
+                    )
+                    and capabilities.supports(current_provider, current_model, "web_search")
+                )
+                if not await _switch_native_model(
+                    current_provider, current_model, target, followup_web_search=followup_web_search,
+                ):
+                    raise APIError(409, "Previous task retained: follow-up handoff was not confirmed. No request was sent.")
+            else:
+                if not await _chat_modal(lambda: Confirm.ask(
+                    "The previous native task is unfinished or unconfirmed. Start a separate task without resuming or retrying it?",
+                    default=False,
+                )):
+                    raise APIError(409, "Previous task retained. No new request or automatic retry was sent.")
+                await _reset_native_task()
+                console.print("Starting a separate native task; previous tool state is not transferred.", markup=False)
+
+        canonical_chat = getattr(client, "_canonical_chat", None)
+        if isinstance(canonical_chat, dict):
+            await _validate_openrouter_request(reasoning_effort=current_reasoning_effort)
+            if pending_attachments:
+                raise APIError(400, "Attachment continuity is unsupported; use /continuity off to start fresh.")
+            if not canonical_chat.get("revision"):
+                raise APIError(409, "Continuity is blocked; start fresh with /continuity off.")
+            if _has_workspace_tooling_intent(user_message):
+                raise APIError(400, "Continuity mode is text-only; use /continuity off for local tools.")
+            result = await client._request("POST", "/models/conversations/ask", json={
+                "provider": current_provider, "model": current_model,
+                "thread_id": current_thread_id, "expected_revision": canonical_chat["revision"],
+                "prompt": user_message, "idempotency_key": str(uuid.uuid4()),
+                **({"reasoning_effort": current_reasoning_effort} if current_provider == "openrouter" and current_reasoning_effort is not None else {}),
+            })
+            canonical_chat["revision"] = result.get("revision")
+            final_text = str(result.get("text") or "")
+            for warning in result.get("warnings", []):
+                console.print(warning, markup=False)
+            render_assistant(console, final_text)
+            last_assistant_text_for_turn = final_text
+            _render_usage_summary(result)
+            emote_bridge.finish(success=bool(final_text) and not result.get("continuity_blocked")
+                                and _emote_response_is_final(result), turn=emote_turn)
+            return bool(final_text)
 
         def _maybe_warn_context_disabled(result_payload: dict[str, Any]) -> None:
             nonlocal context_warning_emitted
@@ -6175,6 +6614,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             )
             final_res = await _ask_with_optional_stream(
                 final_prompt,
+                reasoning_effort=current_reasoning_effort,
                 idempotency_key=f"chat-finalize-{uuid.uuid4()}",
                 enable_tools=False,
                 enable_web_search=False,
@@ -6193,41 +6633,97 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             enable_tools: bool,
             enable_web_search: bool,
             attachments: list[str],
+            reasoning_effort: str | None = None,
         ) -> dict[str, Any]:
+            bound_session = native_generation_session if (
+                native_generation_session.history_active or native_generation_session.prepared_handoff) else None
+
+            def require_native_mode():
+                if bound_session is not None and (
+                        native_generation_session is not bound_session or current_provider != "openrouter"
+                        or not _env_flag("OPENVEGAS_CHAT_NATIVE_GENERATION_SCOPE", "0")
+                        or not _env_flag("OPENVEGAS_CHAT_NATIVE_GENERATION_HISTORY", "0")
+                        or isinstance(getattr(client, "_canonical_chat", None), dict)):
+                    raise APIError(409, "Retained native history cannot fall back to an unowned request. No request was sent.")
+
+            require_native_mode()
+            await _validate_openrouter_request(
+                enable_tools=enable_tools, enable_web_search=enable_web_search,
+                attachments=attachments, reasoning_effort=reasoning_effort,
+            )
+            require_native_mode()
+            request_context = {
+                "thread_id": current_thread_id,
+                "conversation_mode": conversation_mode,
+                "persist_context": conversation_mode == "persistent",
+            }
+            if current_provider == "openrouter" and _env_flag("OPENVEGAS_CHAT_NATIVE_GENERATION_SCOPE", "0"):
+                if not enable_tools:
+                    raise APIError(409, "Native continuation is not available in this verification mode; no request was sent.")
+                if not await _ensure_runtime_run(wait=True):
+                    raise APIError(409, "Native generation requires a registered workspace; no request was sent.")
+                require_native_mode()
+                try:
+                    native_context = native_generation_session.prepare(key=idempotency_key, scope={
+                        "run_id": current_run_id, "runtime_session_id": runtime_session_id,
+                        "expected_run_version": current_run_version,
+                        "expected_valid_actions_signature": current_signature,
+                    }, options={"provider": current_provider, "model": current_model,
+                                "enable_tools": enable_tools, "enable_web_search": enable_web_search,
+                                "attachments": list(attachments), "reasoning_effort": reasoning_effort,
+                                **({"max_tokens": native_generation_session.max_tokens}
+                                   if native_generation_session.max_tokens is not None else {})},
+                        history=_env_flag("OPENVEGAS_CHAT_NATIVE_GENERATION_HISTORY", "0"),
+                        user_text=user_message if native_history_mode else None)
+                except ValueError as exc:
+                    raise APIError(409, str(exc)) from exc
+                request_context = {**native_context, "thread_id": None,
+                                   "conversation_mode": "ephemeral", "persist_context": False}
+
+            def checked_result(result):
+                if "native_scope" in request_context:
+                    try:
+                        native_generation_session.validate_result(result)
+                    except ValueError as exc:
+                        raise APIError(502, str(exc)) from None
+                return result
+
+            require_native_mode()
+            # Finalizers can dispatch directly after a denied legacy tool,
+            # without returning through the next tool-loop iteration.
+            emote_bridge.resume(turn=emote_turn)
             stream_enabled = bool(
                 _env_flag("OPENVEGAS_CHAT_STREAM_EVENTS", "1")
-                and resolve_capability(current_provider, current_model, "stream_events")
+                and _chat_capability("stream_events")
             )
             ask_stream_fn = getattr(client, "ask_stream", None)
             if not stream_enabled or not callable(ask_stream_fn):
-                return await client.ask(
+                return checked_result(await client.ask(
                     prompt,
                     current_provider,
                     current_model,
                     idempotency_key=idempotency_key,
-                    thread_id=current_thread_id,
-                    conversation_mode=conversation_mode,
-                    persist_context=(conversation_mode == "persistent"),
+                    **request_context,
                     enable_tools=enable_tools,
                     enable_web_search=enable_web_search,
                     attachments=attachments,
-                )
+                    **({"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {}),
+                ))
 
             seen_event_keys: set[tuple[str, str, str, int]] = set()
             chunks: list[str] = []
-            completed_payload: dict[str, Any] = {}
+            completed_payload: dict[str, Any] | None = None
             try:
                 async for raw_event in ask_stream_fn(
                     prompt,
                     current_provider,
                     current_model,
                     idempotency_key=idempotency_key,
-                    thread_id=current_thread_id,
-                    conversation_mode=conversation_mode,
-                    persist_context=(conversation_mode == "persistent"),
+                    **request_context,
                     enable_tools=enable_tools,
                     enable_web_search=enable_web_search,
                     attachments=attachments,
+                    **({"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {}),
                 ):
                     if not isinstance(raw_event, dict):
                         continue
@@ -6294,29 +6790,45 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         if delta:
                             chunks.append(delta)
                         continue
-                    if event_name in {"response.error", "error"}:
+                    if event_name in {"response.error", "error"} or (
+                        event_name in {"response.completed", "stream_end"}
+                        and payload_dict.get("status") == "error"
+                    ):
                         code = str(payload_dict.get("error") or "stream_error")
                         detail = str(payload_dict.get("detail") or code)
                         raise APIError(400, f"{code}: {detail}", data=payload_dict)
-                    if event_name in {"response.completed", "stream_end"}:
+                    # stream_end is only a marker; response.completed carries the final result.
+                    if event_name == "response.completed":
+                        if payload_dict.get("status") != "ok":
+                            raise APIError(
+                                502,
+                                "invalid_stream_completion: response.completed must have status 'ok'",
+                                data={"error": "invalid_stream_completion"},
+                            )
                         completed_payload = dict(payload_dict)
                         continue
             except APIError as e:
                 # Backward compatibility: if stream endpoint is unavailable, retry once with non-stream ask.
-                if e.status in {404, 405, 501}:
-                    return await client.ask(
+                if e.status in {404, 405, 501} and "native_handoff" not in request_context:
+                    return checked_result(await client.ask(
                         prompt,
                         current_provider,
                         current_model,
                         idempotency_key=idempotency_key,
-                        thread_id=current_thread_id,
-                        conversation_mode=conversation_mode,
-                        persist_context=(conversation_mode == "persistent"),
+                        **request_context,
                         enable_tools=enable_tools,
                         enable_web_search=enable_web_search,
                         attachments=attachments,
-                    )
+                        **({"reasoning_effort": reasoning_effort} if reasoning_effort is not None else {}),
+                    ))
                 raise
+
+            if completed_payload is None:
+                raise APIError(
+                    502,
+                    "incomplete_stream: stream ended before response.completed; result is unconfirmed",
+                    data={"error": "incomplete_stream"},
+                )
 
             merged_text = "".join(chunks).strip()
             if not merged_text:
@@ -6327,7 +6839,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             if warning_value and warning_value not in warnings_list:
                 warnings_list.append(warning_value)
 
-            return {
+            return checked_result({
                 "text": merged_text,
                 "v_cost": str(completed_payload.get("v_cost") or "0"),
                 "thread_id": completed_payload.get("thread_id"),
@@ -6347,7 +6859,9 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 "web_search_sources": list(completed_payload.get("web_search_sources") or []),
                 "web_search_source_ranking": list(completed_payload.get("web_search_source_ranking") or []),
                 "tool_calls": list(completed_payload.get("tool_calls") or []),
-            }
+                **{name: completed_payload[name] for name in
+                   ("native_generation", "completion_status", "provider_request_id") if name in completed_payload},
+            })
 
         async def _ask_direct_one_shot(
             prompt: str,
@@ -6358,6 +6872,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
         ) -> dict[str, Any]:
             return await _ask_with_optional_stream(
                 prompt,
+                reasoning_effort=current_reasoning_effort,
                 idempotency_key=idempotency_key,
                 enable_tools=False,
                 enable_web_search=enable_web_search,
@@ -6375,10 +6890,12 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 render_status_bar(
                     console,
                     _status_actor(),
-                    f"cost {final_res.get('v_cost', '?')} $V",
+                    f"cost {format_v(final_res.get('v_cost', '?'))}",
                     workspace_root,
                 )
                 _render_usage_summary(final_res if isinstance(final_res, dict) else {})
+            emote_bridge.finish(success=bool(final_text) and _emote_response_is_final(final_res)
+                                and reason in {"completed", "spurious_mutation_block_ignored", "duplicate_suppressed"}, turn=emote_turn)
             return LoopAction.FINALIZED
 
         async def _execute_with_heartbeat(
@@ -6386,13 +6903,18 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             tool_request: dict[str, Any],
             tool_call_id: str,
             execution_token: str,
+            native_plan: dict | None = None,
         ) -> tuple[Any | None, str | None]:
             tool_name_local = str(tool_request.get("tool_name", ""))
             args_local = tool_request.get("arguments", {})
             shell_mode_local = str(tool_request.get("shell_mode") or "read_only")
             timeout_local = int(tool_request.get("timeout_sec") or 30)
 
-            if tool_name_local == "shell_run":
+            if native_plan is not None:
+                from openvegas.agent.native_mutation_client import execute_prepared_mutation
+
+                task = asyncio.create_task(execute_prepared_mutation(workspace_root, native_plan))
+            elif tool_name_local == "shell_run":
                 task = asyncio.create_task(
                     execute_shell_run_streaming(
                         workspace_root=workspace_root,
@@ -6468,35 +6990,91 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
 
             heartbeat_interval = 2.0
             heartbeat_failures = 0
-            while True:
+            unknown_report_started = False
+            native_deadline = asyncio.get_running_loop().time() + timeout_local if native_plan is not None else None
+
+            async def _report_native_unknown():
+                nonlocal unknown_report_started
+                if native_plan is None or unknown_report_started:
+                    return
+                unknown_report_started = True
+                proof = {"kind": "runtime_observed_file_v1", "contract_sha256": native_plan["contract_sha256"],
+                         "relative_path": native_plan["relative_path"], "observed_before": None,
+                         "observed_after": None, "outcome": "unknown", "reason": "native_runtime_interrupted"}
                 try:
-                    return await asyncio.wait_for(asyncio.shield(task), timeout=heartbeat_interval), None
-                except asyncio.TimeoutError:
+                    await asyncio.wait_for(client.agent_tool_result(
+                        run_id=current_run_id, runtime_session_id=runtime_session_id,
+                        tool_call_id=tool_call_id, execution_token=execution_token,
+                        result_status="failed", result_payload={"native_mutation_proof": proof}, stdout="", stderr=""),
+                        timeout=5)
+                except Exception:  # noqa: BLE001 - Transport details may contain private payloads.
+                    # A 409 may acknowledge failure; transport loss cannot prove it.
+                    # The server reconciler independently fences expired native writes.
+                    emit_metric("native_mutation_unknown_report_total", {"status": "unconfirmed"})
+
+            async def _retire_task():
+                # Cancels only the coroutine, not an in-flight OS write. Always
+                # retrieve its result, including a failure during report upload.
+                if not task.done():
+                    task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):  # noqa: BLE001, S110 - Retrieve retired failures; never log private source.
+                    pass
+
+            async def _wait_for_tool():
+                nonlocal heartbeat_failures
+                while True:
+                    remaining = None if native_deadline is None else native_deadline - asyncio.get_running_loop().time()
+                    if remaining is not None and remaining <= 0:
+                        console.print("File edit exceeded its deadline; outcome is uncertain. No retry.", markup=False)
+                        await _report_native_unknown()
+                        await _retire_task()
+                        return None, "timed_out"
                     try:
-                        hb = await client.agent_tool_heartbeat(
-                            run_id=current_run_id,
-                            runtime_session_id=runtime_session_id,
-                            tool_call_id=tool_call_id,
-                            execution_token=execution_token,
-                        )
-                        if not bool(hb.get("active", False)):
-                            remote_status = str(hb.get("status") or "unknown")
-                            if not task.done():
-                                task.cancel()
-                                try:
-                                    await task
-                                except Exception:
-                                    pass
-                            return None, remote_status
-                    except APIError as e:
-                        heartbeat_failures += 1
-                        if heartbeat_failures <= 1:
-                            body = e.data if isinstance(e.data, dict) else {}
-                            code = body.get("error", "tool_heartbeat_failed")
-                            detail = body.get("detail", e.detail)
-                            console.print(f"[yellow]{code}: {detail}[/yellow]")
-                    except Exception:
-                        heartbeat_failures += 1
+                        wait_sec = heartbeat_interval if remaining is None else min(heartbeat_interval, remaining)
+                        return await asyncio.wait_for(asyncio.shield(task), timeout=wait_sec), None
+                    except ContractError as exc:
+                        if native_plan is not None and exc.code.value == "mutation_uncertain":
+                            await _report_native_unknown()
+                        raise APIError(409, exc.detail, data={"error": exc.code.value}) from None
+                    except TimeoutError:
+                        try:
+                            heartbeat = client.agent_tool_heartbeat(
+                                run_id=current_run_id, runtime_session_id=runtime_session_id,
+                                tool_call_id=tool_call_id, execution_token=execution_token)
+                            if native_deadline is None:
+                                hb = await heartbeat
+                            else:
+                                hb = await asyncio.wait_for(heartbeat,
+                                    timeout=max(0.001, native_deadline - asyncio.get_running_loop().time()))
+                            if not bool(hb.get("active", False)):
+                                remote_status = str(hb.get("status") or "unknown")
+                                if native_plan is not None:
+                                    console.print("File edit lost its active lease; outcome is uncertain. No retry.", markup=False)
+                                    await _report_native_unknown()
+                                await _retire_task()
+                                return None, remote_status
+                        except APIError as e:
+                            heartbeat_failures += 1
+                            if heartbeat_failures <= 1:
+                                body = e.data if isinstance(e.data, dict) else {}
+                                code = body.get("error", "tool_heartbeat_failed")
+                                detail = body.get("detail", e.detail)
+                                console.print(f"[yellow]{code}: {detail}[/yellow]")
+                        except Exception:  # noqa: BLE001 - Keep transient heartbeat failures separate from tool outcomes.
+                            heartbeat_failures += 1
+
+            try:
+                return await _wait_for_tool()
+            except asyncio.CancelledError:
+                if native_plan is not None:
+                    console.print("File edit interrupted; its outcome may be uncertain. It will not be retried.", markup=False)
+                    try:
+                        await _report_native_unknown()
+                    finally:
+                        await _retire_task()
+                raise
 
         completion_force_patch_intent = bool(
             last_successful_tool == "fs_apply_patch" and _is_patch_repeat_followup_intent(user_message)
@@ -6695,7 +7273,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 render_status_bar(
                     console,
                     _status_actor(),
-                    f"cost {final_res.get('v_cost', '?')} $V",
+                    f"cost {format_v(final_res.get('v_cost', '?'))}",
                     workspace_root,
                 )
                 return LoopAction.FINALIZED
@@ -6840,12 +7418,22 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 raise last_exc
             raise RuntimeError("Unexpected mutation retry state.")
 
+        native_pending_calls: list[dict[str, Any]] = []
+        native_proposals: dict[str, dict[str, Any]] = {}
+        native_propose_keys: dict[str, str] = {}
+        native_start_keys: dict[str, str] = {}
+        native_mutation_plans: dict[str, dict] = {}
+        native_mutation_approved: set[str] = set()
         max_tool_steps = max(4, min(40, int(os.getenv("OPENVEGAS_CHAT_MAX_TOOL_STEPS", "24"))))
         for step in range(max_tool_steps):
+            final_response_complete = False
             cleaned_text = ""
             model_text = ""
             candidate_tool_calls: list[dict[str, Any]] = []
-            if state.pending_retry_tool_req is not None:
+            retrying_native_batch = bool(native_history_mode and native_pending_calls)
+            if retrying_native_batch:
+                candidate_tool_calls, native_pending_calls = native_pending_calls, []
+            elif state.pending_retry_tool_req is not None:
                 candidate_tool_calls = [state.pending_retry_tool_req]
                 state.pending_retry_tool_req = None
             force_patch_intent = bool(
@@ -6858,6 +7446,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
 
             if (
                 step == 0
+                and not native_history_mode
                 and not candidate_tool_calls
                 and not tool_observations
                 and (planner_edit_intent or _is_patch_smoke_intent(user_message))
@@ -6872,6 +7461,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     _tool_debug("injected synthetic fs_apply_patch on step 0")
 
             if not candidate_tool_calls:
+                emote_bridge.resume(turn=emote_turn)
                 ide_context_json: str | None = None
                 if current_run_id:
                     try:
@@ -6896,22 +7486,18 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         has_uploaded_attachments=bool(attachment_file_ids_for_turn),
                     )
                 )
+                if native_generation_session.prepared_handoff:
+                    web_search_requested_turn = native_generation_session.confirmed_selection.enable_web_search
                 web_search_effective_turn = bool(
                     web_search_requested_turn
-                    and resolve_capability(
-                        current_provider,
-                        current_model,
-                        "web_search",
-                    )
+                    and _chat_capability("web_search")
                 )
+                if native_generation_session.prepared_handoff and web_search_requested_turn != web_search_effective_turn:
+                    raise APIError(409, "The confirmed web capability is unavailable; nothing was silently disabled.")
                 web_search_activity_turn = bool(web_search_effective_turn)
                 attachments_effective_turn = bool(
                     attachment_file_ids_for_turn
-                    and resolve_capability(
-                        current_provider,
-                        current_model,
-                        "file_upload",
-                    )
+                    and _chat_capability("file_upload")
                 )
                 if web_search_requested and not web_search_effective_turn:
                     last_web_search_effective = False
@@ -6927,11 +7513,11 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 )
                 prompt_attachment_context = (
                     ""
-                    if attachments_effective_turn and current_provider == "openai" and not voice_transcript_context_for_turn
+                    if attachments_effective_turn and current_provider in {"openai", "openrouter"} and not voice_transcript_context_for_turn
                     else combined_attachment_context
                 )
 
-                enable_local_tools_turn = bool(_has_workspace_tooling_intent(user_message))
+                enable_local_tools_turn = native_history_mode or bool(_has_workspace_tooling_intent(user_message))
                 if not enable_local_tools_turn:
                     if web_search_activity_turn:
                         _render_capability_status("web_search", "searching...")
@@ -6998,10 +7584,11 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     render_status_bar(
                         console,
                         _status_actor(),
-                        f"cost {one_shot.get('v_cost', '?')} $V",
+                        f"cost {format_v(one_shot.get('v_cost', '?'))}",
                         workspace_root,
                     )
                     _render_usage_summary(one_shot if isinstance(one_shot, dict) else {})
+                    emote_bridge.finish(success=bool(final_text) and _emote_response_is_final(one_shot), turn=emote_turn)
                     return True
 
                 prompt = _tool_protocol_prompt(
@@ -7016,11 +7603,13 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 ask_idem = f"chat-ask-{uuid.uuid4()}"
                 result = await _ask_with_optional_stream(
                     prompt,
+                    reasoning_effort=current_reasoning_effort,
                     idempotency_key=ask_idem,
                     enable_tools=enable_local_tools_turn,
                     enable_web_search=web_search_effective_turn,
                     attachments=attachment_file_ids_for_turn,
                 )
+                final_response_complete = _emote_response_is_final(result)
                 next_thread = result.get("thread_id")
                 if next_thread:
                     current_thread_id = str(next_thread)
@@ -7031,8 +7620,20 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 model_text = _sanitize_user_visible_response_text(str(result.get("text", "")).strip())
                 cleaned_text = model_text
                 candidate_tool_calls = _collect_tool_call_candidates(result.get("tool_calls"), model_text)
+                if native_history_mode:
+                    # Native calls come only from the validated provider receipt, never prose.
+                    candidate_tool_calls = _collect_tool_call_candidates(result.get("tool_calls"), "")
+                    if len(candidate_tool_calls) != len(result.get("tool_calls") or []):
+                        raise APIError(409, "Native tool calls could not be preserved; no continuation was sent.")
+                    if not candidate_tool_calls:
+                        render_assistant(console, cleaned_text)
+                        last_assistant_text_for_turn = cleaned_text
+                        render_status_bar(console, _status_actor(), f"cost {format_v(result.get('v_cost', '?'))}", workspace_root)
+                        _render_usage_summary(result)
+                        emote_bridge.finish(success=bool(cleaned_text) and final_response_complete, turn=emote_turn)
+                        return bool(cleaned_text)
                 if (
-                    web_search_effective_turn
+                    not native_history_mode and web_search_effective_turn
                     and not candidate_tool_calls
                     and _is_scrape_request(user_message)
                     and _is_scrape_refusal_text(model_text)
@@ -7046,11 +7647,13 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     )
                     retry_result = await _ask_with_optional_stream(
                         retry_prompt,
+                        reasoning_effort=current_reasoning_effort,
                         idempotency_key=f"chat-ask-retry-{uuid.uuid4()}",
                         enable_tools=enable_local_tools_turn,
                         enable_web_search=True,
                         attachments=attachment_file_ids_for_turn,
                     )
+                    final_response_complete = _emote_response_is_final(retry_result)
                     retry_thread = retry_result.get("thread_id")
                     if retry_thread:
                         current_thread_id = str(retry_thread)
@@ -7092,12 +7695,12 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 render_status_bar(
                     console,
                     _status_actor(),
-                    f"cost {result.get('v_cost', '?')} $V",
+                    f"cost {format_v(result.get('v_cost', '?'))}",
                     workspace_root,
                 )
                 _render_usage_summary(result if isinstance(result, dict) else {})
 
-            candidate_tool_calls, synth_pre_errors, synth_pre_fired = _maybe_prepend_synth_write(
+            candidate_tool_calls, synth_pre_errors, synth_pre_fired = (candidate_tool_calls, [], False) if native_history_mode else _maybe_prepend_synth_write(
                 tool_reqs=candidate_tool_calls,
                 user_message=user_message,
                 model_text=model_text,
@@ -7133,6 +7736,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     _tool_debug("fallback synthesized fs_apply_patch after model produced no tool request")
                 else:
                     if step == 0 and not completion_criteria.active and not edit_intent and not tool_observations:
+                        emote_bridge.finish(success=bool(last_assistant_text_for_turn)
+                                            and final_response_complete, turn=emote_turn)
                         return True
                     if completion_criteria.requires_mutation:
                         synth_skip_reason = _diagnose_synth_write_skip_reason(
@@ -7168,6 +7773,15 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
 
             preprocessed_calls: list[dict[str, Any]] = []
             for raw_call in candidate_tool_calls:
+                if retrying_native_batch:
+                    preprocessed_calls.append(raw_call)
+                    continue
+                if native_history_mode and raw_call.get("tool_name") in {"Write", "FindAndReplace", "InsertAtEnd"}:
+                    if plan_mode or not _env_flag("OPENVEGAS_CHAT_NATIVE_MUTATIONS", "0"):
+                        raise APIError(409, "Verified native file editing is unavailable in this session; no edit was performed.")
+                    # Snapshot only when this call executes, after earlier batch results.
+                    preprocessed_calls.append(raw_call)
+                    continue
                 prepared, prep_error = _preprocess_tool_request_for_runtime(
                     tool_req=raw_call,
                     user_message=user_message,
@@ -7175,8 +7789,11 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     workspace_root=workspace_root,
                     tool_observations=tool_observations,
                     force_patch_intent=planner_edit_intent,
+                    native_exact=native_history_mode,
                 )
                 if prep_error is not None:
+                    if native_history_mode:
+                        raise APIError(409, "Native tool preparation failed; its original call was not replaced or dropped.")
                     tool_observations.append(prep_error)
                     continue
                 if prepared is not None:
@@ -7184,7 +7801,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
 
             # Recovery: after preprocessing, if executable calls are still non-mutating
             # (or empty), synthesize and preprocess Write from model code block.
-            preprocessed_calls, synth_post_errors, _ = _maybe_prepend_synth_write(
+            preprocessed_calls, synth_post_errors, _ = (preprocessed_calls, [], False) if native_history_mode else _maybe_prepend_synth_write(
                 tool_reqs=preprocessed_calls,
                 user_message=user_message,
                 model_text=model_text,
@@ -7238,7 +7855,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
 
             # Continue-aligned execution discipline: process one tool call at a time,
             # then re-ask model with fresh observations.
-            if len(preprocessed_calls) > 1:
+            if len(preprocessed_calls) > 1 and not native_history_mode:
                 emit_metric(
                     "tool_batch_truncated_total",
                     {"count": str(len(preprocessed_calls))},
@@ -7250,7 +7867,24 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             policy_denied = False
             mutation_conflict = False
             terminal_reason: str | None = None
-            for tool_req in preprocessed_calls:
+            for native_call_index, tool_req in enumerate(preprocessed_calls):
+                native_call_key = f"{tool_req.get('native_inference_request_id')}:{tool_req.get('provider_call_id')}"
+                if native_history_mode and tool_req.get("tool_name") in {"Write", "FindAndReplace", "InsertAtEnd"}:
+                    if evaluate_tool_policy(tool_name="fs_apply_patch", shell_mode="mutating",
+                                            approval_mode=approval_mode) == ToolPolicyDecision.EXCLUDE:
+                        raise APIError(409, "Native file editing is excluded; no source was read or uploaded.")
+                    from openvegas.agent.native_mutation_client import prepare_native_mutation
+
+                    try:
+                        tool_req, prepared_plan = await prepare_native_mutation(client,
+                            run_id=current_run_id, runtime_session_id=runtime_session_id,
+                            expected_run_version=current_run_version, expected_valid_actions_signature=current_signature,
+                            idempotency_key=f"native-prepare-{uuid.uuid4()}", call=tool_req, workspace_root=workspace_root)
+                    except ContractError as exc:
+                        raise APIError(409, exc.detail, data={"error": exc.code.value}) from None
+                    native_mutation_plans[native_call_key] = prepared_plan
+                    preprocessed_calls[native_call_index] = tool_req
+                native_plan = native_mutation_plans.get(native_call_key) if native_history_mode else None
                 tool_name = str(tool_req.get("tool_name", "")).strip()
                 arguments = tool_req.get("arguments", {})
                 shell_mode = tool_req.get("shell_mode")
@@ -7313,10 +7947,14 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
 
                 policy = evaluate_tool_policy(
                     tool_name=tool_name,
-                    shell_mode=str(shell_mode or "read_only"),
+                    # Arbitrary Bash is not sandboxed read-only. A provider label
+                    # must never grant permission; keep the wire call unchanged.
+                    shell_mode="mutating" if native_history_mode and tool_name == "shell_run" else str(shell_mode or "read_only"),
                     approval_mode=approval_mode,
                 )
                 if policy == ToolPolicyDecision.EXCLUDE:
+                    if native_history_mode:
+                        raise APIError(409, "Native tool excluded by your policy. No tool or replacement inference was executed.")
                     policy_denied = True
                     tool_observations.append(
                         {
@@ -7346,8 +7984,9 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                             1.0,
                             float(os.getenv("OPENVEGAS_IDE_INTERACTIVE_DIFF_TIMEOUT_SEC", "12")),
                         )
+                        emote_bridge.pause(turn=emote_turn)
                         try:
-                            _maybe_prompt_vscode_extension_for_interactive_diff()
+                            await _chat_modal(_maybe_prompt_vscode_extension_for_interactive_diff)
                             envelope = await asyncio.wait_for(
                                 client.ide_message(
                                     request_id=f"show-diff-{uuid.uuid4()}",
@@ -7427,7 +8066,6 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                             ide_fallback_reason = "ide_bridge_unavailable"
                             if _ide_bridge_trace_enabled():
                                 _ide_bridge_debug(f"interactive diff bridge error={type(e).__name__}: {e}")
-
                     if raw_diff_result is None and patch_text.strip() and _terminal_diff_fallback_enabled():
                         parsed_original = parse_unified_patch_terminal(patch_text)
                         if parsed_original.parse_error:
@@ -7465,14 +8103,15 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                             continue
 
                         emit_metric("tool_terminal_diff_invoked_total", {"tool": "write"})
-                        _drain_stdin_buffer(window_ms=0)
-                        raw_diff_result = review_patch_terminal(
+                        _chat_drain_stdin()
+                        emote_bridge.pause(turn=emote_turn)
+                        raw_diff_result = await _chat_modal(lambda write_path=write_path, patch_text=patch_text: review_patch_terminal(
                             path=write_path,
                             patch_text=patch_text,
                             allow_partial_accept=True,
                             console=console,
-                        )
-                        _drain_stdin_buffer(window_ms=0)
+                        ))
+                        _chat_drain_stdin()
                         diff_surface = "terminal"
                     elif raw_diff_result is None and patch_text.strip():
                         emit_metric("tool_show_diff_skipped_total", {"reason": "terminal_fallback_disabled"})
@@ -7587,7 +8226,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                             )
 
                 call_key = _semantic_tool_signature(tool_name, arguments, str(shell_mode or "read_only"))
-                if executed_tool_calls.get(call_key, 0) >= 1:
+                if executed_tool_calls.get(call_key, 0) >= 1 and not native_history_mode:
                     duplicate_suppressed = True
                     if tool_name == "fs_read":
                         emit_metric("tool_duplicate_read_suppressed_total", {"tool": "fs_read"})
@@ -7601,21 +8240,30 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     )
                     continue
 
-                if policy == ToolPolicyDecision.ASK:
+                if native_plan is not None and native_call_key not in native_mutation_approved:
+                    console.print(str(arguments["patch"]) or "No content change.", markup=False, highlight=False)
+                    emote_bridge.pause(turn=emote_turn)
+                    approved = await _chat_modal(lambda: click.confirm("Apply this exact file edit?", default=False))
+                    if not approved:
+                        raise APIError(409, "Native file edit declined. No edit or replacement inference was performed.")
+                if policy == ToolPolicyDecision.ASK and native_plan is None:
                     action_scope = action_scope_for(tool_name, arguments if isinstance(arguments, dict) else {})
                     if not should_auto_allow(session_approval, action_scope):
                         dealer_panel.render(map_lifecycle_event_to_state("approval_wait"), "approval required")
                         action_label = describe_tool_action(tool_name, arguments)
-                        _drain_stdin_buffer(window_ms=0)
-                        decision = choose_approval(
+                        _chat_drain_stdin()
+                        emote_bridge.pause(turn=emote_turn)
+                        decision = await _chat_modal(lambda tool_name=tool_name, arguments=arguments, action_label=action_label: choose_approval(
                             tool_name=tool_name,
                             arguments=arguments if isinstance(arguments, dict) else {},
                             action_label=action_label,
                             console=console,
-                        )
-                        _drain_stdin_buffer(window_ms=0)
+                        ))
+                        _chat_drain_stdin()
                         apply_approval_decision(session_approval, action_scope, decision)
                         if decision == ApprovalDecision.DENY_AND_REPLAN:
+                            if native_history_mode:
+                                raise APIError(409, "Native tool permission was declined. That tool was not executed and no replacement inference was sent.")
                             policy_denied = True
                             tool_observations.append(
                                 {
@@ -7626,25 +8274,48 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                             )
                             continue
 
+                # Approval exits are not execution events. Resume only after all
+                # permission/diff checks accept work, not from a modal's finally.
+                emote_bridge.resume(turn=emote_turn)
+                native_call_key = f"{tool_req.get('native_inference_request_id')}:{tool_req.get('provider_call_id')}"
+                propose_key = native_propose_keys.setdefault(native_call_key, f"tool-propose-{uuid.uuid4()}") if native_history_mode else None
+                start_key = native_start_keys.setdefault(native_call_key, f"tool-start-{uuid.uuid4()}") if native_history_mode else None
                 try:
-                    proposed = await _call_with_stale_retry(
-                        lambda: client.agent_tool_propose(
-                            run_id=current_run_id,
-                            runtime_session_id=runtime_session_id,
-                            expected_run_version=current_run_version,
-                            expected_valid_actions_signature=current_signature,
-                            idempotency_key=f"tool-propose-{uuid.uuid4()}",
-                            tool_name=tool_name,
-                            arguments=arguments,
-                            shell_mode=str(shell_mode) if shell_mode is not None else None,
-                            timeout_sec=timeout_sec,
-                            plan_mode=plan_mode,
-                        ),
-                        endpoint="propose",
-                    )
+                    proposed = native_proposals.get(native_call_key) if native_history_mode else None
+                    reusing_native_proposal = proposed is not None
+                    if proposed is None:
+                        proposed = await _call_with_stale_retry(
+                            lambda: client.agent_tool_propose(
+                                run_id=current_run_id,
+                                runtime_session_id=runtime_session_id,
+                                expected_run_version=current_run_version,
+                                expected_valid_actions_signature=current_signature,
+                                idempotency_key=propose_key or f"tool-propose-{uuid.uuid4()}",
+                                tool_name=tool_name,
+                                arguments=arguments,
+                                shell_mode=str(shell_mode) if shell_mode is not None else None,
+                                timeout_sec=timeout_sec,
+                                plan_mode=plan_mode,
+                                **_native_tool_proposal_metadata(
+                                    tool_req, enabled=(
+                                        _env_flag("OPENVEGAS_NATIVE_TOOL_HISTORY", "0")
+                                        or _env_flag("OPENVEGAS_CHAT_NATIVE_GENERATION_SCOPE", "0")
+                                    ),
+                                ),
+                            ),
+                            endpoint="propose",
+                        )
+                        if native_history_mode:
+                            native_proposals[native_call_key] = proposed
                 except APIError as e:
                     body = e.data if isinstance(e.data, dict) else {}
                     code = body.get("error", "tool_propose_failed")
+                    if native_history_mode:
+                        if code == "active_mutation_in_progress" and not state.active_mutation_timeout_hit:
+                            native_pending_calls = preprocessed_calls[native_call_index:]
+                            mutation_conflict = True
+                            break
+                        raise APIError(e.status, "Native tool proposal was not accepted. Task paused; no replacement inference was sent.", data=body) from e
                     if code in {"stale_projection", "idempotency_conflict", "active_mutation_in_progress"}:
                         emit_metric("tool_cas_conflict_total", {"endpoint": "propose", "error": code})
                     if code == "active_mutation_in_progress":
@@ -7656,6 +8327,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                                 "arguments": dict(arguments) if isinstance(arguments, dict) else {},
                                 "shell_mode": str(shell_mode or "read_only"),
                                 "timeout_sec": timeout_sec,
+                                **_provider_call_identity(tool_req.get("provider_call_id")),
+                                **_native_inference_identity(tool_req.get("native_inference_request_id")),
                             }
                     detail = body.get("detail", e.detail)
                     console.print(f"[red]{code}: {detail}[/red]")
@@ -7664,9 +8337,12 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         break
                     continue
 
-                _update_fence(proposed)
+                if not reusing_native_proposal:
+                    _update_fence(proposed)
                 tool_request = proposed.get("tool_request")
                 if not isinstance(tool_request, dict):
+                    if native_history_mode:
+                        raise APIError(502, "Native proposal had no valid tool request. Task paused before execution.")
                     err = proposed.get("error")
                     if err:
                         console.print(f"[yellow]{err}: {proposed.get('detail', '')}[/yellow]")
@@ -7678,9 +8354,30 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 tool_call_id = str(tool_request.get("tool_call_id", ""))
                 execution_token = str(tool_request.get("execution_token", ""))
                 if not tool_call_id or not execution_token:
+                    if native_history_mode:
+                        raise APIError(502, "Native proposal had no execution identity. Task paused before execution.")
                     console.print("[red]Invalid tool request payload from server.[/red]")
                     tool_observations.append({"tool_name": tool_name, "status": "start_error", "error": "invalid_tool_request_payload"})
                     continue
+
+                if native_plan is not None:
+                    expected = {"tool_name": tool_name, "arguments": arguments,
+                                "shell_mode": shell_mode, "timeout_sec": timeout_sec}
+                    if any(tool_request.get(key) != value for key, value in expected.items()):
+                        raise APIError(502, "Native edit proposal changed the approved request; nothing was executed.")
+                    if native_call_key not in native_mutation_approved:
+                        marker = arguments["native_mutation"]
+                        decision = await client.agent_native_mutation_approve(
+                            run_id=current_run_id, runtime_session_id=runtime_session_id,
+                            preparation_id=marker["preparation_id"], tool_call_id=tool_call_id,
+                            contract_sha256=marker["contract_sha256"], expected_run_version=current_run_version,
+                            expected_valid_actions_signature=current_signature, idempotency_key=f"native-approve-{uuid.uuid4()}")
+                        consumed = await client.agent_approval_consume(
+                            run_id=current_run_id, tool_call_id=tool_call_id, approval_id=decision["approval_id"],
+                            expected_run_version=current_run_version, expected_valid_actions_signature=current_signature,
+                            idempotency_key=f"native-consume-{uuid.uuid4()}")
+                        _update_fence(consumed)
+                        native_mutation_approved.add(native_call_key)
 
                 try:
                     started = await _call_with_stale_retry(
@@ -7691,7 +8388,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                             execution_token=execution_token,
                             expected_run_version=current_run_version,
                             expected_valid_actions_signature=current_signature,
-                            idempotency_key=f"tool-start-{uuid.uuid4()}",
+                            idempotency_key=start_key or f"tool-start-{uuid.uuid4()}",
                         ),
                         endpoint="start",
                     )
@@ -7699,6 +8396,12 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 except APIError as e:
                     body = e.data if isinstance(e.data, dict) else {}
                     code = body.get("error", "tool_start_failed")
+                    if native_history_mode:
+                        if code == "active_mutation_in_progress" and not state.active_mutation_timeout_hit:
+                            native_pending_calls = preprocessed_calls[native_call_index:]
+                            mutation_conflict = True
+                            break
+                        raise APIError(e.status, "Native tool start was not confirmed. Task paused without execution or replacement inference.", data=body) from e
                     if code in {"stale_projection", "idempotency_conflict", "active_mutation_in_progress"}:
                         emit_metric("tool_cas_conflict_total", {"endpoint": "start", "error": code})
                     if code == "active_mutation_in_progress":
@@ -7710,6 +8413,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                                 "arguments": dict(arguments) if isinstance(arguments, dict) else {},
                                 "shell_mode": str(shell_mode or "read_only"),
                                 "timeout_sec": timeout_sec,
+                                **_provider_call_identity(tool_req.get("provider_call_id")),
+                                **_native_inference_identity(tool_req.get("native_inference_request_id")),
                             }
                     detail = body.get("detail", e.detail)
                     console.print(f"[red]{code}: {detail}[/red]")
@@ -7731,10 +8436,13 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     tool_request=tool_request,
                     tool_call_id=tool_call_id,
                     execution_token=execution_token,
+                    **({"native_plan": native_plan} if native_plan is not None else {}),
                 )
                 if tool_name == "shell_run":
                     streamed_tools_seen["shell_run"] = True
                 if outcome is None:
+                    if native_history_mode:
+                        raise APIError(409, "Native tool execution became inactive or uncertain. Task paused; it will not be executed again.")
                     emit_metric(
                         "tool_heartbeat_miss_total",
                         {"remote_status": str(inactive_status or "inactive")},
@@ -7922,6 +8630,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     body = e.data if isinstance(e.data, dict) else {}
                     _update_fence(body)
                     code = body.get("error", "tool_result_failed")
+                    if native_history_mode:
+                        raise APIError(e.status, "Native result acknowledgement is unconfirmed. Task paused; the tool will not be executed again.", data=body) from e
                     if code in {"stale_projection", "idempotency_conflict", "active_mutation_in_progress"}:
                         emit_metric("tool_cas_conflict_total", {"endpoint": "result", "error": code})
                     if code == "active_mutation_in_progress":
@@ -7933,6 +8643,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                                 "arguments": dict(arguments) if isinstance(arguments, dict) else {},
                                 "shell_mode": str(shell_mode or "read_only"),
                                 "timeout_sec": timeout_sec,
+                                **_provider_call_identity(tool_req.get("provider_call_id")),
+                                **_native_inference_identity(tool_req.get("native_inference_request_id")),
                             }
                     detail = body.get("detail", e.detail)
                     console.print(f"[red]{code}: {detail}[/red]")
@@ -7959,6 +8671,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         break
                     continue
 
+                if native_plan is not None and outcome.result_status != "succeeded":
+                    raise APIError(409, "Native file edit did not complete safely. Task paused; no automatic retry or continuation.")
                 tool_observations.append(
                     {
                         "tool_call_id": tool_call_id,
@@ -8028,6 +8742,10 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         return True
                     continue
 
+            if native_history_mode:
+                if native_pending_calls or did_any_execution:
+                    continue
+                raise APIError(409, "Native tool batch did not complete. Task paused; no calls were silently dropped.")
             if did_any_execution:
                 loop_action = await _continue_or_finalize_for_completion(
                     reason_if_finalize="completed",
@@ -8098,6 +8816,9 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     return True
                 continue
         console.print(f"[yellow]Stopped after max tool iterations ({max_tool_steps}).[/yellow]")
+        if native_history_mode:
+            console.print("Native task paused at the iteration limit. No finalizer or automatic retry was sent.", markup=False)
+            return False
         if completion_criteria.active and not _completion_eval().satisfied:
             final_res = await _request_final_response(tool_observations)
             action = await _force_finalize(final_res, reason="completion_criteria_unmet_after_retries")
@@ -8128,6 +8849,12 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             except Exception:
                 conversation_mode = conversation_mode or "persistent"
 
+        if current_provider == "openrouter":
+            try:
+                await _refresh_model_capabilities()
+            except (APIError, ModelSelectionError) as exc:
+                console.print(f"Model capabilities unavailable; sends will require validation: {exc}", markup=False)
+            return
         if models_task is None:
             return
         try:
@@ -8156,13 +8883,16 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             current_run_id = run_id
             current_run_version = int(run_info.get("run_version", 0))
             current_signature = str(run_info.get("valid_actions_signature", "sha256:"))
-            await client.agent_register_workspace(
+            registered = await client.agent_register_workspace(
                 run_id=current_run_id,
                 runtime_session_id=runtime_session_id,
                 workspace_root=workspace_root,
                 workspace_fingerprint=workspace_fp,
                 git_root=workspace_git_root,
             )
+            if isinstance(registered, dict):
+                current_run_version = int(registered.get("run_version", current_run_version))
+                current_signature = str(registered.get("valid_actions_signature", current_signature))
             return True
         except Exception:
             current_run_id = None
@@ -8183,6 +8913,137 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
         except Exception:
             return False
 
+    async def _reset_native_task() -> None:
+        nonlocal native_generation_session, current_run_id, current_run_version, current_signature
+        try:
+            scope = await _stage_handoff_destination()
+        except Exception:
+            raise APIError(409, "Could not register a fresh native task. No model request was sent.") from None
+        # Registration and cancellation leave the active task untouched until
+        # the complete replacement is ready; adoption has no suspension point.
+        current_run_id, current_run_version, current_signature = (
+            scope.run_id, scope.expected_run_version, scope.expected_valid_actions_signature)
+        native_generation_session = NativeGenerationSession()
+
+    async def _stage_handoff_destination():
+        from openvegas.contracts.native_scope import NativeInferenceScope
+
+        # Do not reuse the bootstrap helper: it changes the active run before
+        # registration succeeds. This candidate stays private until commit ACK.
+        created = await client.agent_run_create(state="running", is_resumable=True)
+        run_id = NativeInferenceScope.canonical_uuid(created.get("run_id"))
+        if run_id == current_run_id:
+            raise ValueError("A different destination task is required.")
+        registered = await client.agent_register_workspace(
+            run_id=run_id, runtime_session_id=runtime_session_id,
+            workspace_root=workspace_root, workspace_fingerprint=workspace_fp, git_root=workspace_git_root,
+        )
+        return NativeInferenceScope(run_id=run_id, runtime_session_id=runtime_session_id,
+            expected_run_version=registered.get("run_version"),
+            expected_valid_actions_signature=registered.get("valid_actions_signature"))
+
+    async def _switch_native_model(next_provider, next_model, target=None, *, followup_web_search=None) -> bool:
+        nonlocal pending_native_handoff, pending_handoff_capabilities, native_generation_session
+        nonlocal current_provider, current_model, current_thread_id
+        nonlocal current_run_id, current_run_version, current_signature
+        nonlocal current_reasoning_effort, web_search_requested
+        nonlocal current_model_capabilities, current_reasoning_efforts
+        from openvegas.agent.native_handoff_client import PendingNativeHandoff
+        from openvegas.contracts.native_handoff import NativeHandoffSelection
+
+        try:
+            pending = pending_native_handoff
+            same_model = (next_provider, next_model) == (current_provider, current_model)
+            if followup_web_search is not None and (type(followup_web_search) is not bool or not same_model):
+                raise ValueError("Per-turn web selection requires a same-model follow-up.")
+            if pending is None:
+                if pending_attachments and not same_model:
+                    console.print("Send or remove pending attachments before changing models. Nothing was switched.", markup=False)
+                    return False
+                if (next_provider != "openrouter" or current_provider != "openrouter"
+                        or not native_generation_session.finalized
+                        or any(job.process.returncode is None for job in model_switch_local_tools._BACKGROUND_JOBS.values())):
+                    raise ValueError("Finish the native task and its tools before transferring to a reviewed OpenRouter model.")
+                capabilities = reviewed_capabilities(target, next_provider, next_model)
+                if not capabilities.supports(next_provider, next_model, "tools"):
+                    console.print("Target model does not support native task tools; choose another model. Nothing was switched.", markup=False)
+                    return False
+                if pending_attachments and (
+                    not capabilities.supports(next_provider, next_model, "file_upload")
+                    or (any(_attachment_is_image(att) for att in pending_attachments)
+                        and not capabilities.supports(next_provider, next_model, "image_input"))
+                ):
+                    console.print("Current model cannot accept the pending attachments. Previous task retained.", markup=False)
+                    return False
+                if (current_reasoning_effort is not None
+                        and current_reasoning_effort not in capabilities.reasoning_efforts):
+                    console.print("Target model does not support the current reasoning effort. Use /reasoning default or choose a supported effort, then switch again. Nothing was switched.", markup=False)
+                    return False
+                selected_web = web_search_requested if followup_web_search is None else followup_web_search
+                if selected_web and not capabilities.supports(next_provider, next_model, "web_search"):
+                    console.print("Target model does not support the requested web search. Choose a web-capable model to retain this task's settings. Nothing was switched.", markup=False)
+                    return False
+                snapshot = await client.agent_run_get(current_run_id)
+                selection = NativeHandoffSelection(model=next_model, enable_web_search=selected_web,
+                    reasoning_effort=current_reasoning_effort, max_tokens=min(1024, target["max_tokens"]))
+                old_selection = NativeHandoffSelection(model=current_model, enable_web_search=web_search_requested,
+                    reasoning_effort=current_reasoning_effort, max_tokens=native_generation_session.max_tokens or 1024)
+                pending = PendingNativeHandoff(source_session=native_generation_session, source_scope={
+                    "run_id": current_run_id, "runtime_session_id": runtime_session_id,
+                    "expected_run_version": snapshot.get("run_version"),
+                    "expected_valid_actions_signature": snapshot.get("valid_actions_signature")},
+                    selection=selection, old_selection=old_selection,
+                    prepare_key=str(uuid.uuid4()), confirm_key=str(uuid.uuid4()))
+                pending_native_handoff, pending_handoff_capabilities = pending, dict(target)
+            selected = pending.prepare_request.selection
+            if (next_provider, next_model) != (selected.provider, selected.model):
+                raise ValueError("A different model switch is pending; resolve it with /handoff retry or /handoff cancel.")
+            if pending.state in {"new", "prepare_uncertain", "prepared"}:
+                preview = await pending.prepare(client)
+                if not await _chat_modal(lambda: Confirm.ask(
+                    f"{'Continue with' if same_model else 'Switch to'} {selected.model}, retaining {preview.task_count} task(s), "
+                    f"{preview.unique_file_count} file(s) and {preview.observation_count} accepted observation(s)? "
+                    "Private model reasoning is not transferred. No inference is sent by switching.", default=False)):
+                    pending.cancel()
+                    pending_native_handoff = pending_handoff_capabilities = None
+                    console.print("Model unchanged.", markup=False)
+                    return False
+                await pending.stage_destination(_stage_handoff_destination)
+            if pending.state in {"staged", "confirm_uncertain", "confirmed"}:
+                try:
+                    await pending.confirm(client)
+                except ValueError:
+                    if pending.state != "confirm_uncertain":
+                        raise
+                    resolved = await pending.resolve(client)
+                    if resolved.outcome == "expired_uncommitted":
+                        pending_native_handoff = pending_handoff_capabilities = None
+                        console.print("Model switch expired before confirmation. Your previous model and context "
+                                      "are intact; you can retry the switch or continue chatting.", markup=False)
+                        return False
+            capabilities = reviewed_capabilities(pending_handoff_capabilities, selected.provider, selected.model)
+            adopted = pending.adopt()
+            confirmed = pending.confirmed
+            scope = confirmed.destination_scope
+            # No suspension between verified acknowledgement and local adoption.
+            current_provider, current_model, current_thread_id = selected.provider, selected.model, None
+            current_run_id, current_run_version, current_signature = (
+                scope.run_id, scope.expected_run_version, scope.expected_valid_actions_signature)
+            current_reasoning_effort = selected.reasoning_effort
+            # A follow-up pins this turn's effective web setting, not the user's
+            # preference for future turns. The pending operation retains it on ACK retry.
+            web_search_requested = pending.old_selection.enable_web_search if same_model else selected.enable_web_search
+            native_generation_session = adopted
+            current_model_capabilities, current_reasoning_efforts = capabilities, capabilities.reasoning_efforts
+            pending_native_handoff = pending_handoff_capabilities = None
+            console.print(f"Selected {selected.model}; confirmed task context retained."
+                          + ("" if same_model else " Enter your next request."), markup=False)
+            return True
+        except (APIError, ValueError, TypeError, KeyError):
+            console.print("Model switch was not verified; the prior selection is retained. "
+                          "Use /handoff retry for the same operation or /handoff cancel before confirmation.", markup=False)
+            return False
+
     async def _bootstrap_chat_session() -> None:
         await asyncio.gather(
             _sync_chat_preferences(),
@@ -8194,8 +9055,70 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
         if startup_bootstrap_task is None or startup_bootstrap_task.done():
             startup_bootstrap_task = asyncio.create_task(_bootstrap_chat_session())
 
+    # Shared by every prompt's toolbar and the session's cached key bindings.
+    def _chat_toggle_voice(event) -> None:
+        buf = chat_prompt_session.default_buffer if event is None or owned_compositor is not None else event.current_buffer
+        saved_text = str(buf.text or "")
+        saved_cursor = int(getattr(buf, "cursor_position", 0) or 0)
+        loop = asyncio.get_event_loop()
+
+        def _insert_from_voice(transcript: str) -> None:
+            if owned_compositor is not None or not prompt_input_active:
+                _insert_voice_transcript_text(transcript)
+                return
+            token = str(transcript or "").strip()
+            if not token:
+                emit_metric("voice_capture_phase_total", {"phase": "transcript_empty"})
+                return
+            inserted = False
+            try:
+                current = str(buf.text or "")
+                if current == saved_text:
+                    cursor = max(0, min(len(saved_text), saved_cursor))
+                    prefix = saved_text[:cursor]
+                    suffix = saved_text[cursor:]
+                    needs_space = bool(prefix) and not prefix.endswith((" ", "\n", "\t"))
+                    injected = f" {token}" if needs_space else token
+                    buf.text = f"{prefix}{injected}{suffix}"
+                    buf.cursor_position = len(prefix) + len(injected)
+                    inserted = True
+                else:
+                    if current and not current.endswith((" ", "\n", "\t")):
+                        buf.insert_text(" ")
+                    buf.insert_text(token)
+                    inserted = True
+                app = getattr(chat_prompt_session, "app", None)
+                if app is not None and hasattr(app, "invalidate"):
+                    app.invalidate()
+            except Exception:
+                inserted = False
+            if inserted:
+                emit_metric("voice_capture_phase_total", {"phase": "transcript_inserted_live"})
+
+
+        async def _do_toggle() -> None:
+            voice_effective = bool(
+                _chat_capability("speech_to_text")
+            )
+            if not voice_effective:
+                console.print("[yellow]Voice capture unavailable for current provider/model.[/yellow]")
+                return
+            was_listening = voice_button.is_recording
+            await voice_button.toggle(
+                insert_text=_insert_from_voice,
+                transcribe_wav=_transcribe_voice_wav,
+            )
+            if not was_listening and voice_button.is_recording:
+                console.print("[dim]Listening... click Voice again to stop.[/dim]")
+
+        if owned_compositor is not None:
+            owned_compositor.app.create_background_task(_do_toggle())
+        else:
+            loop.create_task(_do_toggle())
+
     async def _run_chat() -> str:
         nonlocal current_provider, current_model, current_thread_id
+        nonlocal current_reasoning_effort, current_reasoning_efforts
         nonlocal current_run_id, current_run_version, current_signature
         nonlocal plan_mode, conversation_mode, workspace_root, workspace_fp, approval_mode
         nonlocal verbose_tool_events
@@ -8212,6 +9135,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
         nonlocal voice_transcript_context_for_turn
         nonlocal attachment_markers_for_turn
         nonlocal attachment_file_ids_for_turn
+        nonlocal pending_native_handoff, pending_handoff_capabilities
         low_floor_usd = Decimal(os.getenv("TOPUP_LOW_BALANCE_FLOOR_USD", "5.00"))
         v_per_usd = Decimal(os.getenv("V_PER_USD", "100"))
         suggest_cooldown_sec = max(30, int(os.getenv("TOPUP_SUGGEST_COOLDOWN_SEC", "300")))
@@ -8302,6 +9226,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
 
         async def _read_chat_message() -> str:
             nonlocal prompt_toolkit_unavailable_warned, chat_prompt_session, chat_prompt_bindings, pending_voice_prefill, pending_voice_meta, prompt_input_active
+            nonlocal owned_compositor, pending_toolbar_draft
             if use_prompt_toolkit_chat:
                 if PromptSession is None:
                     if not prompt_toolkit_unavailable_warned:
@@ -8319,72 +9244,22 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                             if pasted:
                                 event.current_buffer.insert_text(pasted)
 
-                        @chat_prompt_bindings.add("escape", "v")
-                        def _chat_toggle_voice(event) -> None:
-                            buf = event.current_buffer
-                            saved_text = str(buf.text or "")
-                            saved_cursor = int(getattr(buf, "cursor_position", 0) or 0)
-                            loop = asyncio.get_event_loop()
-
-                            def _insert_from_voice(transcript: str) -> None:
-                                token = str(transcript or "").strip()
-                                if not token:
-                                    emit_metric("voice_capture_phase_total", {"phase": "transcript_empty"})
-                                    return
-                                inserted = False
-                                try:
-                                    current = str(buf.text or "")
-                                    if current == saved_text:
-                                        cursor = max(0, min(len(saved_text), saved_cursor))
-                                        prefix = saved_text[:cursor]
-                                        suffix = saved_text[cursor:]
-                                        needs_space = bool(prefix) and not prefix.endswith((" ", "\n", "\t"))
-                                        injected = f" {token}" if needs_space else token
-                                        buf.text = f"{prefix}{injected}{suffix}"
-                                        buf.cursor_position = len(prefix) + len(injected)
-                                        inserted = True
-                                    else:
-                                        if current and not current.endswith((" ", "\n", "\t")):
-                                            buf.insert_text(" ")
-                                        buf.insert_text(token)
-                                        inserted = True
-                                    app = getattr(chat_prompt_session, "app", None)
-                                    if app is not None and hasattr(app, "invalidate"):
-                                        app.invalidate()
-                                except Exception:
-                                    inserted = False
-                                if inserted:
-                                    emit_metric("voice_capture_phase_total", {"phase": "transcript_inserted_live"})
-
-
-                            async def _do_toggle() -> None:
-                                voice_effective = bool(
-                                    resolve_capability(
-                                        current_provider,
-                                        current_model,
-                                        "speech_to_text",
-                                    )
-                                )
-                                if not voice_effective:
-                                    console.print("[yellow]Voice capture unavailable for current provider/model.[/yellow]")
-                                    return
-                                was_listening = voice_button.is_recording
-                                await voice_button.toggle(
-                                    insert_text=_insert_from_voice,
-                                    transcribe_wav=_transcribe_voice_wav,
-                                )
-                                if not was_listening and voice_button.is_recording:
-                                    console.print("[dim]Listening... click Voice again to stop.[/dim]")
-
-                            loop.create_task(_do_toggle())
+                        chat_prompt_bindings.add("f4")(_chat_toggle_voice)
+                        chat_prompt_bindings.add("escape", "v")(_chat_toggle_voice)
 
                         @chat_prompt_bindings.add("escape", "m")
                         def _chat_mcp_list(event) -> None:
+                            if owned_compositor is not None:
+                                owned_compositor.request_command("/mcp list")
+                                return
                             event.current_buffer.text = "/mcp list"
                             event.current_buffer.validate_and_handle()
 
                         @chat_prompt_bindings.add("escape", "a")
                         def _chat_actions_help(event) -> None:
+                            if owned_compositor is not None:
+                                owned_compositor.request_command("/help")
+                                return
                             event.current_buffer.text = "/help"
                             event.current_buffer.validate_and_handle()
 
@@ -8413,7 +9288,19 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                                 state["editing"] = False
 
                         chat_prompt_session.default_buffer.on_text_changed += _on_text_changed
+                        owned_compositor = await create_owned_chat(
+                            chat_prompt_session, console, session_id=runtime_session_id,
+                            voice_active=lambda: voice_button.is_recording,
+                            mode=os.getenv("OPENVEGAS_CHAT_COMPOSITOR", "on" if dealer_sprite else "auto"),
+                        )
+                        if owned_compositor is not None:
+                            chat_prompt_session = owned_compositor
+                        else:
+                            from openvegas.tui.inline_prompt import configure_inline_prompt
 
+                            configure_inline_prompt(chat_prompt_session)
+
+                    model_controls = None
                     try:
                         composer_rprompt = lambda: str(
                             _format_live_composer_status_row(
@@ -8421,18 +9308,50 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                                 attachments=pending_attachments,
                                 provider=current_provider,
                                 model=current_model,
+                                remote_capabilities=current_model_capabilities,
                             )
                             or ""
                         )
 
-                        _mouse_default = "1"
-                        mouse_actions_enabled = str(os.getenv("OPENVEGAS_CHAT_MOUSE_ACTIONS", _mouse_default)).strip().lower() in {
-                            "1",
-                            "true",
-                            "yes",
-                            "on",
-                        }
+                        from openvegas.tui.inline_prompt import mouse_actions_enabled as _mouse_actions_enabled
+
+                        mouse_actions_enabled = _mouse_actions_enabled(owned=owned_compositor is not None)
                         actions_menu_expanded = {"value": False}
+
+                        def _submit_model_control(command):
+                            nonlocal pending_toolbar_draft
+                            if voice_button.is_recording:
+                                model_controls.error = "Stop Voice before changing model or effort."
+                                chat_prompt_session.app.invalidate()
+                                return
+                            if owned_compositor is not None:
+                                owned_compositor.request_command(command)
+                            else:
+                                # Return a command without submitting/replacing the draft.
+                                pending_toolbar_draft = chat_prompt_session.default_buffer.document
+                                chat_prompt_session.app.exit(result=command)
+
+                        async def _load_control_models():
+                            if startup_bootstrap_task is not None:
+                                await asyncio.shield(startup_bootstrap_task)
+                            return await client.list_models()
+
+                        async def _load_control_efforts():
+                            if startup_bootstrap_task is not None:
+                                await asyncio.shield(startup_bootstrap_task)
+                            await _refresh_model_capabilities()
+                            return current_reasoning_efforts
+
+                        from openvegas.tui.model_controls import ModelControls
+
+                        model_controls = ModelControls(
+                            app=chat_prompt_session.app,
+                            current=lambda: (current_provider, current_model, current_reasoning_effort),
+                            load_models=_load_control_models, load_efforts=_load_control_efforts,
+                            submit=_submit_model_control,
+                            size=lambda: (chat_prompt_session.app.output.get_size().columns,
+                                          chat_prompt_session.app.output.get_size().rows),
+                        )
 
                         def _toolbar_click(command: str | None = None, *, submit: bool = False, toggle_actions: bool = False):
                             def _handler(mouse_event) -> None:
@@ -8457,8 +9376,14 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                                         buf.validate_and_handle()
                                     return
                                 if submit:
-                                    buf.text = command
-                                    buf.validate_and_handle()
+                                    if command == "/voice":
+                                        _chat_toggle_voice(None)
+                                    elif owned_compositor is not None:
+                                        if not owned_compositor.request_command(command):
+                                            console.print("[dim]Finish or cancel the current task before that action.[/dim]")
+                                    else:
+                                        buf.text = command
+                                        buf.validate_and_handle()
                                 else:
                                     if str(buf.text or "").strip():
                                         buf.insert_text(" ")
@@ -8475,8 +9400,8 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
 
                         def _composer_bottom_toolbar():
                             if not mouse_actions_enabled:
-                                return ""
-                            voice_chip = f"◖{_icon('voice')}◗"
+                                return " /voice | /help" + (" | /models" if allow_model_switch else "")
+                            voice_chip = "Voice"
                             if voice_button.is_recording:
                                 status = voice_button.label(include_hint=False)
                                 icon_token = _icon('voice')
@@ -8486,9 +9411,9 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                             voice_style = "class:bottom-toolbar.voice-chip-active" if voice_button.is_recording else "class:bottom-toolbar.voice-chip"
                             row = [
                                 ("class:bottom-toolbar", " "),
-                                (voice_style, f" {voice_chip} ", _toolbar_click("/voice", submit=True)),
+                                (voice_style, f" [ {voice_chip} ] ", _toolbar_click("/voice", submit=True)),
                                 ("class:bottom-toolbar", "  "),
-                                ("class:bottom-toolbar", f"{_icon('actions')} Actions ", _toolbar_click(toggle_actions=True)),
+                                ("class:bottom-toolbar", "[ Actions ] ", _toolbar_click(toggle_actions=True)),
                             ]
                             if actions_menu_expanded["value"]:
                                 row.extend([
@@ -8502,29 +9427,51 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                                     ("class:bottom-toolbar", f"{_icon('quit')} Quit ", _toolbar_click("/exit", submit=True)),
                                 ])
                             row.append(("class:bottom-toolbar", " "))
+                            if allow_model_switch:
+                                row.append(("class:bottom-toolbar", "\n"))
+                                row.extend(model_controls.fragments())
                             return row
 
-                        toolbar_fn = _composer_bottom_toolbar if mouse_actions_enabled else None
+                        toolbar_fn = _composer_bottom_toolbar
                         prefill_default = str(pending_voice_prefill or "")
                         if prefill_default:
                             pending_voice_prefill = None
                             pending_voice_meta = None
+                        if pending_toolbar_draft is not None:
+                            if prefill_default:
+                                from prompt_toolkit.document import Document
+
+                                text = pending_toolbar_draft.text + " " + prefill_default
+                                prefill_default = Document(text, cursor_position=len(text))
+                            else:
+                                prefill_default = pending_toolbar_draft
+                            pending_toolbar_draft = None
                         prompt_input_active = True
                         try:
-                            raw = await chat_prompt_session.prompt_async(
-                                "chat: ",
-                                key_bindings=chat_prompt_bindings,
-                                multiline=False,
-                                wrap_lines=True,
-                                rprompt=composer_rprompt,
-                                mouse_support=mouse_actions_enabled,
-                                bottom_toolbar=toolbar_fn,
-                                style=prompt_style,
-                                refresh_interval=0.15,
-                                default=prefill_default,
+                            voice_refresh = nullcontext() if owned_compositor is not None else voice_refresh_during_prompt(
+                                chat_prompt_session.app, lambda: voice_button.is_recording,
                             )
+                            # Background wallet/voice/capability messages must
+                            # suspend and redraw the composer, not overwrite it.
+                            output_guard = patch_stdout(raw=True) if owned_compositor is None else nullcontext()
+                            with output_guard:
+                                async with voice_refresh:
+                                    raw = await chat_prompt_session.prompt_async(
+                                        "chat: ",
+                                        key_bindings=chat_prompt_bindings,
+                                        multiline=False,
+                                        wrap_lines=True,
+                                        rprompt=composer_rprompt,
+                                        mouse_support=mouse_actions_enabled,
+                                        bottom_toolbar=toolbar_fn,
+                                        style=prompt_style,
+                                        refresh_interval=None,
+                                        default=prefill_default,
+                                    )
                         finally:
                             prompt_input_active = False
+                            if model_controls is not None:
+                                model_controls.close()
                     except EOFError:
                         return "/exit"
                     merged = _normalize_live_chat_input_text(raw)
@@ -8561,6 +9508,10 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
         else:
             console.print(f"OpenVegas Chat · {conversation_mode}")
         console.print("Type /help for commands")
+        if allow_model_switch:
+            console.print("Models: /models | /model <model_id> | /provider <provider> <model_id>", markup=False)
+        if _env_flag("OPENVEGAS_CHAT_NATIVE_GENERATION_SCOPE", "0"):
+            console.print("Native ownership verification: one scoped generation only; continuation is not enabled.", markup=False)
         if attach_search_home_enabled:
             console.print(
                 "[yellow]OPENVEGAS_CHAT_ATTACH_SEARCH_HOME=1 may slow auto-attach. "
@@ -8581,10 +9532,31 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
             if not message:
                 continue
 
+            if (pending_native_handoff is not None and pending_native_handoff.blocks_other_actions
+                    and message.split()[0].lower() not in {"/handoff", "/model", "/provider", "/help", "/status", "/exit"}):
+                console.print("A model switch is pending. Use /handoff retry or /handoff cancel before sending another task.", markup=False)
+                continue
+
             if message.startswith("/"):
                 parts = message.split()
                 cmd = parts[0].lower()
 
+                if cmd == "/handoff":
+                    if pending_native_handoff is None:
+                        console.print("No model switch is pending.", markup=False)
+                    elif parts == ["/handoff", "retry"]:
+                        selection = pending_native_handoff.prepare_request.selection
+                        await _switch_native_model(selection.provider, selection.model)
+                    elif parts == ["/handoff", "cancel"]:
+                        try:
+                            pending_native_handoff.cancel()
+                            pending_native_handoff = pending_handoff_capabilities = None
+                            console.print("Model unchanged; pending preview cancelled.", markup=False)
+                        except ValueError:
+                            console.print("Confirmation may already be committed. Use /handoff retry to resolve the same operation.", markup=False)
+                    else:
+                        console.print("Use /handoff retry or /handoff cancel.", markup=False)
+                    continue
                 if cmd == "/exit":
                     voice_button.stop_if_recording()
                     await _cleanup_chat_background_tasks()
@@ -8592,18 +9564,41 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     return "exit"
                 if cmd == "/help":
                     _show_help()
+                    console.print("[dim]/emote - emote status, equipment and manual companion setup[/dim]")
+                    continue
+                if cmd == "/emote":
+                    from openvegas.cli_command import cli_command
+                    if owned_compositor is not None:
+                        console.print("Experimental same-window compositor active; not native-certified. History, input, voice and emotes share one terminal owner.")
+                        console.print("For a companion instead, reopen chat with OPENVEGAS_CHAT_COMPOSITOR=auto or off, then run /emote for that new session's command.")
+                    else:
+                        console.print("Same-window emotes are off; auto mode has no certified native surfaces.")
+                        console.print("Choose a public companion and celebration in a second terminal (no purchase):")
+                        console.print(cli_command("emote", "setup", "--source", "openvegas", "--session", runtime_session_id, "--watch"), markup=False, soft_wrap=True)
+                        console.print("Wait for the companion's ready message, then send your next prompt here. Ctrl+C in the companion terminal stops only the animation.")
+                        console.print("To use your already-equipped packs instead:")
+                        console.print(cli_command("emote", "watch", "--source", "openvegas", "--session", runtime_session_id), markup=False, soft_wrap=True)
+                        console.print("This watches only this chat session's future turns. No pane or watcher was launched.")
+                    console.print("Manage owned equipment with `openvegas emote`. Owned packs require server verification. Public previews are not purchases. Native compatibility remains under review.")
                     continue
                 if cmd == "/legend":
                     _show_legend()
                     continue
+                if cmd in {"/status", "/web"} and current_provider == "openrouter":
+                    if startup_bootstrap_task is not None:
+                        await asyncio.shield(startup_bootstrap_task)
+                    try:
+                        await _refresh_model_capabilities()
+                    except (APIError, ModelSelectionError) as exc:
+                        console.print(f"Capabilities unavailable: {exc}", markup=False)
                 if cmd == "/status":
+                    from openvegas.profile_identity import profile_status
+
+                    console.print(_reasoning_status(), markup=False)
+                    console.print(await profile_status(client), markup=False)
                     web_search_effective = bool(
                         web_search_requested
-                        and resolve_capability(
-                            current_provider,
-                            current_model,
-                            "web_search",
-                        )
+                        and _chat_capability("web_search")
                     )
                     provider_line = (
                         f"[bold]Provider:[/bold] {current_provider}\n[bold]Model:[/bold] {current_model}\n"
@@ -8718,24 +9713,16 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     continue
                 if cmd == "/web":
                     web_search_effective = bool(
-                        resolve_capability(
-                            current_provider,
-                            current_model,
-                            "web_search",
-                        )
+                        _chat_capability("web_search")
                     )
                     console.print(
-                        "[dim]Web search is always on in chat. "
-                        f"effective={web_search_effective}[/dim]"
+                        "[dim]Web search uses the current model's supported capabilities. "
+                        f"requested={web_search_requested} effective={web_search_requested and web_search_effective}[/dim]"
                     )
                     continue
                 if cmd == "/voice":
                     voice_effective = bool(
-                        resolve_capability(
-                            current_provider,
-                            current_model,
-                            "speech_to_text",
-                        )
+                        _chat_capability("speech_to_text")
                     )
                     if not voice_effective:
                         console.print("[yellow]Voice capture unavailable for current provider/model.[/yellow]")
@@ -8951,43 +9938,171 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     approval_mode = mode
                     console.print(f"[green]Approval mode set to {approval_mode}.[/green]")
                     continue
-                if cmd == "/provider":
-                    if not allow_model_switch:
-                        console.print("[yellow]Provider switching is disabled in this environment.[/yellow]")
+                if cmd == "/reasoning":
+                    if native_generation_session.awaiting_first_dispatch and len(parts) > 1:
+                        console.print("Reasoning is fixed by the confirmed model switch. Send its first task or explicitly start fresh with /continuity off.", markup=False)
                         continue
-                    if len(parts) < 2:
-                        console.print("[red]Usage: /provider <openai|anthropic|gemini> [model][/red]")
+                    if startup_bootstrap_task is not None:
+                        await asyncio.shield(startup_bootstrap_task)
+                    if len(parts) > 2:
+                        console.print("Use /reasoning [effort|default].")
                         continue
-                    next_provider = parts[1].strip().lower()
-                    if next_provider not in {"openai", "anthropic", "gemini"}:
-                        console.print("[red]Provider must be openai, anthropic, or gemini.[/red]")
+                    if len(parts) == 2 and parts[1] == "default":
+                        current_reasoning_effort = None
+                        console.print(_reasoning_status(), markup=False)
                         continue
-                    next_model = parts[2].strip() if len(parts) >= 3 else get_default_model(next_provider)
-                    if next_provider != current_provider and current_thread_id:
-                        if not Confirm.ask(
-                            "Switching provider resets context thread. Continue?",
-                            default=False,
-                        ):
-                            continue
-                        current_thread_id = None
-                    current_provider = next_provider
-                    current_model = next_model
-                    web_search_requested = (
-                        current_provider == "openai"
-                        and str(os.getenv("OPENVEGAS_CHAT_WEB_SEARCH_DEFAULT", "1")).strip().lower()
-                        in {"1", "true", "yes", "on"}
-                    )
-                    console.print(f"[green]Provider/model set to {current_provider}/{current_model}.[/green]")
+                    try:
+                        await _refresh_model_capabilities()
+                        if len(parts) == 2:
+                            if parts[1] not in current_reasoning_efforts:
+                                raise ModelSelectionError("Effort is not reviewed for this model; selection unchanged.")
+                            current_reasoning_effort = parts[1]
+                        console.print(_reasoning_status(), markup=False)
+                    except (APIError, ModelSelectionError) as exc:
+                        console.print(f"Reasoning unchanged: {exc}", markup=False)
                     continue
-                if cmd == "/model":
+                if cmd == "/continuity":
+                    if parts not in [["/continuity", "on"], ["/continuity", "off"]]:
+                        console.print("Use /continuity on for text-only history, or off for a fresh coding conversation.")
+                        continue
+                    if parts[1] == "on" and not allow_model_switch:
+                        console.print("Model switching is disabled in this environment.")
+                        continue
+                    if parts[1] == "on" and conversation_mode != "persistent":
+                        console.print("Canonical continuity requires explicit persistent conversation mode.")
+                        continue
+                    if any(job.process.returncode is None for job in model_switch_local_tools._BACKGROUND_JOBS.values()):
+                        console.print("Finish/cancel tools before starting a fresh conversation.")
+                        continue
+                    if parts[1] == "on" and pending_attachments:
+                        console.print("Text-only continuity does not support attachments; remove pending attachments first.")
+                        continue
+                    continuity_prompt = (
+                        "Start a fresh text-only conversation? Tools, attachments and web search are disabled; existing context will not transfer."
+                        if parts[1] == "on" else
+                        "Start a fresh coding conversation? Existing context will not transfer; pending attachments will be retained."
+                    )
+                    if not await _chat_modal(lambda: Confirm.ask(continuity_prompt, default=False)):
+                        continue
+                    try:
+                        if startup_bootstrap_task is not None:
+                            await asyncio.shield(startup_bootstrap_task)
+                        created = None
+                        if parts[1] == "on":
+                            if conversation_mode != "persistent":
+                                raise ModelSelectionError("Persistent mode is no longer enabled; conversation unchanged.")
+                            created = await client._request("POST", "/models/conversations", json={
+                                "provider": current_provider, "model": current_model,
+                            })
+                            if not created.get("thread_id") or not created.get("revision"):
+                                raise ModelSelectionError("Backend did not create canonical context; model unchanged.")
+                        if native_generation_session.history_active or native_generation_session.prepared_handoff:
+                            await _reset_native_task()
+                        current_thread_id = created["thread_id"] if created else None
+                        client._canonical_chat = {"revision": created["revision"]} if created else None
+                        chat_transcript.clear()
+                        console.print("Fresh text-only continuity enabled." if created else "Fresh coding conversation selected.")
+                    except (APIError, ModelSelectionError) as exc:
+                        console.print(f"Conversation unchanged: {exc}", markup=False)
+                    continue
+                if cmd in {"/models", "/provider", "/model"}:
                     if not allow_model_switch:
-                        console.print("[yellow]Model switching is disabled in this environment.[/yellow]")
+                        console.print("Model switching is disabled in this environment.")
                         continue
-                    if len(parts) < 2:
-                        console.print("[red]Usage: /model <model_id>[/red]")
-                        continue
-                    current_model = parts[1].strip()
-                    console.print(f"[green]Model set to {current_model}.[/green]")
+                    try:
+                        # Startup sync can otherwise overwrite the model during validation.
+                        if startup_bootstrap_task is not None:
+                            await asyncio.shield(startup_bootstrap_task)
+                        if cmd == "/models" or (cmd == "/provider" and len(parts) == 2):
+                            listed_provider = parts[1].lower() if cmd == "/provider" else None
+                            payload = await client.list_models(listed_provider)
+                            search = " ".join(parts[1:]) if cmd == "/models" else ""
+                            console.print(format_options(model_options(payload, search=search)), markup=False)
+                            continue
+                        if (cmd == "/provider" and len(parts) != 3) or (cmd == "/model" and len(parts) != 2):
+                            console.print("Use /provider <provider> <model_id> or /model <model_id>.")
+                            continue
+                        next_provider = parts[1].lower() if cmd == "/provider" else current_provider
+                        next_model = parts[2] if cmd == "/provider" else parts[1]
+                        if pending_native_handoff is not None:
+                            await _switch_native_model(next_provider, next_model)
+                            continue
+                        target = await validate_selection(client, next_provider, next_model)
+                        if (_env_flag("OPENVEGAS_CHAT_NATIVE_TASK_HANDOFF", "0")
+                                and native_generation_session.history_active
+                                and (next_provider, next_model) != (current_provider, current_model)):
+                            await _switch_native_model(next_provider, next_model, target)
+                            continue
+                        if native_generation_session.awaiting_first_dispatch:
+                            console.print("The confirmed destination is awaiting its first task; use /continuity off to explicitly start fresh.", markup=False)
+                            continue
+                        plan_args = dict(
+                            current_provider=current_provider, current_model=current_model,
+                            thread_id=current_thread_id, pending_attachments=bool(pending_attachments),
+                            has_history=bool(chat_transcript),
+                            native_task_active=native_generation_session.history_active,
+                            tools_pending=any(
+                                job.process.returncode is None
+                                for job in model_switch_local_tools._BACKGROUND_JOBS.values()
+                            ),
+                        )
+                        if isinstance(getattr(client, "_canonical_chat", None), dict):
+                            if plan_args["pending_attachments"] or plan_args["tools_pending"]:
+                                console.print("Finish/cancel tools and remove attachments before switching.")
+                                continue
+                            payload = {"provider": next_provider, "model": next_model, "thread_id": current_thread_id}
+                            proposal = await client._request("POST", "/models/switch", json=payload)
+                            if proposal.get("status") != "ready" or not proposal.get("revision"):
+                                raise ModelSelectionError("Backend did not validate canonical continuity.")
+                            if not await _chat_modal(lambda: Confirm.ask("Transfer complete canonical text? Tools and attachments are unsupported. No model call is made by switching.", default=False)):
+                                continue
+                            target = await validate_selection(client, next_provider, next_model)
+                            applied = await client._request("POST", "/models/switch", json={
+                                **payload, "commit": True, "expected_revision": proposal["revision"],
+                            })
+                            if (
+                                applied.get("context_transferred") is not True
+                                or not applied.get("thread_id")
+                                or applied.get("revision") != proposal["revision"]
+                            ):
+                                raise ModelSelectionError("Backend did not confirm the transfer; model unchanged.")
+                            current_provider, current_model, current_thread_id = next_provider, next_model, applied["thread_id"]
+                            client._canonical_chat = {"revision": applied["revision"]}
+                            web_search_requested = False
+                            console.print(f"Selected {current_provider}/{current_model}; full canonical text retained, no tool replay.", markup=False)
+                            if "openrouter" in {current_provider, plan_args["current_provider"]}:
+                                _reasoning_for_model(target)
+                            else:
+                                console.print("Reasoning effort: provider default; selection unavailable in this adapter.")
+                            continue
+                        switch = plan_switch(target, **plan_args)
+                        if switch.status == "confirm_fresh":
+                            if not await _chat_modal(lambda switch=switch: Confirm.ask(switch.message + " Continue?", default=False)):
+                                continue
+                            # Revalidate after a potentially long confirmation prompt.
+                            target = await validate_selection(client, next_provider, next_model)
+                            switch = plan_switch(target, **plan_args, confirm_fresh=True)
+                        if switch.status != "ready":
+                            console.print(switch.message, markup=False)
+                            continue
+                        # No await between the final decision and local state assignment.
+                        current_provider, current_model, current_thread_id = (
+                            switch.provider, switch.model, switch.thread_id,
+                        )
+                        _use_model_capabilities(target)
+                        web_search_requested = (
+                            (current_provider == "openai" or (
+                                current_provider == "openrouter" and _chat_capability("web_search")
+                            ))
+                            and _env_flag("OPENVEGAS_CHAT_WEB_SEARCH_DEFAULT", "1")
+                        )
+                        console.print(f"Selected {current_provider}/{current_model}. {switch.message}", markup=False)
+                        if "openrouter" in {current_provider, plan_args["current_provider"]}:
+                            _reasoning_for_model(target)
+                        else:
+                            console.print("Reasoning effort: provider default; selection unavailable in this adapter.")
+                    except (APIError, ModelSelectionError) as exc:
+                        console.print(f"Model unchanged: {exc}", markup=False)
                     continue
                 if cmd == "/ui":
                     if current_run_id:
@@ -9031,11 +10146,20 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 console.print("[red]Unknown slash command. Use /help.[/red]")
                 continue
 
+            if isinstance(getattr(client, "_canonical_chat", None), dict) and (
+                pending_attachments or _message_requests_attachment_analysis(message)
+            ):
+                console.print(
+                    "Text-only continuity cannot consume attachments. Nothing uploaded or sent; "
+                    "attachments retained. Use /continuity off to explicitly start a fresh coding "
+                    "conversation with these attachments.", markup=False,
+                )
+                continue
             turn_is_workspace_intent = _has_workspace_tooling_intent(message)
             auto_paths: list[str] = []
             unresolved_inline: list[str] = []
             auto_resolve_timed_out = False
-            if not turn_is_workspace_intent:
+            if not turn_is_workspace_intent and not isinstance(getattr(client, "_canonical_chat", None), dict):
                 if not pending_attachments:
                     if _extract_filename_like_tokens(message):
                         _render_capability_status("file_read", "parsing files...")
@@ -9100,53 +10224,33 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                             f"{markers} [yellow]Use /attach <path> before sending.[/yellow]"
                         )
 
-            (
-                capability_filtered_pending,
-                dropped_image_count,
-                blocked_all_images,
-            ) = _preflight_filter_attachments_for_capabilities(
-                pending_attachments,
-                provider=current_provider,
-                model=current_model,
-            )
-            if dropped_image_count > 0:
-                if blocked_all_images:
+            try:
+                if startup_bootstrap_task is not None:
+                    await asyncio.shield(startup_bootstrap_task)
+                if isinstance(getattr(client, "_canonical_chat", None), dict) and pending_attachments:
                     console.print(
-                        "[yellow]"
-                        f"{current_provider}/{current_model} does not support image input. "
-                        "Remove image attachments or switch to a vision-capable model."
-                        "[/yellow]"
+                        "Text-only continuity cannot consume attachments. Nothing uploaded or sent; "
+                        "attachments retained. Use /continuity off to explicitly start a fresh coding "
+                        "conversation with these attachments.",
+                        markup=False,
                     )
-                    emit_metric(
-                        "chat_attachment_blocked_capability_total",
-                        {
-                            "feature": "image_input",
-                            "provider": current_provider,
-                            "model": current_model,
-                            "had_uploaded": False,
-                        },
-                    )
-                    render_status_bar(console, _status_actor(), "image input unavailable", workspace_root)
-                    pending_attachments.clear()
                     continue
-                pending_attachments[:] = capability_filtered_pending
+                await _validate_openrouter_request(reasoning_effort=current_reasoning_effort)
+            except (APIError, ModelSelectionError) as exc:
+                console.print(f"Request not sent; attachments retained: {exc}", markup=False)
+                continue
+            _, unsupported_count, attachments_blocked = _preflight_filter_attachments_for_capabilities(
+                pending_attachments, provider=current_provider, model=current_model,
+                remote_capabilities=current_model_capabilities,
+            )
+            if attachments_blocked:
                 console.print(
-                    "[yellow]"
-                    f"Dropped {dropped_image_count} image attachment(s) — "
-                    f"{current_provider}/{current_model} does not support image input. "
-                    f"Continuing with {len(capability_filtered_pending)} non-image file(s)."
-                    "[/yellow]"
+                    f"{current_provider}/{current_model} does not support {unsupported_count} pending attachment(s). "
+                    "Nothing was sent; attachments retained. Remove unsupported files before switching or retrying.",
+                    markup=False,
                 )
-                emit_metric(
-                    "chat_attachment_dropped_capability_total",
-                    {
-                        "feature": "image_input",
-                        "provider": current_provider,
-                        "model": current_model,
-                        "dropped": dropped_image_count,
-                        "kept": len(capability_filtered_pending),
-                    },
-                )
+                render_status_bar(console, _status_actor(), "attachment input unavailable", workspace_root)
+                continue
 
             if pending_attachments:
                 _render_attachment_status_row(force=True)
@@ -9158,15 +10262,17 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 attachment_context_for_turn,
                 attachment_file_ids_for_turn,
             ) = await _prepare_attachments_for_turn()
+            if len(_uploaded_for_turn) != len(pending_attachments) or len(attachment_file_ids_for_turn) != len(pending_attachments):
+                console.print("Request not sent: some attachments failed to upload. All attachments retained; use /retry-failed or /detach.")
+                attachment_markers_for_turn, attachment_file_ids_for_turn = [], []
+                attachment_context_for_turn = ""
+                voice_transcript_context_for_turn = ""
+                continue
             voice_transcript_context_for_turn = ""
             last_voice_transcribe_used = False
             last_voice_transcribe_effective = bool(
                 voice_transcribe_requested
-                and resolve_capability(
-                    current_provider,
-                    current_model,
-                    "speech_to_text",
-                )
+                and _chat_capability("speech_to_text")
             )
             if _uploaded_for_turn:
                 (
@@ -9226,7 +10332,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 str(att.mime_type or "").lower().startswith("image/")
                 for att in _uploaded_for_turn
             )
-            if has_image_attachment and not resolve_capability(current_provider, current_model, "image_input"):
+            if has_image_attachment and not _chat_capability("image_input"):
                 emit_metric(
                     "chat_attachment_blocked_capability_total",
                     {
@@ -9248,31 +10354,21 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 _tool_debug(
                     "unexpected capability preflight bypass: uploaded image attachment reached post-upload guard"
                 )
-                non_image_uploaded = [att for att in _uploaded_for_turn if not _attachment_is_image(att)]
-                if non_image_uploaded:
-                    dropped_after_upload = len(_uploaded_for_turn) - len(non_image_uploaded)
-                    _uploaded_for_turn = non_image_uploaded
-                    attachment_markers_for_turn = [_attachment_marker(att.name) for att in _uploaded_for_turn]
-                    attachment_file_ids_for_turn = [
-                        str(att.remote_file_id).strip()
-                        for att in _uploaded_for_turn
-                        if str(att.remote_file_id or "").strip()
-                    ]
-                    console.print(
-                        "[yellow]"
-                        f"Dropped {dropped_after_upload} uploaded image attachment(s) — "
-                        "model does not support image input."
-                        "[/yellow]"
-                    )
-                else:
-                    console.print(
-                        "[yellow]Image input is not supported for this provider/model. "
-                        "Switch model/provider or remove image attachments.[/yellow]"
-                    )
-                    render_status_bar(console, _status_actor(), "image input unavailable", workspace_root)
-                    continue
+                console.print("Image input is unavailable. Request not sent; all attachments retained.")
+                attachment_markers_for_turn, attachment_file_ids_for_turn = [], []
+                attachment_context_for_turn = ""
+                continue
+            active_emote_turn = None
             try:
-                rendered = await _run_tool_loop(client, message)
+                active_emote_turn = emote_bridge.begin()
+                async with emote_bridge.supervise(turn=active_emote_turn):
+                    if owned_compositor is not None:
+                        rendered = await owned_compositor.run_turn(
+                            _run_tool_loop(client, message),
+                            on_cancel=lambda turn=active_emote_turn: emote_bridge.cancel(turn=turn),
+                        )
+                    else:
+                        rendered = await _run_tool_loop(client, message)
                 if not rendered:
                     console.print("[dim](no final assistant response)[/dim]")
                 elif str(last_assistant_text_for_turn or "").strip():
@@ -9284,13 +10380,21 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                         }
                     )
                 await _schedule_low_balance_hint(force=False)
-                pending_attachments.clear()
+                if rendered:
+                    pending_attachments.clear()
                 attachment_markers_for_turn = []
                 attachment_context_for_turn = ""
                 voice_transcript_context_for_turn = ""
                 attachment_file_ids_for_turn = []
 
+            except TurnCancelled:
+                attachment_markers_for_turn = []
+                attachment_context_for_turn = ""
+                voice_transcript_context_for_turn = ""
+                attachment_file_ids_for_turn = []
+                console.print("[dim]Task cancelled. Your draft is still in the input.[/dim]")
             except APIError as e:
+                emote_bridge.finish(success=False, turn=active_emote_turn)
                 attachment_markers_for_turn = []
                 attachment_context_for_turn = ""
                 voice_transcript_context_for_turn = ""
@@ -9309,7 +10413,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                     except Exception:
                         enabled_models = []
                     suggestions = [s for s in enabled_models if s][:3]
-                    if not allow_model_switch and suggestions:
+                    if not allow_model_switch and suggestions and current_provider != "openrouter":
                         previous_model = current_model
                         current_model = _pick_preferred_model(enabled_models, current_model)
                         console.print(
@@ -9336,6 +10440,10 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                             console.print(f"[red]{e.detail}[/red]")
                     except Exception:
                         console.print(f"[red]{e.detail}[/red]")
+
+            finally:
+                if active_emote_turn is not None:
+                    emote_bridge.cancel(turn=active_emote_turn)
 
     use_fullscreen_chat = str(os.getenv("OPENVEGAS_CHAT_FULLSCREEN", "0")).strip().lower() in {
         "1",
@@ -9402,9 +10510,21 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 f" ({type(exc).__name__})[/yellow]"
             )
 
+    async def _run_chat_with_owner() -> str:
+        nonlocal owned_compositor, chat_prompt_session, chat_prompt_bindings
+        try:
+            return await _run_chat()
+        finally:
+            if owned_compositor is not None:
+                voice_button.stop_if_recording()
+                await owned_compositor.close()
+                owned_compositor = None
+                chat_prompt_session = None
+                chat_prompt_bindings = None
+
     try:
         while True:
-            outcome = run_async(_run_chat())
+            outcome = run_async(_run_chat_with_owner())
             if outcome == "ui":
                 from openvegas.tui.prompt_ui import run_prompt_ui
 
@@ -9412,6 +10532,7 @@ def chat(provider: str | None, model: str | None, dealer_sprite: bool):
                 continue
             break
     finally:
+        emote_bridge.close()
         aclose = getattr(client, "aclose", None)
         if callable(aclose):
             try:
@@ -9446,15 +10567,20 @@ def models(provider: str | None):
             table.add_column("Status")
 
             for m in models_list:
-                status = "[green]enabled[/green]" if m.get("enabled") else "[red]disabled[/red]"
+                if not m.get("enabled"):
+                    status = "[red]disabled[/red]"
+                elif m.get("available") is False:
+                    status = "[yellow]unavailable[/yellow]"
+                else:
+                    status = "[green]available[/green]"
                 table.add_row(
                     m.get("provider", ""),
                     m.get("model_id", ""),
                     m.get("display_name", ""),
                     str(m.get("cost_input_per_1m", "")),
                     str(m.get("cost_output_per_1m", "")),
-                    str(m.get("v_price_input_per_1m", "")),
-                    str(m.get("v_price_output_per_1m", "")),
+                    format_v(m.get("v_price_input_per_1m")),
+                    format_v(m.get("v_price_output_per_1m")),
                     status,
                 )
             console.print(table)
@@ -9799,7 +10925,7 @@ def store_buy(item_id: str, idempotency_key: str | None):
                 f"[green]Order {data.get('order_id', '')}[/green] "
                 f"status={data.get('status', '')} state={data.get('state', '')}"
             )
-            console.print(f"[bold]Cost:[/bold] {data.get('cost_v', '0')} $V")
+            console.print(f"[bold]Cost:[/bold] {format_v(data.get('cost_v', '0'))}")
             grants = data.get("grants", [])
             if grants:
                 table = Table(title="Granted Inference Credits")
@@ -9922,8 +11048,9 @@ def config_set(key: str, value: str):
     config = load_config()
 
     if key == "default_provider":
-        if value not in ("openai", "anthropic", "gemini"):
-            console.print("[red]Provider must be openai, anthropic, or gemini[/red]")
+        from openvegas.gateway.providers import PROVIDERS
+        if value not in PROVIDERS:
+            console.print("Provider must be one of: " + ", ".join(PROVIDERS), markup=False)
             return
         config["default_provider"] = value
     elif key.startswith("default_model_"):
@@ -9981,6 +11108,31 @@ def config_show():
             display["providers"][p]["api_key"] = key[:8] + "..." if key else ""
 
     console.print(json.dumps(display, indent=2))
+
+
+from openvegas.emotes.commands import emote
+
+cli.add_command(emote)
+from openvegas.tv.commands import tv
+cli.add_command(tv)
+from openvegas.integrations.commands import go, integration
+from openvegas.integrations.game_command import game as native_game_step
+from openvegas.integrations.native import HostCommand, native
+from openvegas.integrations.use import use as use_native_billing
+from openvegas.integrations.animation_demo import demo as native_animation_demo
+cli.add_command(go)
+cli.add_command(integration)
+cli.add_command(native_game_step)
+cli.add_command(native)
+cli.add_command(use_native_billing)
+cli.add_command(native_animation_demo)
+cli.add_command(HostCommand('claude'))
+cli.add_command(HostCommand('codex'))
+from openvegas.agent.dashboard_cli import agents
+cli.add_command(agents)
+from openvegas.arena.commands import arena, pvp
+cli.add_command(arena)
+cli.add_command(pvp)
 
 
 if __name__ == "__main__":

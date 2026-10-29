@@ -141,6 +141,20 @@ class PokerGame(BaseCasinoGame):
 
     def apply_action(self, state, action, payload, rng, client_seed, nonce):
         _ = (payload, rng, client_seed, nonce)
+        # Opt in only new human rounds; persisted and agent rounds keep their rules.
+        if state.get("_human_streets") == 1:
+            if action not in self.valid_actions(state):
+                return state
+            if action == "showdown":
+                state["phase"] = "resolved"
+                return state
+            if action in {"call", "reveal_river"}:
+                community = list(state["community"])
+                deck = list(state["deck"])
+                community.append(deck.pop())
+                state.update(community=community, deck=deck, player_action="call",
+                             phase="turn" if action == "call" else "river")
+                return state
         if state.get("phase") != "decision":
             return state
         if action == "fold":
@@ -201,6 +215,11 @@ class PokerGame(BaseCasinoGame):
         }
 
     def valid_actions(self, state):
+        if state.get("_human_streets") == 1:
+            if state.get("phase") == "turn":
+                return ["reveal_river"]
+            if state.get("phase") == "river":
+                return ["showdown"]
         if state.get("phase") == "decision":
             return ["call", "fold"]
         return []

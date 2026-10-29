@@ -39,10 +39,11 @@ BEGIN
       status NOT IN ('succeeded','failed','timed_out','blocked')
       OR (
         terminal_response_status IS NOT NULL
+        AND terminal_response_content_type IS NOT NULL
         AND terminal_response_content_type = 'application/json'
         AND terminal_response_body_text IS NOT NULL
       )
-    );
+    ) NOT VALID; -- Preserve pre-022 terminal history; enforce every new/updated row.
 END $$;
 
 INSERT INTO schema_migrations(version)

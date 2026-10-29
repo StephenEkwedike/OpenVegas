@@ -61,6 +61,8 @@ class ProposeToolRequest(BaseModel):
     shell_mode: str | None = None
     timeout_sec: int | None = Field(default=None, ge=1)
     plan_mode: bool = False
+    native_inference_request_id: str | None = Field(default=None, max_length=36)
+    native_provider_call_id: str | None = Field(default=None, max_length=256)
 
 
 class StartToolRequest(BaseModel):
@@ -258,10 +260,28 @@ async def propose_tool(run_id: str, req: ProposeToolRequest, user: dict = Depend
             shell_mode=req.shell_mode,
             timeout_sec=req.timeout_sec,
             plan_mode=req.plan_mode,
+            **({"native_inference_request_id": req.native_inference_request_id,
+                "native_provider_call_id": req.native_provider_call_id}
+               if req.native_inference_request_id is not None or req.native_provider_call_id is not None else {}),
         )
         return JSONResponse(status_code=result.status_code, content=result.payload)
     except ContractError as e:
         return JSONResponse(status_code=_status_for_error(e.code), content={"error": e.code.value, "detail": e.detail})
+
+
+@router.get("/{run_id}/native-tool-receipts")
+async def native_tool_receipts(
+    run_id: str, runtime_session_id: str, provider: str, model: str,
+    user: dict = Depends(get_current_user),
+):
+    try:
+        return await get_agent_orchestration_service().native_tool_receipts(
+            user_id=user["user_id"], run_id=run_id, runtime_session_id=runtime_session_id,
+            provider=provider, model=model,
+        )
+    except ContractError as error:
+        return JSONResponse(status_code=_status_for_error(error.code),
+                            content={"error": error.code.value, "detail": error.detail})
 
 
 @router.post("/{run_id}/tools/start")

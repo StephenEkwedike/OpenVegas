@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from openvegas.integrations.game_result import amount as format_v
+
 from dataclasses import dataclass
 from dataclasses import field
 from decimal import Decimal, InvalidOperation
@@ -81,7 +83,7 @@ def validate_inputs(state: WizardState) -> str | None:
             if stake <= 0:
                 return "Stake must be greater than 0."
             if stake < min_game_wager_v():
-                return f"Stake must be at least {min_game_wager_v():.2f} $V."
+                return f"Stake must be at least {format_v(min_game_wager_v())}."
             if state.game == "horse":
                 if not state.horse.strip():
                     return "Horse number is required for horse play."

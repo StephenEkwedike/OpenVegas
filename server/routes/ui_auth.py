@@ -3,19 +3,39 @@
 from __future__ import annotations
 
 import logging
+import base64
+import hashlib
+import json
 import os
+import secrets
 import time
+from urllib.parse import urlencode, urlsplit
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, Response
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
 from openvegas.telemetry import emit_metric, emit_once_process
+from openvegas.auth_config import public_auth_config
 from server.services.dependencies import current_flags, request_with_http_client
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+@router.get("/auth/config")
+async def client_auth_config():
+    """Public client settings only; never publish a server/service-role key."""
+    try:
+        config = public_auth_config(
+            os.getenv("SUPABASE_PUBLIC_URL") or os.getenv("SUPABASE_URL", ""),
+            os.getenv("SUPABASE_ANON_KEY", ""),
+        )
+    except ValueError:
+        raise HTTPException(503, "Public authentication configuration is unavailable") from None
+    config["google_enabled"] = bool(os.getenv("OPENVEGAS_GOOGLE_AUTH_REDIRECT_URL", "").strip())
+    return JSONResponse(config, headers={"Cache-Control": "no-store"})
 
 RUNTIME_FLAGS = current_flags()  # frozen at process boot via @lru_cache
 TRUST_PROXY_HEADERS = bool(RUNTIME_FLAGS.trusted_proxy_headers_enabled)
@@ -29,6 +49,96 @@ class UiLoginRequest(BaseModel):
 
 class UiImportSessionRequest(BaseModel):
     refresh_token: str
+
+
+class GoogleStartRequest(BaseModel):
+    next: str = "/ui/balance"
+
+
+def _oauth_cookie_name():
+    return "__Host-ov_google_pkce" if _cookie_secure() else "ov_google_pkce"
+
+
+def _google_next(value):
+    # Restrict the redirect to UI routes; never interpret user-supplied origins.
+    if (not isinstance(value, str) or not value.startswith("/ui/") or
+            value.startswith(("/ui/auth/", "/ui/login")) or "\\" in value or
+            any(ord(c) < 32 for c in value) or len(value) > 2048):
+        return "/ui/balance"
+    return value
+
+
+def _google_callback(request):
+    callback = os.getenv("OPENVEGAS_GOOGLE_AUTH_REDIRECT_URL", "").strip()
+    parsed = urlsplit(callback)
+    if (not callback or parsed.path != "/ui/auth/google/callback" or parsed.query or parsed.fragment
+            or parsed.username or parsed.password or
+            f"{parsed.scheme}://{parsed.netloc}" != _request_origin_base(request) or
+            (parsed.scheme != "https" and not (not _is_production_env() and
+                parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"}))):
+        raise HTTPException(503, "Google sign-in is not configured for this site")
+    return callback
+
+
+@router.post("/ui/auth/google/start")
+async def google_start(payload: GoogleStartRequest, request: Request):
+    _assert_same_origin(request)
+    callback = _google_callback(request)
+    internal, anon = _supabase_cfg()
+    # Reuse validated public Supabase configuration, not an internal Docker URL.
+    try:
+        public = public_auth_config(os.getenv("SUPABASE_PUBLIC_URL") or internal, anon)
+    except ValueError:
+        raise HTTPException(503, "Public authentication configuration is unavailable") from None
+    verifier = secrets.token_urlsafe(48)
+    state = secrets.token_urlsafe(32)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
+    target = public["supabase_url"].rstrip("/") + "/auth/v1/authorize?" + urlencode({
+        "provider": "google", "redirect_to": callback + "?ov_state=" + state,
+        "code_challenge": challenge, "code_challenge_method": "s256"})
+    response = JSONResponse({"url": target})
+    response.set_cookie(_oauth_cookie_name(), json.dumps({"verifier": verifier, "state": state,
+        "next": _google_next(payload.next), "expires": int(time.time()) + 600}), max_age=600,
+        **{**_cookie_kwargs(), "samesite": "lax"})
+    _no_store(response)
+    return response
+
+
+@router.get("/ui/auth/google/callback")
+async def google_callback(request: Request):
+    _google_callback(request)
+    # Neither refresh nor access tokens appear in the browser URL or response body.
+    response = RedirectResponse("/ui/login?oauth_error=google", status_code=303)
+    response.delete_cookie(_oauth_cookie_name(), **{**_cookie_kwargs(), "samesite": "lax"})
+    _no_store(response)
+    response.headers["Referrer-Policy"] = "no-referrer"
+    try:
+        saved = json.loads(request.cookies.get(_oauth_cookie_name(), "{}"))
+        code = request.query_params.get("code", "")
+        state = request.query_params.get("ov_state", "")
+        if (not code or len(code) > 2048 or not state or not isinstance(saved, dict)
+                or not isinstance(saved.get("state"), str)
+                or not secrets.compare_digest(state, saved["state"])
+                or saved.get("expires", 0) < time.time()
+                or not isinstance(saved.get("verifier"), str)):
+            return response
+        supabase, anon = _supabase_cfg()
+        result = await request_with_http_client("POST", supabase + "/auth/v1/token?grant_type=pkce",
+            headers={"apikey": anon, "Content-Type": "application/json"},
+            json={"auth_code": code, "code_verifier": saved["verifier"]}, timeout=12)
+        if result.status_code != 200:
+            return response
+        body = result.json()
+        if not body.get("access_token") or not body.get("refresh_token"):
+            return response
+        _set_refresh_cookie(response, body["refresh_token"])
+        response.headers["location"] = "/ui/login?" + urlencode({"oauth_success": "1", "next": _google_next(saved.get("next"))})
+    except (ValueError, TypeError, KeyError):
+        return response
+    except Exception:
+        # Provider errors never leak tokens or upstream bodies into logs/UI.
+        return response
+    return response
 
 
 def _as_bool(raw: str, default: bool = False) -> bool:
@@ -243,16 +353,13 @@ async def _supabase_signup(
 ) -> dict[str, Any]:
     supabase_url, supabase_anon = _supabase_cfg()
     payload: dict[str, Any] = {"email": email, "password": password}
-    if email_redirect_to:
-        # GoTrue compatibility across versions: include both fields.
-        payload["email_redirect_to"] = email_redirect_to
-        payload["redirect_to"] = email_redirect_to
     try:
         res = await request_with_http_client(
             "POST",
             f"{supabase_url}/auth/v1/signup",
             headers={"apikey": supabase_anon, "Content-Type": "application/json"},
             json=payload,
+            params={"redirect_to": email_redirect_to} if email_redirect_to else {},
             timeout=12,
         )
     except Exception as e:  # pragma: no cover - defensive network wrapper

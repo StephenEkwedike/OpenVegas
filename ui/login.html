@@ -12,6 +12,7 @@
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@300;400;500;700&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="/ui/assets/theme.css?v=20260330" />
     <link rel="stylesheet" href="/ui/assets/layout.css?v=20260330" />
+    <link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@500&display=swap" rel="stylesheet" />
     <script defer src="/ui/assets/theme-fallback.js?v=20260330"></script>
     <style>
       .login-wrap { max-width: 760px; margin: 0 auto; }
@@ -30,16 +31,29 @@
       .token-area { min-height: 100px; }
       .inline-actions { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 12px; }
       #signupBtn[hidden] { display: none !important; }
+      #googleLogin {
+        display: inline-flex; align-items: center; justify-content: center; gap: 10px;
+        min-height: 40px; max-width: 100%; padding: 0 12px; margin-top: 8px;
+        background: #fff; color: #1f1f1f; border: 1px solid #747775; border-radius: 4px;
+        font: 500 14px/20px 'Google Sans', sans-serif; letter-spacing: normal;
+        text-transform: none; cursor: pointer;
+      }
+      #googleLogin img { width: 20px; height: 20px; flex: 0 0 20px; object-fit: contain; }
+      #googleLogin:hover:not(:disabled) { background: #f8faff; box-shadow: 0 1px 2px #0002; }
+      #googleLogin:focus-visible { outline: 2px solid #0b57d0; outline-offset: 3px; }
+      #googleLogin:disabled { cursor: not-allowed; color: #747775; }
       .status { margin-top: 12px; font-family: var(--font-mono); font-size: 11px; color: var(--grey-light); }
       details { margin-top: 14px; border-top: 1px solid var(--grey-dark); padding-top: 12px; }
       summary { cursor: pointer; font-family: var(--font-mono); font-size: 11px; color: var(--grey-light); }
     </style>
-  </head>
-  <body>
+  <link rel="stylesheet" href="/ui/assets/home-clarity.css?v=20261028" />
+<link rel="stylesheet" href="/ui/assets/site-clarity.css?v=20261028" />
+</head>
+  <body class="site-clarity">
     <nav class="top-nav">
       <a href="/ui" class="brand-link text-mono-sm">[ OPENVEGAS ]</a>
       <div style="display:flex; align-items:center; gap:14px;">
-        <div id="siteNav" class="nav-links"><a href="/ui">Home</a><a href="/ui/how-it-works">How it works</a><a href="/ui/pricing">Pricing</a><a href="/ui/balance">Balance</a><a href="/ui/faq">FAQ</a><a href="/ui/how-to-play">HOW TO PLAY</a><a href="/ui/contact">Contact</a></div>
+        <div id="siteNav" class="nav-links"><a href="/ui/how-it-works">How it works</a><a href="/ui/how-to-play">How to Play</a><a href="/ui/arena">Arena <span class="nav-soon">Soon</span></a><a href="/ui/pricing">Pricing</a><a href="/ui/emotes">Emotes</a><a href="/ui/balance">Balance</a></div>
         <div id="founderLinks" class="founder-links"></div>
         <button type="button" id="ov-theme-toggle" class="theme-toggle" role="switch" aria-label="Toggle light and dark mode" aria-checked="false"><span class="theme-toggle__icon" aria-hidden="true">☀</span><span class="theme-toggle__rail" aria-hidden="true"><span class="theme-toggle__thumb"></span></span><span class="theme-toggle__icon" aria-hidden="true">☾</span></button>
       </div>
@@ -49,7 +63,7 @@
       <header class="page-hero" style="grid-template-columns: 1fr;">
         <div>
           <div class="text-mono-xs" style="margin-bottom:1rem">AUTHENTICATED SURFACE</div>
-          <h1 class="page-title">Browser Login</h1>
+          <h1 class="page-title">Sign in or join.</h1>
           <p class="text-mono-sm page-lead">
             Sign in with your OpenVegas credentials. After login, wallet and billing pages use your live account data.
           </p>
@@ -58,8 +72,11 @@
 
       <section class="card login-form">
         <div class="text-mono-xs">CREDENTIAL LOGIN</div>
+        <div class="cta-row" aria-label="Account access"><a id="chooseSignin" class="btn" href="/ui/login">Sign in</a><a id="chooseSignup" class="btn" href="/ui/login?mode=signup">Create account</a></div>
         <h2 id="authHeading" class="card-title">Sign in</h2>
         <p id="authCopy" class="card-copy">Use the same email/password as `openvegas login` and `openvegas signup`.</p>
+        <button id="googleLogin" type="button" aria-describedby="googleStatus" disabled><img src="/ui/assets/brand/google-g.png" alt="" width="20" height="20" /><span>Continue with Google</span></button>
+        <p id="googleStatus" class="status">Checking Google sign-in availability...</p>
 
         <div class="field-grid">
           <input id="emailInput" class="input" type="email" autocomplete="username" placeholder="Email" />
@@ -86,19 +103,23 @@
     </main>
 
     <script type="module">
-      import { renderTopNav, renderFounderLinks, installAssetGuard, byId } from "/ui/assets/site.js?v=20260330";
-      import { authProbe, clearBrowserToken, getBrowserToken, setBrowserToken } from "/ui/assets/page-auth.js?v=20260330";
+      import { renderTopNav, renderFounderLinks, installAssetGuard, byId } from "/ui/assets/site.js?v=20261028";
+      import { authProbe, clearBrowserToken, getBrowserToken, setBrowserToken, refreshSessionSummary } from "/ui/assets/page-auth.js?v=20260330";
 
       installAssetGuard();
       renderTopNav("siteNav");
       renderFounderLinks("founderLinks");
 
       const params = new URLSearchParams(window.location.search);
+      if (params.get("oauth_success") === "1") clearBrowserToken();
       const rawNext = params.get("next") || "/ui/balance";
       const next = rawNext.startsWith("/ui") && !rawNext.startsWith("/ui/login") ? rawNext : "/ui/balance";
       const mode = String(params.get("mode") || "").toLowerCase();
       byId("backLink").href = next;
       const signupMode = mode === "signup";
+      byId('chooseSignin').href = `/ui/login?next=${encodeURIComponent(next)}`;
+      byId('chooseSignup').href = `/ui/login?mode=signup&next=${encodeURIComponent(next)}`;
+      byId(signupMode ? 'chooseSignup' : 'chooseSignin').setAttribute('aria-current','page');
       const signupBtn = byId("signupBtn");
 
       if (signupBtn) {
@@ -110,7 +131,7 @@
       if (signupMode) {
         document.title = "OpenVegas | Browser Signup";
         const pageTitle = document.querySelector(".page-title");
-        if (pageTitle) pageTitle.textContent = "Browser Signup";
+        if (pageTitle) pageTitle.textContent = "Create your account.";
         const pageLead = document.querySelector(".page-lead");
         if (pageLead) {
           pageLead.textContent = "Create your OpenVegas account. After verification, wallet and billing pages use your live account data.";
@@ -133,6 +154,23 @@
       }
 
       const statusEl = byId("status");
+      if (params.has("oauth_error")) statusEl.textContent = "Google sign-in did not complete. Try again in this browser, or use email.";
+      fetch("/auth/config", {cache: "no-store"}).then(r => r.ok ? r.json() : {}).then(config => {
+        byId("googleLogin").disabled = config.google_enabled !== true;
+        byId("googleStatus").textContent = config.google_enabled === true ? "Use Google for sign-in or signup." : "Google sign-in is not configured on this server yet. Email login is available.";
+      }).catch(() => { byId("googleStatus").textContent = "Cannot check Google sign-in. Email login is available."; });
+      byId("googleLogin").addEventListener("click", async () => {
+        byId("googleLogin").disabled = true;
+        try {
+          const res = await fetch("/ui/auth/google/start", {method:"POST", credentials:"include", headers:{"Content-Type":"application/json"}, body:JSON.stringify({next})});
+          const body = await res.json();
+          if (!res.ok || !body.url) throw new Error("unavailable");
+          window.location.assign(body.url);
+        } catch {
+          byId("googleStatus").textContent = "Google sign-in could not start. Please try email login.";
+          byId("googleLogin").disabled = false;
+        }
+      });
       const tokenInput = byId("tokenInput");
       const existing = getBrowserToken();
       if (existing) {
@@ -174,6 +212,10 @@
           return;
         }
         statusEl.textContent = "Login accepted. Redirecting...";
+        try {
+          const journey = await import('/ui/assets/journey-analytics.js?v=20261029');
+          await journey.recordJourneyRegistration();
+        } catch { /* Analytics never gates login. */ }
         window.location.assign(next);
       }
 
@@ -293,6 +335,12 @@
         statusEl.textContent = "Browser session cleared.";
       });
 
+      if (params.get("oauth_success") === "1") {
+        history.replaceState(null, "", "/ui/login?next=" + encodeURIComponent(next));
+        await refreshSessionSummary();
+        await validateAndRedirect();
+      }
+
       if (hashSession?.accessToken) {
         (async () => {
           let accessToken = String(hashSession.accessToken || "").trim();
@@ -327,5 +375,6 @@
         })();
       }
     </script>
-  </body>
+  <footer class="site-footer"><div><strong>OpenVegas. Agentic Entertainment.</strong><p>A hand. Then back to the build.</p></div><a class="partnership-cta" href="/ui/data-partnerships">Data Partnerships <span aria-hidden="true">&nbsp;↗</span></a><div class="site-footer-links"><a href="/ui/how-to-play">How to Play</a><a href="/ui/arena">Arena · Soon</a><a href="/ui/agents">Agents</a><a href="/ui/faq">FAQ</a><a href="/ui/security">Security</a><a href="/ui/contact">Contact</a></div></footer>
+</body>
 </html>

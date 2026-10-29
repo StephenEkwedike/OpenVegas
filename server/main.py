@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -14,6 +15,9 @@ from fastapi.responses import FileResponse, RedirectResponse, Response
 from dotenv import load_dotenv, dotenv_values
 from openvegas.compact_uuid import decode_compact_uuid
 from openvegas.telemetry import record_http_request
+from openvegas.capacity import CapacityMiddleware
+from server import seo
+from server import not_found
 
 
 
@@ -45,7 +49,7 @@ def _early_dotenv_override(root: Path) -> bool:
         return _early_truthy(explicit, "0")
     file_val = None
     try:
-        file_val = dotenv_values(root / ".env").get("OPENVEGAS_DOTENV_OVERRIDE")
+        file_val = dotenv_values(_environment_file(root)).get("OPENVEGAS_DOTENV_OVERRIDE")
     except Exception:
         file_val = None
     if file_val is not None:
@@ -55,8 +59,18 @@ def _early_dotenv_override(root: Path) -> bool:
     return _early_truthy(None, default)
 
 
+def _environment_file(root: Path) -> Path:
+    selected = os.getenv("OPENVEGAS_ENV_FILE")
+    if selected is not None:
+        path = Path(selected).expanduser().resolve()
+        if not path.is_file():
+            raise RuntimeError("Explicit OPENVEGAS_ENV_FILE does not exist")
+        return path
+    return root / ".env"
+
+
 EARLY_ROOT_DIR = _early_resolve_root_dir()
-load_dotenv(EARLY_ROOT_DIR / ".env", override=_early_dotenv_override(EARLY_ROOT_DIR))
+load_dotenv(_environment_file(EARLY_ROOT_DIR), override=_early_dotenv_override(EARLY_ROOT_DIR))
 
 from server.routes import mint as mint_routes
 from server.routes import games as game_routes
@@ -64,11 +78,16 @@ from server.routes import wallet as wallet_routes
 from server.routes import inference as inference_routes
 from server.routes import models as model_routes
 from server.routes import ui_auth as ui_auth_routes
+from server.routes import integrations as integration_routes
+from server.routes import integration_cosmetics, native_inference
 from server.routes import casino as casino_routes
 from server.routes import casino_human as casino_human_routes
 from server.routes import store as store_routes
 from server.routes import agent as agent_routes
+from server.routes import agent_dashboard, agent_funding, analytics, business, data_contributions, journey_analytics, marketing_credits, referrals, tv
 from server.routes import agent_orchestration as agent_orchestration_routes
+from server.routes import native_mutations as native_mutation_routes
+from server.routes import native_handoffs as native_handoff_routes
 from server.routes import ide_bridge as ide_bridge_routes
 from server.routes import payments as payment_routes
 from server.routes import profile_preferences as profile_preferences_routes
@@ -87,8 +106,12 @@ from server.services.dependencies import (
     close_runtime_deps,
     current_flags,
     get_db,
+    get_wallet,
     init_runtime_deps,
 )
+from server.services import tv_management
+from server.services.tv_lifecycle import tv_expiry_lifespan
+from server.services.agent_funding_worker import agent_funding_lifespan
 from openvegas.qr_runtime import ensure_qrcode_available
 
 logger = logging.getLogger(__name__)
@@ -123,7 +146,7 @@ def _dotenv_override_enabled() -> bool:
 
     file_val = None
     try:
-        file_val = dotenv_values(ROOT_DIR / ".env").get("OPENVEGAS_DOTENV_OVERRIDE")
+        file_val = dotenv_values(_environment_file(ROOT_DIR)).get("OPENVEGAS_DOTENV_OVERRIDE")
     except Exception:
         file_val = None
     if file_val is not None:
@@ -134,9 +157,8 @@ def _dotenv_override_enabled() -> bool:
     default = "1" if runtime_env in {"local", "dev", "development", "test"} else "0"
     return _env_truthy("OPENVEGAS_DOTENV_OVERRIDE", default)
 
-# Allow `uvicorn server.main:app --reload` to work without manually sourcing env vars.
-# In local/dev, override is enabled by default to avoid stale exported env var surprises.
-load_dotenv(ROOT_DIR / ".env", override=_dotenv_override_enabled())
+# Environment is loaded once, before route imports. A value inside that file
+# must not redirect a second load to another file containing live credentials.
 
 
 @asynccontextmanager
@@ -148,27 +170,25 @@ async def lifespan(app: FastAPI):
     )
     app.state.http_client = http_client
     bind_http_client(http_client)
-    await init_runtime_deps()
     try:
+        await init_runtime_deps()
         flags = current_flags()
-        upload_mime = str(os.getenv("OPENVEGAS_FILE_UPLOAD_ALLOWED_MIME", "")).strip()
-        logger.info(
-            "startup_flags files_enabled=%s speech_to_text=%s upload_mime_allowlist=%s",
-            bool(getattr(flags, "files_enabled", False)),
-            str(os.getenv("OPENVEGAS_ENABLE_SPEECH_TO_TEXT", "1")),
-            upload_mime or "<default>",
-        )
-    except Exception:
-        pass
-    qr_ok, qr_reason = ensure_qrcode_available()
-    if not qr_ok:
-        logger.warning("QR runtime unavailable at startup: %s", qr_reason)
-    try:
-        yield
+        logger.info("startup_flags files_enabled=%s", flags.files_enabled)
+        qr_ok, qr_reason = ensure_qrcode_available()
+        if not qr_ok:
+            logger.warning("QR runtime unavailable at startup: %s", qr_reason)
+        async with tv_expiry_lifespan(get_db(), get_wallet()), agent_funding_lifespan():
+            yield
     finally:
         bind_http_client(None)
-        await close_runtime_deps()
-        await http_client.aclose()
+        try:
+            from server.services.native_stream import shutdown as drain_native_streams
+            try:
+                await drain_native_streams()
+            finally:
+                await close_runtime_deps()
+        finally:
+            await http_client.aclose()
 
 app = FastAPI(
     title="OpenVegas API",
@@ -199,9 +219,13 @@ async def telemetry_http_middleware(request: Request, call_next):
             latency_ms=(perf_counter() - started) * 1000.0,
         )
 
+app.add_middleware(CapacityMiddleware)
+seo.install(app)
+
 UI_INDEX = ROOT_DIR / "ui" / "index.html"
 TOPUP_UI_PAGE = ROOT_DIR / "ui" / "topup.html"
 UI_DIR = ROOT_DIR / "ui"
+not_found.install(app, UI_DIR)
 UI_ASSETS_DIR = UI_DIR / "assets"
 UI_NO_CACHE_HEADERS = {
     "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
@@ -210,6 +234,14 @@ UI_NO_CACHE_HEADERS = {
 }
 
 UI_PAGES = {
+    "arena": UI_DIR / "arena.html",
+    "data-partnerships": UI_DIR / "data-partnerships.html",
+    "referrals": UI_DIR / "referrals.html",
+    "tv": UI_DIR / "tv.html",
+    "agents": UI_DIR / "agents.html",
+    "business": UI_DIR / "business.html",
+    "connect": UI_DIR / "connect.html",
+    "emotes": UI_DIR / "emotes.html",
     "login": UI_DIR / "login.html",
     "product": UI_DIR / "product.html",
     "how-it-works": UI_DIR / "how-it-works.html",
@@ -274,12 +306,27 @@ app.include_router(game_routes.router, prefix="/games", tags=["games"])
 app.include_router(wallet_routes.router, prefix="/wallet", tags=["wallet"])
 app.include_router(inference_routes.router, prefix="/inference", tags=["inference"])
 app.include_router(ui_auth_routes.router, tags=["ui-auth"])
+app.include_router(integration_routes.router)
+app.include_router(integration_cosmetics.router)
+app.include_router(native_inference.router)
 app.include_router(model_routes.router, tags=["models"])
 app.include_router(casino_routes.router, tags=["casino"])
 app.include_router(casino_human_routes.router, tags=["casino-human"])
 app.include_router(store_routes.router, tags=["store"])
 app.include_router(agent_routes.router, tags=["agent"])
+app.include_router(agent_dashboard.router)
+app.include_router(agent_funding.router)
+app.include_router(analytics.router)
+app.include_router(journey_analytics.router)
+app.include_router(data_contributions.router)
+app.include_router(referrals.router)
+app.include_router(marketing_credits.router)
+app.include_router(business.router)
+app.include_router(tv.router)
+app.include_router(tv_management.router)
 app.include_router(agent_orchestration_routes.router, tags=["agent-orchestration"])
+app.include_router(native_mutation_routes.router, tags=["native-mutations"])
+app.include_router(native_handoff_routes.router, tags=["native-handoffs"])
 app.include_router(ide_bridge_routes.router, tags=["ide-bridge"])
 app.include_router(payment_routes.router, tags=["billing"])
 app.include_router(profile_preferences_routes.router, tags=["profile"])
@@ -316,9 +363,16 @@ async def health_ready():
     human_casino_enabled = bool(flags.human_casino_enabled)
     human_casino_schema_ready = bool(flags.human_casino_enabled)
 
-    if os.getenv("OPENVEGAS_TEST_MODE", "0") == "1":
+    try:
         await assert_db_ready()
-        await assert_schema_compatible(get_db(), flags)
+        if os.getenv("OPENVEGAS_TEST_MODE", "0") != "1":
+            await assert_redis_ready()
+        await asyncio.wait_for(assert_schema_compatible(get_db(), flags), timeout=10)
+    except Exception as exc:
+        logger.warning("Readiness failed: %s", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Required application dependencies are not ready") from None
+
+    if os.getenv("OPENVEGAS_TEST_MODE", "0") == "1":
         return {
             "status": "ready",
             "mode": "test",
@@ -327,9 +381,6 @@ async def health_ready():
             "human_casino_schema_ready": human_casino_schema_ready,
         }
 
-    await assert_db_ready()
-    await assert_redis_ready()
-    await assert_schema_compatible(get_db(), flags)
     return {
         "status": "ready",
         "mode": "runtime",
@@ -341,12 +392,24 @@ async def health_ready():
 @app.get("/ui")
 @app.get("/ui/")
 async def ui_page():
-    return FileResponse(UI_INDEX, headers=UI_NO_CACHE_HEADERS)
+    return seo.page_response(UI_INDEX, "/ui", UI_NO_CACHE_HEADERS)
 
 
 def _resolve_ui_asset(asset_path: str) -> Path | None:
     raw = str(asset_path or "").strip().lstrip("/")
     if not raw:
+        return None
+
+    from openvegas.store.catalog import local_art_review
+
+    relative = Path(raw).as_posix()
+    private_art = (
+        "emotes/previews/naruto-shadow-clone/", "emotes/previews/lebron-court/",
+        "emotes/previews/q50-jewelry/", "emotes/previews/scenes/",
+    )
+    if not local_art_review() and relative.startswith(private_art):
+        return None
+    if relative.startswith("tv/") and not tv.public_enabled():
         return None
 
     direct = UI_ASSETS.get(raw)
@@ -402,15 +465,22 @@ async def ui_topup_compact_redirect(compact_topup_id: str):
     return RedirectResponse(url=f"/ui/topup/{topup_id}", status_code=307)
 
 
+app.add_api_route("/ui/features", tv.website_features, methods=["GET"], include_in_schema=False)
+
+
 @app.get("/ui/{slug}")
 async def ui_page_slug(slug: str):
+    if slug == "tv":
+        tv.enabled()
+    if slug == "referrals" and not referrals.enabled():
+        raise HTTPException(status_code=404, detail="Page not found")
     redirect_to = LEGACY_UI_REDIRECTS.get(slug)
     if redirect_to:
         return RedirectResponse(url=redirect_to, status_code=307)
     page = UI_PAGES.get(slug)
     if not page or not page.exists():
         raise HTTPException(status_code=404, detail="Page not found")
-    return FileResponse(page, headers=UI_NO_CACHE_HEADERS)
+    return seo.page_response(page, "/ui/" + slug, UI_NO_CACHE_HEADERS)
 
 
 @app.get("/favicon.ico", include_in_schema=False)

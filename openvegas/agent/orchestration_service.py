@@ -8,13 +8,24 @@ import logging
 import os
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
+from openvegas.agent.native_history import (
+    KIND as NATIVE_BINDING_KIND,
+)
+from openvegas.agent.native_history import (
+    accepted_native_receipts_tx,
+    bind_native_call_tx,
+    native_proposal_request,
+    object_value,
+    replay_native_proposal_tx,
+    require_uuid,
+)
 from openvegas.agent.orchestration_contracts import (
-    MutatingResponseEnvelope,
     TERMINAL_RUN_STATES,
     UI_HANDOFF_BLOCK_REASONS,
+    MutatingResponseEnvelope,
     canonical_json,
     canonicalize_valid_actions,
     valid_actions_signature,
@@ -34,6 +45,7 @@ from openvegas.agent.tool_cas import (
     heartbeat_tx,
     load_tool_for_result_tx,
     redact_hash_truncate,
+    redaction_required,
     terminalize_tx,
 )
 from openvegas.agent.tool_stream import publish_tool_event
@@ -43,15 +55,32 @@ from openvegas.telemetry import emit_metric
 logger = logging.getLogger(__name__)
 
 
+def _require_matching_read_paths(arguments: dict[str, Any]) -> None:
+    paths = [arguments[key] for key in ("path", "filepath", "file_path", "target_path")
+             if key in arguments]
+    if "file" in arguments:
+        file = arguments["file"]
+        if isinstance(file, dict):
+            if "path" in file:
+                paths.append(file["path"])
+        else:
+            paths.append(file)
+    if paths and any(value != paths[0] for value in paths[1:]):
+        raise ContractError(
+            APIErrorCode.INVALID_TRANSITION,
+            "Conflicting file path aliases; supply one unambiguous path.",
+        )
+
+
 def _rows_affected(exec_status: str) -> int:
     try:
         return int(str(exec_status).rsplit(" ", 1)[-1])
-    except Exception:
+    except (ValueError, TypeError):
         return 0
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _row_optional(row: Any, key: str) -> Any:
@@ -583,6 +612,12 @@ class AgentOrchestrationService:
             existing_fp = str(existing_fp_raw) if existing_fp_raw else None
             existing_git = str(existing_git_raw) if existing_git_raw else None
 
+            if (_row_optional(run, "native_generation_claim_id") is not None
+                    or _row_optional(run, "native_handoff_id") is not None) and (
+                existing_session, existing_root_raw, existing_fp_raw, existing_git_raw
+            ) != (runtime_session_id, workspace_root, workspace_fingerprint, git_root):
+                raise ContractError(APIErrorCode.INVALID_TRANSITION,
+                                    "Workspace registration is immutable after native generation reservation.")
             if has_tool and any(
                 [
                     existing_session and existing_session != runtime_session_id,
@@ -635,26 +670,57 @@ class AgentOrchestrationService:
         shell_mode: str | None,
         timeout_sec: int | None,
         plan_mode: bool,
+        native_inference_request_id: str | None = None,
+        native_provider_call_id: str | None = None,
     ) -> MutationHTTPResult:
-        del idempotency_key
+        if (native_inference_request_id is None) != (native_provider_call_id is None):
+            raise ContractError(APIErrorCode.INVALID_TRANSITION, "Native tool reference requires both IDs.")
+        if native_inference_request_id is not None:
+            object_value(arguments)
+            if (not isinstance(tool_name, str)
+                    or (shell_mode is not None and not isinstance(shell_mode, str))
+                    or (timeout_sec is not None and type(timeout_sec) is not int)):
+                raise ContractError(APIErrorCode.INVALID_TRANSITION, "Invalid native tool request.")
         role_class = self._actor_role_class(actor_role)
         tool_name = str(tool_name).strip()
         if tool_name not in {t.value for t in ToolName}:
             raise ContractError(APIErrorCode.INVALID_TRANSITION, f"Unknown tool name: {tool_name}")
 
-        normalized_args = self._normalize_tool_arguments(
-            tool_name=tool_name,
-            arguments=json.loads(canonical_json(arguments or {})),
-        )
-        self._validate_tool_arguments(tool_name=tool_name, arguments=normalized_args)
+        native_mutation = isinstance(arguments, dict) and "native_mutation" in arguments
+        if native_mutation and (native_inference_request_id is None or tool_name != "fs_apply_patch"):
+            raise ContractError(APIErrorCode.INVALID_TRANSITION, "Native mutation requires its original scoped call.")
+        if native_mutation:
+            # Exact preparation is checked under the source lock during binding.
+            # Do not trim an empty/no-op patch or invoke legacy normalization.
+            normalized_args = object_value(arguments)
+        else:
+            normalized_args = self._normalize_tool_arguments(
+                tool_name=tool_name,
+                arguments=json.loads(canonical_json(arguments or {})),
+            )
+            self._validate_tool_arguments(tool_name=tool_name, arguments=normalized_args)
         shell_mode_norm = (shell_mode or ShellMode.READ_ONLY.value).strip()
         timeout_value = int(timeout_sec or self._default_timeout_sec(tool_name))
         timeout_value = max(1, min(timeout_value, self._default_timeout_sec(tool_name)))
 
         is_mutating = is_mutating_tool(tool_name, shell_mode_norm)
         requires_approval = is_mutating
-        execution_token = uuid.uuid4().hex
         payload_hash = tool_payload_hash(tool_name, normalized_args, shell_mode_norm)
+        request_payload = {
+            "tool_name": tool_name, "arguments": normalized_args,
+            "shell_mode": shell_mode_norm, "timeout_sec": timeout_value,
+        }
+        native_request = None
+        if native_inference_request_id is not None:
+            native_request = native_proposal_request({
+                "user_id": user_id, "actor_role_class": role_class, "run_id": run_id,
+                "runtime_session_id": runtime_session_id, "idempotency_key": idempotency_key,
+                "expected_run_version": expected_run_version,
+                "expected_valid_actions_signature": expected_valid_actions_signature,
+                "plan_mode": plan_mode, "tool_request": request_payload,
+                "native_inference_request_id": native_inference_request_id,
+                "native_provider_call_id": native_provider_call_id,
+            })
 
         async with self.db.transaction() as tx:
             run = await tx.fetchrow(
@@ -674,6 +740,17 @@ class AgentOrchestrationService:
                 run=run,
                 runtime_session_id=runtime_session_id,
             )
+
+            # Even removing native references must not bypass an existing native key.
+            if run.get("native_generation_claim_id") is not None and native_request is None:
+                raise ContractError(APIErrorCode.INVALID_TRANSITION,
+                                    "This run requires its original scoped native generation reference.")
+            replay = await replay_native_proposal_tx(
+                tx, run=run, idempotency_key=idempotency_key, request=native_request,
+                normalize=self._normalize_tool_arguments,
+            )
+            if replay is not None:
+                return MutationHTTPResult(status_code=200, payload=replay)
 
             valid_actions = await self._derive_valid_actions_tx(
                 tx=tx, run=run, actor_id=user_id, actor_role_class=role_class
@@ -698,6 +775,8 @@ class AgentOrchestrationService:
             finished_at = None
             terminal_status = 200
             if plan_mode and is_mutating:
+                if native_request is not None:
+                    raise ContractError(APIErrorCode.INVALID_TRANSITION, "Native binding requires a read-only tool.")
                 status = "blocked"
                 reason_code = "tool_not_allowed_in_plan_mode"
                 started_at = _utc_now()
@@ -705,6 +784,12 @@ class AgentOrchestrationService:
                 terminal_status = 409
 
             tool_call_id = str(uuid.uuid4())
+            native_source = None
+            if native_request is not None:
+                # Claim provenance and gateway lock precede any tool row write.
+                from openvegas.agent.native_history import lock_native_source_tx
+                native_source = await lock_native_source_tx(tx, run=run, request_id=native_inference_request_id)
+            execution_token = uuid.uuid4().hex
             await tx.execute(
                 """
                 INSERT INTO agent_run_tool_calls (
@@ -723,14 +808,7 @@ class AgentOrchestrationService:
                 tool_name,
                 "mutating" if is_mutating else "read_only",
                 payload_hash,
-                canonical_json(
-                    {
-                        "tool_name": tool_name,
-                        "arguments": normalized_args,
-                        "shell_mode": shell_mode_norm,
-                        "timeout_sec": timeout_value,
-                    }
-                ),
+                canonical_json(request_payload),
                 execution_token,
                 status,
                 bool(requires_approval),
@@ -738,6 +816,9 @@ class AgentOrchestrationService:
                 started_at,
                 finished_at,
             )
+            if native_mutation:
+                await tx.execute("UPDATE agent_run_tool_calls SET commit_state='pending_commit' WHERE id=$1::uuid",
+                                 tool_call_id)
 
             if status == "blocked":
                 await self._insert_durable_event_tx(
@@ -775,6 +856,15 @@ class AgentOrchestrationService:
                 "shell_mode": shell_mode_norm,
                 "timeout_sec": timeout_value,
             }
+            if native_request is not None:
+                await bind_native_call_tx(
+                    tx, run=run, inference_request_id=native_inference_request_id,
+                    provider_call_id=native_provider_call_id, tool_call_id=tool_call_id,
+                    tool_name=tool_name, arguments=normalized_args, shell_mode=shell_mode_norm,
+                    timeout_sec=timeout_value, normalize=self._normalize_tool_arguments,
+                    proposal_request=native_request, proposal_response=env,
+                    locked_source=native_source,
+                )
             self._log_tool_lifecycle(
                 event="tool_proposed",
                 run_id=run_id,
@@ -831,12 +921,40 @@ class AgentOrchestrationService:
                 env["run_id"] = run_id
                 return MutationHTTPResult(status_code=409, payload=env)
 
+            from openvegas.agent.native_mutation_lifecycle import (
+                load_tool_preparation_tx,
+                require_consumed_approval_tx,
+            )
+            mutation = await load_tool_preparation_tx(tx, run=run, tool_call_id=tool_call_id, for_start=True)
+            if mutation is not None:
+                native_tool = await tx.fetchrow(
+                    "SELECT * FROM agent_run_tool_calls WHERE id=$1::uuid AND run_id=$2::uuid FOR UPDATE",
+                    tool_call_id, run_id,
+                )
+                if (native_tool["status"] != "proposed" or native_tool["commit_state"] != "pending_commit"
+                        or native_tool["execution_token"] != execution_token):
+                    raise ContractError(APIErrorCode.INVALID_TRANSITION, "Native mutation cannot be started again.")
+                await require_consumed_approval_tx(tx, run=run, tool=native_tool,
+                    preparation=mutation[0], plan=mutation[1])
+
             start_outcome = await claim_started_tx(
                 tx,
                 run_id=run_id,
                 tool_call_id=tool_call_id,
                 execution_token=execution_token,
             )
+            if start_outcome == "idempotent" and await tx.fetchval(
+                "SELECT id FROM agent_chat_turns WHERE run_id=$1::uuid "
+                "AND tool_call_id=$2::uuid AND content_json->>'kind'=$3 LIMIT 1",
+                run_id, tool_call_id, NATIVE_BINDING_KIND,
+            ):
+                # Two callers may recover a proposal before either starts it.
+                # Only the fresh claim authorizes native execution; a lost start
+                # response is uncertain, never permission to execute again.
+                raise ContractError(
+                    APIErrorCode.INVALID_TRANSITION,
+                    "Native tool was already started; do not execute it again.",
+                )
             if start_outcome == "claimed":
                 await self._insert_durable_event_tx(
                     tx=tx,
@@ -950,6 +1068,7 @@ class AgentOrchestrationService:
                 execution_token=execution_token,
             )
             if cancel_outcome == "cancelled":
+                run = await self._fence_unobserved_native_mutation_tx(tx=tx, run=run, tool_call_id=tool_call_id)
                 await self._insert_durable_event_tx(
                     tx=tx,
                     run_id=run_id,
@@ -1033,12 +1152,14 @@ class AgentOrchestrationService:
         if bool(stderr_truncated) and not stderr_env.truncated:
             raise ContractError(APIErrorCode.INVALID_TRANSITION, "stderr_truncated mismatch.")
 
-        incoming_hash = result_submission_hash_value or result_submission_hash(
+        incoming_hash = result_submission_hash(
             result_status=result_status,
             result_payload=result_payload,
             stdout_sha256=stdout_env.sha256,
             stderr_sha256=stderr_env.sha256,
         )
+        if result_submission_hash_value is not None and result_submission_hash_value != incoming_hash:
+            raise ContractError(APIErrorCode.INVALID_TRANSITION, "result_submission_hash mismatch.")
 
         async with self.db.transaction() as tx:
             run = await tx.fetchrow(
@@ -1055,16 +1176,27 @@ class AgentOrchestrationService:
                 raise ContractError(APIErrorCode.INVALID_TRANSITION, "Run not found.")
             await self._assert_runtime_session_tx(tx=tx, run=run, runtime_session_id=runtime_session_id)
 
+            from openvegas.agent.native_mutation_lifecycle import (
+                load_tool_preparation_tx,
+                store_observation_tx,
+                validate_observation_tx,
+            )
+            mutation = await load_tool_preparation_tx(tx, run=run, tool_call_id=tool_call_id)
             tool = await load_tool_for_result_tx(tx, run_id=run_id, tool_call_id=tool_call_id)
+            if str(tool["execution_token"] or "") != execution_token:
+                raise ContractError(APIErrorCode.INVALID_TRANSITION, "Tool result ownership mismatch.")
             tool_status = str(tool["status"] or "")
             if tool_status == "cancelled":
                 raise ContractError(APIErrorCode.INVALID_TRANSITION, "Tool was cancelled.")
             if tool_status in RESULT_TOOL_STATUSES:
                 if str(tool["result_submission_hash"] or "") == incoming_hash:
+                    if mutation is not None:
+                        await validate_observation_tx(tx, run=run, tool=tool,
+                            preparation=mutation[0], plan=mutation[1])
                     body_text = str(tool["terminal_response_body_text"] or "{}")
                     try:
                         payload = json.loads(body_text)
-                    except Exception:
+                    except (ValueError, TypeError):
                         payload = {}
                     return MutationHTTPResult(
                         status_code=int(tool["terminal_response_status"] or 200),
@@ -1074,6 +1206,22 @@ class AgentOrchestrationService:
 
             if tool_status != "started" or str(tool["execution_token"] or "") != execution_token:
                 raise ContractError(APIErrorCode.INVALID_TRANSITION, "Tool result cannot be accepted in current state.")
+
+            if mutation is not None:
+                try:
+                    commit_state = await store_observation_tx(tx, tool_call_id=tool_call_id,
+                        preparation=mutation[0], plan=mutation[1], result_status=result_status,
+                        result_payload=result_payload, submission_hash=incoming_hash, stdout=stdout, stderr=stderr)
+                    if commit_state == "commit_unknown":
+                        run = await self._increment_run_version_tx(tx=tx, run_id=run_id,
+                            next_state="interrupted", state_reason_code=APIErrorCode.MUTATION_UNCERTAIN.value,
+                            is_resumable=False, cancel_requested_at=run["cancel_requested_at"],
+                            cancel_disposition=run["cancel_disposition"])
+                except ContractError:
+                    raise
+                except Exception:  # noqa: BLE001 - database DETAIL can contain private observations.
+                    raise ContractError(APIErrorCode.INVALID_TRANSITION,
+                                        "Native mutation evidence could not be recorded; task remains uncertain.") from None
 
             if result_status == "succeeded":
                 response_payload = await self._success_envelope_tx(
@@ -1162,7 +1310,7 @@ class AgentOrchestrationService:
                 replay_text = str(term_outcome.response_body_text or "{}")
                 try:
                     replay_payload = json.loads(replay_text)
-                except Exception:
+                except (ValueError, TypeError):
                     replay_payload = {}
                 return MutationHTTPResult(
                     status_code=int(term_outcome.response_status or 200),
@@ -1174,7 +1322,11 @@ class AgentOrchestrationService:
                 run_version=int(run["version"]),
                 actor_id=user_id,
                 event_type=event_type,
-                payload={"tool_call_id": tool_call_id, "status": result_status},
+                payload={
+                    "tool_call_id": tool_call_id, "status": result_status,
+                    "source": "runtime_callback", "redaction_checked": True,
+                    "redaction_required": redaction_required([stdout, stderr, result_payload, payload_text]),
+                },
             )
             publish_tool_event(
                 run_id=run_id,
@@ -1190,12 +1342,33 @@ class AgentOrchestrationService:
             )
             return MutationHTTPResult(status_code=response_status, payload=response_payload)
 
+    async def _fence_unobserved_native_mutation_tx(self, *, tx, run, tool_call_id):
+        """A cancelled/expired worker may still write; never invent a file result."""
+        if run.get("native_generation_claim_id") is None:
+            return run
+        tool = await tx.fetchrow("SELECT * FROM agent_run_tool_calls WHERE id=$1::uuid AND run_id=$2::uuid",
+                                 tool_call_id, str(run["id"]))
+        if (not tool or tool["tool_name"] != "fs_apply_patch" or tool["commit_state"] != "pending_commit"):
+            return run
+        args = object_value(object_value(tool["request_payload_json"]).get("arguments"))
+        if not isinstance(args.get("native_mutation"), dict):
+            return run
+        await tx.execute("UPDATE agent_run_tool_calls SET commit_state='commit_unknown', "
+                         "recovery_policy='manual_intervention_required' WHERE id=$1::uuid", tool_call_id)
+        if run["state"] not in {"created", "running", "awaiting_approval"}:
+            return run
+        return await self._increment_run_version_tx(tx=tx, run_id=str(run["id"]),
+            next_state="interrupted", state_reason_code=APIErrorCode.MUTATION_UNCERTAIN.value,
+            is_resumable=False, cancel_requested_at=run["cancel_requested_at"],
+            cancel_disposition=run["cancel_disposition"])
+
     async def reconcile_stale_started_tools(self, *, timeout_seconds: int = 90) -> int:
         """Timeout started tool rows when heartbeat is stale (NULL-safe fallback)."""
         timeout_seconds = max(5, int(timeout_seconds))
         empty_hash = hashlib.sha256(b"").hexdigest()
         touched = 0
         async with self.db.transaction() as tx:
+            # Discover without tool locks: callbacks always lock the run first.
             stale_rows = await tx.fetch(
                 """
                 SELECT id, run_id
@@ -1206,17 +1379,37 @@ class AgentOrchestrationService:
                     OR
                     (last_heartbeat_at IS NOT NULL AND last_heartbeat_at < now() - make_interval(secs => $1))
                   )
-                FOR UPDATE SKIP LOCKED
                 """,
                 timeout_seconds,
             )
             for row in stale_rows:
                 run_id = str(row["run_id"])
                 tool_call_id = str(row["id"])
-                emit_metric("tool_heartbeat_miss_total", {"source": "reconciler"})
-                run = await tx.fetchrow("SELECT * FROM agent_runs WHERE id=$1::uuid FOR UPDATE", run_id)
+                run = await tx.fetchrow(
+                    "SELECT * FROM agent_runs WHERE id=$1::uuid FOR UPDATE SKIP LOCKED", run_id
+                )
                 if not run:
                     continue
+                # Discovery may race a heartbeat or result; recheck under both locks.
+                stale_tool = await tx.fetchrow(
+                    """
+                    SELECT id FROM agent_run_tool_calls
+                    WHERE id=$1::uuid AND run_id=$2::uuid AND status='started'
+                      AND (
+                        (last_heartbeat_at IS NULL AND started_at < now() - make_interval(secs => $3))
+                        OR
+                        (last_heartbeat_at IS NOT NULL AND last_heartbeat_at < now() - make_interval(secs => $3))
+                      )
+                    FOR UPDATE SKIP LOCKED
+                    """,
+                    tool_call_id,
+                    run_id,
+                    timeout_seconds,
+                )
+                if not stale_tool:
+                    continue
+                emit_metric("tool_heartbeat_miss_total", {"source": "reconciler"})
+                run = await self._fence_unobserved_native_mutation_tx(tx=tx, run=run, tool_call_id=tool_call_id)
 
                 result_payload = {
                     "ok": False,
@@ -1289,6 +1482,24 @@ class AgentOrchestrationService:
                     event={"run_id": run_id, "tool_call_id": tool_call_id, "status": "timed_out"},
                 )
         return touched
+
+    async def native_tool_receipts(
+        self, *, user_id: str, run_id: str, runtime_session_id: str, provider: str, model: str,
+    ) -> dict:
+        for value in (user_id, run_id, runtime_session_id):
+            require_uuid(value)
+        async with self.db.transaction() as tx:
+            run = await tx.fetchrow(
+                "SELECT * FROM agent_runs WHERE id=$1::uuid AND user_id=$2::uuid FOR UPDATE",
+                run_id, user_id,
+            )
+            if not run:
+                raise ContractError(APIErrorCode.INVALID_TRANSITION, "Run not found.")
+            await self._assert_runtime_session_tx(tx=tx, run=run, runtime_session_id=runtime_session_id)
+            receipts = await accepted_native_receipts_tx(tx, run=run, provider=provider, model=model)
+            return {"scope": "settled_native_call_receipts_v1", "receipts": receipts,
+                    "conversation_replay_supported": False,
+                    "original_turn_scope_verified": False, "execution_attested": False}
 
     async def _assert_runtime_session_tx(self, *, tx: Any, run: Any, runtime_session_id: str) -> None:
         if not runtime_session_id:
@@ -1367,6 +1578,7 @@ class AgentOrchestrationService:
                     args[dest] = default
 
         if tool_name in {ToolName.FS_READ.value, ToolName.EDITOR_OPEN.value}:
+            _require_matching_read_paths(args)
             _alias("path", ("file_path", "filepath", "file", "target_path"))
             if "line" not in args and "line_number" in args:
                 args["line"] = args.get("line_number")
@@ -1443,6 +1655,7 @@ class AgentOrchestrationService:
                 raise ContractError(APIErrorCode.INVALID_TRANSITION, f"{tool_name} requires string field: {name}")
 
         if tool_name in {ToolName.FS_READ.value, ToolName.EDITOR_OPEN.value}:
+            _require_matching_read_paths(arguments)
             _require_string("path")
             return
         if tool_name == ToolName.FS_LIST.value:
@@ -1878,7 +2091,7 @@ class AgentOrchestrationService:
             await tx.execute(
                 """
                 INSERT INTO agent_run_mutation_leases (run_id, lease_holder, lease_token, acquired_at, expires_at)
-                VALUES ($1::uuid, $2, $3::uuid, now(), now() + ($4 || ' seconds')::interval)
+                VALUES ($1::uuid, $2, $3::uuid, now(), now() + $4::integer * interval '1 second')
                 """,
                 run_id,
                 lease_holder,
@@ -1900,7 +2113,7 @@ class AgentOrchestrationService:
             SET lease_holder = $2,
                 lease_token = $3::uuid,
                 acquired_at = now(),
-                expires_at = now() + ($4 || ' seconds')::interval
+                expires_at = now() + $4::integer * interval '1 second'
             WHERE run_id = $1::uuid
             """,
             run_id,

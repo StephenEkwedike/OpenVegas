@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import asyncio
-from decimal import Decimal
 import json
 import time
+import uuid
+from copy import deepcopy
+from decimal import Decimal
 from typing import Any, AsyncGenerator
 
 import httpx
 
 from openvegas.auth import (
     AuthError as CliAuthError,
+)
+from openvegas.auth import (
     AuthRefreshMalformed,
     AuthRefreshRejected,
     AuthRefreshTimeout,
@@ -28,6 +32,13 @@ from openvegas.config import (
     require_touchid_unlock_for_refresh_storage,
     token_expires_soon,
 )
+from openvegas.contracts.native_handoff import (
+    ConfirmNativeHandoff,
+    NativeHandoffRef,
+    NativeHandoffResolution,
+    NativeHandoffResponse,
+    PrepareNativeHandoff,
+)
 from openvegas.telemetry import emit_metric, emit_once_process
 
 
@@ -37,6 +48,70 @@ class APIError(Exception):
         self.detail = detail
         self.data = data or {}
         super().__init__(f"API error {status}: {detail}")
+
+
+def _native_scope_payload(scope: dict | None, *, provider: str, key: str | None) -> dict | None:
+    if scope is None:
+        return None
+    if provider != "openrouter" or not isinstance(key, str) or not key.strip():
+        raise ValueError("Native scope requires OpenRouter and an explicit idempotency key.")
+    from openvegas.contracts.native_scope import NativeInferenceScope
+
+    return NativeInferenceScope.model_validate(scope).model_dump(mode="json")
+
+
+def _native_history_payload(*, scope: dict | None, history: bool, continuation: dict | None,
+                            user_text: str | None = None) -> dict:
+    if type(history) is not bool or ((history or continuation is not None) and scope is None):
+        raise ValueError("Native history requires an explicit native scope.")
+    if continuation is not None and not history:
+        raise ValueError("Native continuation requires native history.")
+    payload = {"native_history": True} if history else {}
+    if user_text is not None:
+        from openvegas.contracts.native_scope import validate_native_user_text
+
+        if not history or continuation is not None:
+            raise ValueError("Original user input is accepted only on the first native history generation.")
+        payload["native_user_text"] = validate_native_user_text(user_text)
+    if continuation is not None:
+        from openvegas.contracts.native_scope import NativeContinuationRef
+
+        payload["native_continuation"] = NativeContinuationRef.model_validate(continuation).model_dump(mode="json")
+    return payload
+
+
+def _native_inference_payload(*, scope, provider, key, history, continuation, user_text,
+                              handoff, max_tokens) -> dict:
+    bound = handoff is not None or max_tokens is not None
+    try:
+        scope = _native_scope_payload(scope, provider=provider, key=key)
+        payload = _native_history_payload(scope=scope, history=history,
+                                          continuation=continuation, user_text=user_text)
+        if scope is not None:
+            payload["native_scope"] = scope
+        if bound:
+            if (handoff is None or type(max_tokens) is not int or not 1 <= max_tokens <= 1_000_000
+                    or history is not True or scope is None
+                    or (continuation is None and user_text is None)):
+                raise ValueError
+            payload["native_handoff"] = NativeHandoffRef.model_validate(handoff).model_dump(mode="json")
+            payload["max_tokens"] = max_tokens
+        return payload
+    except (ValueError, TypeError):
+        if bound:
+            raise ValueError("Invalid native handoff inference options.") from None
+        raise
+
+
+def _handoff_response_error(status: int = 502) -> APIError:
+    # A lost acknowledgement may follow a commit; never claim nothing changed.
+    return APIError(status, "Native handoff response could not be verified.")
+
+
+def _literal_handoff_flags(handoff, *, enable_tools, enable_web_search, persist_context):
+    if handoff is not None and (enable_tools is not True or persist_context is not False
+            or (enable_web_search is not None and type(enable_web_search) is not bool)):
+        raise ValueError("Invalid native handoff inference options.")
 
 
 class OpenVegasClient:
@@ -241,6 +316,11 @@ class OpenVegasClient:
             raise APIError(401, "Session expired. Run: openvegas login")
 
     async def _request(self, method: str, path: str, **kwargs) -> dict:
+        if str(self.token or '').startswith('ov_game_'):
+            # This credential is separately scoped and revocable; never refresh it
+            # with another account's Supabase session or retry a rejected wager.
+            resp = await self._do_http(method,path,**kwargs)
+            return self._parse_or_raise(resp)
         if token_expires_soon(self._session_snapshot, leeway_sec=300):
             try:
                 await self._refresh_single_flight(trigger="proactive")
@@ -367,10 +447,24 @@ class OpenVegasClient:
         enable_tools: bool | None = None,
         enable_web_search: bool | None = None,
         attachments: list[str] | None = None,
+        reasoning_effort: str | None = None,
+        native_scope: dict | None = None,
+        native_history: bool = False,
+        native_continuation: dict | None = None,
+        native_user_text: str | None = None,
+        native_handoff: NativeHandoffRef | dict | None = None,
+        max_tokens: int | None = None,
     ) -> dict:
+        _literal_handoff_flags(native_handoff, enable_tools=enable_tools,
+                               enable_web_search=enable_web_search, persist_context=persist_context)
         payload = {"prompt": prompt, "provider": provider, "model": model}
-        if idempotency_key:
-            payload["idempotency_key"] = idempotency_key
+        payload.update(_native_inference_payload(scope=native_scope, provider=provider,
+            key=idempotency_key, history=native_history, continuation=native_continuation,
+            user_text=native_user_text, handoff=native_handoff, max_tokens=max_tokens))
+        if reasoning_effort is not None:
+            payload["reasoning_effort"] = reasoning_effort
+        if idempotency_key or provider == "openrouter":
+            payload["idempotency_key"] = idempotency_key or str(uuid.uuid4())
         if thread_id:
             payload["thread_id"] = thread_id
         if conversation_mode:
@@ -383,7 +477,26 @@ class OpenVegasClient:
             payload["enable_web_search"] = bool(enable_web_search)
         if attachments is not None:
             payload["attachments"] = [str(a or "").strip() for a in attachments if str(a or "").strip()]
-        return await self._request("POST", "/inference/ask", json=payload)
+        try:
+            return await self._request("POST", "/inference/ask", json=payload)
+        except (APIError, ValueError) as exc:
+            if native_handoff is not None:
+                raise _handoff_response_error(exc.status if isinstance(exc, APIError) else 502) from None
+            raise
+
+    async def conversation_ask(
+        self, prompt: str, provider: str, model: str, *, thread_id: str,
+        expected_revision: str, idempotency_key: str, max_tokens: int = 1024,
+        reasoning_effort: str | None = None,
+    ) -> dict:
+        payload = {
+            "prompt": prompt, "provider": provider, "model": model,
+            "thread_id": thread_id, "expected_revision": expected_revision,
+            "idempotency_key": idempotency_key, "max_tokens": max_tokens,
+        }
+        if reasoning_effort is not None:
+            payload["reasoning_effort"] = reasoning_effort
+        return await self._request("POST", "/models/conversations/ask", json=payload)
 
     async def ask_stream(
         self,
@@ -398,10 +511,24 @@ class OpenVegasClient:
         enable_tools: bool | None = None,
         enable_web_search: bool | None = None,
         attachments: list[str] | None = None,
+        reasoning_effort: str | None = None,
+        native_scope: dict | None = None,
+        native_history: bool = False,
+        native_continuation: dict | None = None,
+        native_user_text: str | None = None,
+        native_handoff: NativeHandoffRef | dict | None = None,
+        max_tokens: int | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
+        _literal_handoff_flags(native_handoff, enable_tools=enable_tools,
+                               enable_web_search=enable_web_search, persist_context=persist_context)
         payload = {"prompt": prompt, "provider": provider, "model": model}
-        if idempotency_key:
-            payload["idempotency_key"] = idempotency_key
+        payload.update(_native_inference_payload(scope=native_scope, provider=provider,
+            key=idempotency_key, history=native_history, continuation=native_continuation,
+            user_text=native_user_text, handoff=native_handoff, max_tokens=max_tokens))
+        if reasoning_effort is not None:
+            payload["reasoning_effort"] = reasoning_effort
+        if idempotency_key or provider == "openrouter":
+            payload["idempotency_key"] = idempotency_key or str(uuid.uuid4())
         if thread_id:
             payload["thread_id"] = thread_id
         if conversation_mode:
@@ -441,6 +568,8 @@ class OpenVegasClient:
                         continue
 
                     if resp.status_code >= 400:
+                        if native_handoff is not None:
+                            raise _handoff_response_error(resp.status_code)
                         detail = await resp.aread()
                         text = detail.decode("utf-8", errors="ignore")
                         data: dict | None = None
@@ -454,9 +583,12 @@ class OpenVegasClient:
                         raise APIError(resp.status_code, text, data=data)
 
                     current_event = "message"
+                    handoff_completed = False
                     async for line in resp.aiter_lines():
                         raw = (line or "").strip()
                         if not raw:
+                            if native_handoff is not None:
+                                current_event = "message"
                             continue
                         if raw.startswith("event:"):
                             current_event = raw[6:].strip() or "message"
@@ -469,11 +601,33 @@ class OpenVegasClient:
                         try:
                             data = json.loads(payload_line)
                         except Exception:
+                            if native_handoff is not None:
+                                raise _handoff_response_error() from None
                             continue
                         if isinstance(data, dict):
+                            if native_handoff is not None:
+                                kind = data.get("type")
+                                if (handoff_completed or (kind is not None and type(kind) is not str)
+                                        or (kind is not None and current_event != "message" and kind != current_event)):
+                                    raise _handoff_response_error()
+                                event_payload = data.get("payload")
+                                failed = data.get("status") == "error" or (
+                                    isinstance(event_payload, dict) and event_payload.get("status") == "error")
+                                if kind in {"response.error", "error"} or current_event in {"response.error", "error"} or failed:
+                                    raise _handoff_response_error()
+                                handoff_completed = (kind or current_event) == "response.completed"
+                                if handoff_completed and (type(event_payload) is not dict or event_payload.get("status") != "ok"):
+                                    raise _handoff_response_error()
+                                current_event = kind or current_event
                             yield {"event": current_event, "data": data}
+                        elif native_handoff is not None:
+                            raise _handoff_response_error()
+                    if native_handoff is not None and not handoff_completed:
+                        raise _handoff_response_error(503)
                     return
             except httpx.HTTPError as e:
+                if native_handoff is not None:
+                    raise _handoff_response_error(503) from None
                 raise APIError(
                     503,
                     f"Backend stream request failed: {type(e).__name__}. "
@@ -709,6 +863,55 @@ class OpenVegasClient:
 
     async def get_mode(self) -> dict:
         return await self._request("GET", "/inference/mode")
+
+    async def get_profile_preferences(self) -> dict:
+        """Bounded status-only read; no auth refresh, retries or local state writes."""
+        from openvegas.profile_identity import PROFILE_TIMEOUT_SECONDS
+
+        token, base_url = self.token, self.base_url
+        if not isinstance(token, str) or not token.strip():
+            raise APIError(401, "Profile preferences unavailable.")
+        headers = {"Authorization": f"Bearer {token}", "Accept-Encoding": "identity"}
+        limit = 16 * 1024
+
+        def check_identity():
+            if self.token != token or self.base_url != base_url:
+                raise APIError(409, "Profile preferences unavailable.")
+
+        async def read_body():
+            async with self._http_client.stream(
+                "GET", f"{base_url}/ui/profile/preferences", headers=headers,
+                timeout=PROFILE_TIMEOUT_SECONDS, follow_redirects=False,
+            ) as response:
+                check_identity()
+                if response.status_code != 200:
+                    raise APIError(response.status_code, "Profile preferences unavailable.")
+                if response.headers.get("content-encoding", "identity").strip().lower() != "identity":
+                    raise ValueError("Encoded profile response")
+                length = response.headers.get("content-length")
+                if length is not None and (not length.isascii() or not length.isdecimal()
+                                           or len(length) > 10 or int(length) > limit):
+                    raise ValueError("Invalid profile response size")
+                body = bytearray()
+                async for chunk in response.aiter_raw():
+                    if len(chunk) > limit - len(body):
+                        raise ValueError("Profile response too large")
+                    body.extend(chunk)
+                check_identity()
+                return body
+
+        try:
+            body = await asyncio.wait_for(read_body(), timeout=PROFILE_TIMEOUT_SECONDS)
+            check_identity()
+            payload = json.loads(body.decode("utf-8"))
+        except (ValueError, UnicodeError, RecursionError):
+            raise APIError(502, "Invalid profile preferences response.") from None
+        except (httpx.HTTPError, TimeoutError):
+            raise APIError(503, "Profile preferences unavailable.") from None
+        if type(payload) is not dict:
+            raise APIError(502, "Invalid profile preferences response.")
+        check_identity()
+        return payload
 
     async def set_mode(
         self,
@@ -1116,6 +1319,64 @@ class OpenVegasClient:
             json=payload,
         )
 
+    async def native_handoff_prepare(self, request: PrepareNativeHandoff) -> NativeHandoffResponse:
+        checked = PrepareNativeHandoff.model_validate(deepcopy(request))
+        try:
+            response = await self._request("POST", "/agent/native-handoffs/prepare",
+                                           json=checked.model_dump(mode="json"))
+            result = NativeHandoffResponse.model_validate(response)
+            if result.selection != checked.selection:
+                raise ValueError
+            return result
+        except (APIError, ValueError, TypeError) as exc:
+            raise _handoff_response_error(exc.status if isinstance(exc, APIError) else 502) from None
+
+    async def native_handoff_confirm(self, request: ConfirmNativeHandoff) -> NativeHandoffResponse:
+        checked = ConfirmNativeHandoff.model_validate(deepcopy(request))
+        try:
+            response = await self._request("POST", "/agent/native-handoffs/confirm",
+                                           json=checked.model_dump(mode="json"))
+            result = NativeHandoffResponse.model_validate(response)
+            if (result.handoff_id != checked.handoff_id
+                    or result.handoff_sha256 != checked.handoff_sha256
+                    or result.destination_scope != checked.destination_scope):
+                raise ValueError
+            return result
+        except (APIError, ValueError, TypeError) as exc:
+            raise _handoff_response_error(exc.status if isinstance(exc, APIError) else 502) from None
+
+    async def native_handoff_resolve(self, request: ConfirmNativeHandoff) -> NativeHandoffResolution:
+        checked = ConfirmNativeHandoff.model_validate(deepcopy(request))
+        try:
+            response = await self._request("POST", "/agent/native-handoffs/resolve",
+                                           json=checked.model_dump(mode="json"))
+            result = NativeHandoffResolution.model_validate(response)
+            if result.request != checked:
+                raise ValueError
+            return result
+        except (APIError, ValueError, TypeError) as exc:
+            raise _handoff_response_error(exc.status if isinstance(exc, APIError) else 502) from None
+
+    async def agent_native_mutation_prepare(self, *, run_id: str, **payload) -> dict:
+        from openvegas.contracts.native_mutation import PrepareNativeMutation
+
+        checked = PrepareNativeMutation.model_validate(payload).model_dump()
+        return await self._request("POST", f"/agent/runs/{run_id}/native-mutations/prepare", json=checked)
+
+    async def agent_native_mutation_approve(self, *, run_id: str, preparation_id: str, **payload) -> dict:
+        from openvegas.contracts.native_mutation import ApproveNativeMutation
+
+        checked = ApproveNativeMutation.model_validate(payload).model_dump()
+        return await self._request("POST", f"/agent/runs/{run_id}/native-mutations/{preparation_id}/approve", json=checked)
+
+    async def agent_approval_consume(self, *, run_id: str, tool_call_id: str, approval_id: str,
+                                     expected_run_version: int, expected_valid_actions_signature: str,
+                                     idempotency_key: str) -> dict:
+        return await self._request("POST", f"/agent/runs/{run_id}/approvals/{tool_call_id}/{approval_id}/consume",
+            json={"expected_run_version": expected_run_version,
+                  "expected_valid_actions_signature": expected_valid_actions_signature,
+                  "idempotency_key": idempotency_key})
+
     async def agent_tool_propose(
         self,
         *,
@@ -1129,6 +1390,8 @@ class OpenVegasClient:
         shell_mode: str | None = None,
         timeout_sec: int | None = None,
         plan_mode: bool = False,
+        native_inference_request_id: str | None = None,
+        native_provider_call_id: str | None = None,
     ) -> dict:
         payload: dict = {
             "runtime_session_id": runtime_session_id,
@@ -1143,7 +1406,37 @@ class OpenVegasClient:
             payload["shell_mode"] = shell_mode
         if timeout_sec is not None:
             payload["timeout_sec"] = int(timeout_sec)
-        return await self._request("POST", f"/agent/runs/{run_id}/tools/propose", json=payload)
+        if native_inference_request_id is not None:
+            payload["native_inference_request_id"] = native_inference_request_id
+        if native_provider_call_id is not None:
+            payload["native_provider_call_id"] = native_provider_call_id
+        # Freeze nested arguments across awaits; recovery must repeat the exact proposal.
+        payload = json.loads(json.dumps(payload, allow_nan=False))
+        path = f"/agent/runs/{run_id}/tools/propose"
+        try:
+            return await self._request("POST", path, json=payload)
+        except APIError as error:
+            try:
+                canonical_native_id = (
+                    isinstance(native_inference_request_id, str)
+                    and str(uuid.UUID(native_inference_request_id)) == native_inference_request_id
+                )
+            except ValueError:
+                canonical_native_id = False
+            recoverable = (
+                canonical_native_id
+                and isinstance(native_provider_call_id, str)
+                and bool(native_provider_call_id)
+                and bool(idempotency_key)
+                and tool_name in {"fs_read", "fs_list"}
+                and shell_mode in {None, "read_only"}
+                and error.status == 503
+                and isinstance(error.__cause__, httpx.TransportError)
+            )
+            if not recoverable:
+                raise
+            # This endpoint only proposes work. Never retry paid inference or a start.
+            return await self._request("POST", path, json=payload)
 
     async def agent_tool_start(
         self,

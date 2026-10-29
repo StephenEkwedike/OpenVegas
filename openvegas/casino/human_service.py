@@ -113,6 +113,45 @@ class HumanCasinoService:
         self.db = db
         self.wallet = wallet
 
+    async def _expire_unfinished_round(self, tx: Any, row: Any) -> bool:
+        """Caller holds the round lock. A decided outcome is never an expiry loss."""
+        status = str(row["status"])
+        if (status not in {"awaiting_action", "expired"} or not row["expires_at"]
+                or row["expires_at"] > _now_utc()):
+            return False
+        state = _parse_state(row["state_json"])
+        game = HUMAN_CASINO_GAMES.get(str(row["game_code"]))
+        if game is None or game.is_resolved(state):
+            return False
+        await self._settle_unfinished_loss(tx, row, terminal_status="expired")
+        return True
+
+    async def _settle_unfinished_loss(self, tx: Any, row: Any, *, terminal_status: str) -> None:
+        """Round lock held; explicit forfeit and expiry share one ledger settlement."""
+        state = _parse_state(row["state_json"])
+        round_id = str(row["id"])
+        if await tx.fetchrow("SELECT 1 FROM human_casino_payouts WHERE round_id = $1", round_id):
+            return
+        wager = Decimal(str(row["wager_v"]))
+        await self.wallet.settle_loss(round_id, wager, tx=tx,
+                                      entry_type="human_casino_loss", reference_id=round_id)
+        await tx.execute(
+            """INSERT INTO human_casino_payouts (round_id, wager_v, payout_v, net_v, ledger_ref)
+               VALUES ($1, $2, $3, $4, $5)""",
+            round_id, wager, Decimal("0"), -wager,
+            f"human_casino_{'expiry' if terminal_status == 'expired' else 'forfeit'}:{round_id}")
+        seed = str(state.pop("_server_seed", ""))
+        await tx.execute(
+            """INSERT INTO human_casino_verifications (round_id, commit_hash, reveal_seed, client_seed, nonce)
+               VALUES ($1, $2, $3, $4, $5)""",
+            round_id, row["rng_commit"], seed, row["client_seed"], row["nonce"])
+        await tx.execute(
+            """UPDATE human_casino_rounds SET status = $4, rng_reveal = $1,
+               resolved_at = now(), state_json = $2 WHERE id = $3""",
+            seed, json.dumps(state), round_id, terminal_status)
+        await tx.execute("UPDATE human_casino_sessions SET net_pnl_v = net_pnl_v + $1 WHERE id = $2",
+                         -wager, row["session_id"])
+
     async def _idem_begin(
         self,
         tx: Any,
@@ -200,6 +239,17 @@ class HumanCasinoService:
             if idem.replay:
                 return idem.replay
 
+            # Bounded, account-scoped cleanup on the next explicit game session.
+            # No new plays, refunds or random outcomes; settled rows are excluded.
+            overdue = await tx.fetch(
+                """SELECT r.* FROM human_casino_rounds r
+                   WHERE r.user_id = $1 AND r.expires_at <= now()
+                     AND r.status IN ('awaiting_action', 'expired')
+                     AND NOT EXISTS (SELECT 1 FROM human_casino_payouts p WHERE p.round_id = r.id)
+                   ORDER BY r.expires_at LIMIT 20 FOR UPDATE OF r SKIP LOCKED""", user_id)
+            for expired in overdue:
+                await self._expire_unfinished_round(tx, expired)
+
             session_id = str(uuid.uuid4())
             expires_at = _now_utc() + timedelta(seconds=_session_ttl_seconds())
             await tx.execute(
@@ -235,7 +285,7 @@ class HumanCasinoService:
         rows = await self.db.fetch(
             "SELECT game_code, rtp, rules_json, payout_table_json FROM casino_game_catalog WHERE enabled = TRUE"
         )
-        return {"games": [dict(r) for r in rows]}
+        return {"games": [dict(r) for r in rows], "min_wager_v": str(min_game_wager_v())}
 
     async def start_round(
         self,
@@ -319,6 +369,12 @@ class HumanCasinoService:
             client_seed = secrets.token_hex(16)
             nonce = 0
             state = game.initial_state(rng, client_seed, nonce)
+            if game_code == "poker":
+                state["_human_streets"] = 1
+            if game_code == "blackjack":
+                game.enable_extended(state)
+                state['base_wager_v'] = str(wager_v)
+                state['total_wager_v'] = str(wager_v)
             state["_server_seed"] = rng.server_seed
             current_state = "resolvable" if game.is_resolved(state) else "awaiting_action"
 
@@ -427,16 +483,34 @@ class HumanCasinoService:
                 await self._idem_persist(tx, row_id=idem.row_id, response=out)
                 return out
 
-            if row["expires_at"] and row["expires_at"] <= _now_utc() and status not in {"resolved", "expired", "canceled"}:
+            if await self._expire_unfinished_round(tx, row):
                 status = "expired"
-                await tx.execute(
-                    "UPDATE human_casino_rounds SET status = 'expired' WHERE id = $1",
-                    round_id,
-                )
 
             if status in {"resolved", "canceled", "expired"}:
                 err = "round_already_resolved" if status == "resolved" else "round_expired" if status == "expired" else "invalid_transition"
                 out = _state_error(err, status, [])
+                await self._idem_persist(tx, row_id=idem.row_id, response=out)
+                return out
+
+            if action == "forfeit":
+                # A concurrent spin/stand may already have decided a win. Return
+                # that state for normal resolve, never overwrite it with a loss.
+                if status == "awaiting_action" and not game.is_resolved(state):
+                    await self._settle_unfinished_loss(tx, row, terminal_status="resolved")
+                    wager = Decimal(str(row["wager_v"]))
+                    response = {"round_id": round_id, "current_state": "resolved",
+                                "valid_actions": [], "wager_v": str(wager),
+                                "payout_v": "0", "net_v": str(-wager),
+                                "outcome": {"result": "forfeit"}}
+                elif status == "resolvable":
+                    response = {"round_id": round_id, "current_state": status,
+                                "valid_actions": [],
+                                "state": _public_state_for_game(str(row["game_code"]), state, status)}
+                else:
+                    out = _state_error("invalid_transition", status, [])
+                    await self._idem_persist(tx, row_id=idem.row_id, response=out)
+                    return out
+                out = SerializedHTTPResponse(status_code=200, body_text=_json_text(response))
                 await self._idem_persist(tx, row_id=idem.row_id, response=out)
                 return out
 
@@ -456,6 +530,28 @@ class HumanCasinoService:
                 round_id,
             )
             move_count = int(move_count_row["cnt"] if move_count_row else 0)
+
+            if str(row['game_code']) == 'blackjack':
+                extra_units = game.extra_stake_units(state, action)
+                if extra_units:
+                    extra = Decimal(state['base_wager_v']) * extra_units
+                    total = Decimal(str(row['wager_v'])) + extra
+                    session = await tx.fetchrow(
+                        'SELECT * FROM human_casino_sessions WHERE id = $1 FOR UPDATE', row['session_id'])
+                    if not session or session['status'] != 'active' or (
+                        session['expires_at'] and session['expires_at'] <= _now_utc()
+                    ):
+                        raise ValueError('Session is no longer active; hit or stand without adding a stake')
+                    if total > Decimal(str(session['max_loss_v'])) + Decimal(str(session['net_pnl_v'])):
+                        out = _state_error('extra_stake_limit', status, valid_actions)
+                        await self._idem_persist(tx, row_id=idem.row_id, response=out)
+                        return out
+                    # Round lock + existing idempotency transaction cover the debit,
+                    # move and total exposure together. A retry cannot charge twice.
+                    await self.wallet.place_bet(f'user:{user_id}', extra, round_id, tx=tx,
+                        entry_type='human_casino_play', reference_id=f'{round_id}:extra:{move_count}')
+                    await tx.execute('UPDATE human_casino_rounds SET wager_v = $1 WHERE id = $2', total, round_id)
+                    state['total_wager_v'] = str(total)
 
             rng = ProvablyFairRNG()
             rng.server_seed = str(state.pop("_server_seed", ""))
@@ -553,12 +649,8 @@ class HumanCasinoService:
                 await self._idem_persist(tx, row_id=idem.row_id, response=out)
                 return out
 
-            if row["expires_at"] and row["expires_at"] <= _now_utc() and status not in {"resolved", "expired", "canceled"}:
+            if await self._expire_unfinished_round(tx, row):
                 status = "expired"
-                await tx.execute(
-                    "UPDATE human_casino_rounds SET status = 'expired' WHERE id = $1",
-                    round_id,
-                )
 
             if status in {"resolved", "canceled", "expired"}:
                 err = "round_already_resolved" if status == "resolved" else "round_expired" if status == "expired" else "invalid_transition"
@@ -584,6 +676,10 @@ class HumanCasinoService:
             multiplier, outcome_data = game.resolve(state)
             wager_v = Decimal(str(row["wager_v"]))
             payout_v = (wager_v * multiplier).quantize(Decimal("0.000001"))
+            if state.get('_blackjack_actions_v2'):
+                # Calculate in original stake units, avoiding a repeating-decimal
+                # average across mixed split/doubled hands.
+                payout_v = (Decimal(state['base_wager_v']) * Decimal(outcome_data['payout_units'])).quantize(Decimal('0.000001'))
             net_v = payout_v - wager_v
 
             account_id = f"user:{user_id}"

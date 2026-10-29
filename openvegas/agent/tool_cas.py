@@ -48,6 +48,26 @@ def redact_text(text: str) -> str:
     return out
 
 
+def redaction_required(value: Any) -> bool:
+    """Inspect nested output without changing callback hashes or stored payloads."""
+    patterns = _compiled_redaction_patterns()
+    pending = [value]
+    visited = 0
+    while pending:
+        visited += 1
+        if visited > 10000:
+            return True
+        item = pending.pop()
+        if isinstance(item, dict):
+            pending.extend(item.keys())
+            pending.extend(item.values())
+        elif isinstance(item, list):
+            pending.extend(item)
+        elif isinstance(item, str) and any(pat.search(item) for pat in patterns):
+            return True
+    return False
+
+
 @dataclass(frozen=True)
 class OutputEnvelope:
     text: str

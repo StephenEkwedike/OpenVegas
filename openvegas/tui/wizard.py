@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from openvegas.integrations.game_result import amount as format_v
+
 from contextlib import nullcontext
 from decimal import Decimal, InvalidOperation
 import webbrowser
@@ -303,7 +305,7 @@ class OpenVegasWizard(App):
 
         if action == "Balance":
             data = await self.client.get_balance()
-            self._set_output(f"Balance: {_format_v_amount(data.get('balance', '0'))} $V")
+            self._set_output(f"Balance: {format_v(data.get('balance'))}")
             return
 
         if action == "History":
@@ -318,11 +320,11 @@ class OpenVegasWizard(App):
                 status = str(e.get("status") or "")
                 if kind == "gameplay":
                     amount = str(e.get("amount_v_2dp") or e.get("amount_v") or "0.00")
-                    amount_label = f"{amount} $V"
+                    amount_label = f"{format_v(amount)}"
                 else:
                     usd = str(e.get("amount_usd") or "0.00")
                     amount_v = str(e.get("amount_v_2dp") or e.get("amount_v") or "0.00")
-                    amount_label = f"${usd} · +{amount_v} $V"
+                    amount_label = f"${usd} · {format_v(amount_v, signed=True)}"
                 lines.append(
                     f"{kind} {amount_label} {status} ref={str(e.get('reference_id', ''))[:12]}".strip()
                 )
@@ -377,7 +379,7 @@ class OpenVegasWizard(App):
             verify_hint = f"openvegas verify {data.get('game_id')}"
             self._set_output(
                 f"{mode}\n"
-                f"Payout: {data.get('payout')} | Net: {data.get('net')}\n"
+                f"Payout: {format_v(data.get('payout'))} | Net: {format_v(data.get('net'), signed=True)}\n"
                 f"Game ID: {data.get('game_id')}\n"
                 f"Verify: {verify_hint}"
             )

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from openvegas.integrations.game_result import amount as format_v
+
 import asyncio
 import sys
 import select
@@ -147,10 +149,10 @@ class SkillShotGame(BaseGame):
         if payout > 0:
             console.print(result_banner([
                 f"Multiplier: {multiplier}x",
-                f"Won {payout} $V!",
+                f"Won {format_v(payout)}!",
             ]))
         else:
-            console.print(f"\n[red]Missed! Lost {result.bet_amount} $V.[/red]")
+            console.print(f"\n[red]Missed! Lost {format_v(result.bet_amount)}.[/red]")
 
     async def render_async(self, result: GameResult, console: Console, opts=None):
         await self.render(result, console, opts)

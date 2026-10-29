@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from openvegas.integrations.game_result import amount as format_v
+
 import asyncio
 from dataclasses import dataclass
 from decimal import Decimal
@@ -315,13 +317,13 @@ class HorseRacing(BaseGame):
         if net > 0:
             banner_lines = [
                 f"WINNER: {winner_name}",
-                f"Payout: {payout} $V (+{net} net)",
+                f"Payout: {format_v(payout)} ({format_v(net, signed=True)} net)",
             ]
             console.print(result_banner(banner_lines))
         elif net == 0:
             console.print(f"\n[yellow]Push — {winner_name} won.[/yellow]")
         else:
-            console.print(f"\n[red]{winner_name} won. You lost {bet_amount} $V.[/red]")
+            console.print(f"\n[red]{winner_name} won. You lost {format_v(bet_amount)}.[/red]")
 
     async def render_async(self, result: GameResult, console: Console, opts=None):
         if opts is not None and getattr(opts, "duration_sec", None) is not None:
