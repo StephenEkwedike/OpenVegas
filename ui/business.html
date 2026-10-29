@@ -9,7 +9,7 @@
   <link rel="icon" type="image/svg+xml" href="/ui/assets/brand/favicon.svg" />
   <link rel="stylesheet" href="/ui/assets/theme.css" />
   <link rel="stylesheet" href="/ui/assets/layout.css" />
-  <link rel="stylesheet" href="/ui/assets/business.css?v=capacity1" />
+  <link rel="stylesheet" href="/ui/assets/business.css?v=mfa2" />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet" />
   <script defer src="/ui/assets/theme-fallback.js"></script>
 <link rel="stylesheet" href="/ui/assets/home-clarity.css?v=20261028" />
@@ -33,19 +33,21 @@
     </section>
     <section id="mfa" class="business-panel mfa-panel" hidden aria-labelledby="mfa-title">
       <p class="eyebrow">SECOND FACTOR</p><h2 id="mfa-title">Verify your authenticator.</h2>
-      <p>Use your existing Supabase TOTP factor, or enroll one. Supabase verifies every code.</p>
-      <label for="factor">Authenticator</label><select id="factor"></select>
+      <p>Use an authenticator app, such as Google Authenticator, Microsoft Authenticator or 1Password.</p>
+      <p id="factor-empty">No authenticator is set up yet. Choose Set up authenticator below.</p>
+      <div id="factor-picker" hidden><label for="factor">Your authenticator</label><select id="factor"></select></div>
       <button id="enroll" type="button">Set up authenticator</button>
+      <p id="mfa-feedback" role="status" aria-live="polite"></p>
       <div id="enrollment" hidden>
         <p>Scan once in your authenticator. This QR contains a private enrollment secret. Do not share it or include it in screenshots.</p>
         <img id="qr" alt="Private authenticator enrollment QR" width="240" height="240" />
       </div>
-      <form id="verify-form">
+      <form id="verify-form" hidden>
         <label for="otp">Six-digit code</label>
         <input id="otp" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" minlength="6" maxlength="6" required />
-        <button id="verify" type="submit">Verify and open console</button>
+        <button id="verify" type="submit" disabled>Verify and open console</button>
       </form>
-      <p class="subtle">Abandoned setup cannot reveal its secret again. Manage an unused factor in Supabase before enrolling again.</p>
+      <p class="subtle">Setup interrupted? Choose Set up authenticator again to replace the unfinished setup. Your verified authenticator is never removed.</p>
     </section>
     <div id="console" class="business-split" hidden>
       <section class="signals" aria-label="Business and operational signals">
@@ -118,7 +120,7 @@
       </aside>
     </div>
   </main>
-  <script type="module" src="/ui/assets/business.js?v=capacity1"></script>
+  <script type="module" src="/ui/assets/business.js?v=mfa3"></script>
 <footer class="site-footer"><div><strong>OpenVegas. Agentic Entertainment.</strong><p>A hand. Then back to the build.</p></div><a class="partnership-cta" href="/ui/data-partnerships">Data Partnerships <span aria-hidden="true">&nbsp;↗</span></a><div class="site-footer-links"><a href="/ui/how-to-play">How to Play</a><a href="/ui/arena">Arena · Soon</a><a href="/ui/agents">Agents</a><a href="/ui/faq">FAQ</a><a href="/ui/security">Security</a><a href="/ui/contact">Contact</a></div></footer>
 </body>
 </html>

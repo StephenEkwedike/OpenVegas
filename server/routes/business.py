@@ -132,8 +132,15 @@ async def mfa_enroll(request: Request, identity: AdminIdentity):
     factors = await _factors(request, identity)
     if any(f.get("status") == "verified" for f in factors) and identity["aal"] != "aal2":
         raise HTTPException(403, "Verify your existing factor before enrolling another")
-    if any(f.get("friendly_name") == "OpenVegas business" for f in factors):
-        raise HTTPException(409, "Enrollment exists; use its code or manage factors in Supabase")
+    for factor in factors:
+        if factor.get("friendly_name") != "OpenVegas business":
+            continue
+        if factor.get("status") != "unverified" or factor.get("factor_type") != "totp":
+            raise HTTPException(409, "Enrollment exists; use your existing authenticator")
+        # A failed response can leave a factor whose QR was never displayed.
+        # Only replace our own unfinished TOTP; never remove a verified factor.
+        factor_id = str(UUID(factor["id"]))
+        await auth_request("DELETE", f"/factors/{factor_id}", token=_token(request))
     body = await auth_request(
         "POST",
         "/factors",

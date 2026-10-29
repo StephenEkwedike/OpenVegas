@@ -18,7 +18,10 @@ const capacityMetrics = ["capacity-cpu", "capacity-rss", "capacity-container-cpu
 const percent = (value) => format(value === null || value === undefined ? null : value * 100, "%");
 const memory = (value) => format(value === null || value === undefined ? null : value / 1048576, " MiB");
 
-function status(message) { el("status").textContent = message; }
+function status(message) {
+  el("status").textContent = message;
+  el("mfa-feedback").textContent = message;
+}
 function clearEnrollment() {
   el("qr").removeAttribute("src");
   el("enrollment").hidden = true;
@@ -66,7 +69,13 @@ async function request(path, payload) {
     if (!response.ok) {
       const messages = { 409: "Enrollment already exists. Use your existing authenticator or manage factors in Supabase.",
         429: "Request limit reached. Wait a minute before retrying.",
-        400: "Verification rejected. Check the code and try again.", 422: "Check the submitted fields." };
+        400: path === "mfa/enroll"
+          ? "Authenticator setup was rejected. The server may not have MFA enrollment enabled. No code is needed until setup succeeds."
+          : "Verification rejected. Check the six-digit code in your authenticator app and try again.",
+        422: "Check the submitted fields.",
+        503: path === "mfa/enroll"
+          ? "Authenticator setup could not finish. Try Set up authenticator again; an unfinished setup will be replaced."
+          : "Service temporarily unavailable. Try again shortly." };
       throw new Error(messages[response.status] || "Source unavailable. Try again later; no successful result is assumed.");
     }
     return await response.json();
@@ -197,10 +206,23 @@ async function refresh() {
 function addFactor(id, label) {
   const option = document.createElement("option"); option.value = id; option.textContent = label;
   el("factor").append(option); el("factor").value = id;
+  syncFactorControls();
 }
 
+function syncFactorControls() {
+  const available = Boolean(el("factor").value);
+  el("factor-picker").hidden = !available;
+  el("factor-empty").hidden = available;
+  el("verify-form").hidden = !available;
+  el("verify").disabled = !available;
+}
+el("factor").addEventListener("change", syncFactorControls);
+
 el("enroll").addEventListener("click", async () => {
+  if (el("enroll").disabled) return;
   el("enroll").disabled = true;
+  el("enroll").textContent = "Setting up...";
+  status("Creating your authenticator setup. Please wait...");
   const version = generation;
   try {
     const data = await request("mfa/enroll", {});
@@ -210,6 +232,7 @@ el("enroll").addEventListener("click", async () => {
     el("qr").src = data.qr_png; el("enrollment").hidden = false;
     status("Scan the private QR, then enter your authenticator code.");
   } catch (error) { status(error.message); el("enroll").disabled = false; }
+  finally { el("enroll").textContent = "Set up authenticator"; }
 });
 
 el("verify-form").addEventListener("submit", async (event) => {
@@ -227,7 +250,7 @@ el("verify-form").addEventListener("submit", async (event) => {
     el("mfa").hidden = true; unlocked = true;
     await refresh();
   } catch (error) { status(error.message); }
-  finally { el("otp").value = ""; el("verify").disabled = false; }
+  finally { el("otp").value = ""; el("verify").disabled = !el("factor").value; }
 });
 
 el("question-form").addEventListener("submit", async (event) => {
@@ -283,6 +306,7 @@ async function start() {
     const verified = data.factors.find((factor) => factor.status === "verified");
     if (verified) el("factor").value = verified.id;
     el("enroll").hidden = Boolean(verified);
+    syncFactorControls();
     el("mfa").hidden = false;
     status("Admin identity verified. Complete MFA before business data is available.");
   } catch (error) { status(error.message); }

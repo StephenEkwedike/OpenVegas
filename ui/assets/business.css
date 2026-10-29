@@ -31,7 +31,10 @@
 .business-shell details { font-size: 12px; overflow-wrap: anywhere; }
 .business-shell summary { cursor: pointer; margin-bottom: 10px; }
 .mfa-panel { max-width: 620px; }
-.mfa-panel select { max-width: 100%; }
+.mfa-panel select { width: 100%; min-height: 48px; background: var(--input-bg); color: var(--text-main); }
+.mfa-panel option { background: var(--input-bg); color: var(--text-main); }
+.mfa-panel #enroll { min-height: 48px; background: var(--text-main); color: var(--bg-main); }
+#mfa-feedback { min-height: 1.65em; color: var(--text-main); font-weight: 500; }
 #otp { width: 160px; letter-spacing: .16em; }
 #qr { display: block; max-width: 100%; height: auto; border: 10px solid white; background: white; }
 #latency-chart { display: block; width: 100%; height: auto; border-bottom: 1px solid var(--line); }

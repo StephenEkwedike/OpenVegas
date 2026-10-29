@@ -48,7 +48,9 @@ def source_digest():
         for path in (ROOT / "openvegas").rglob("*")
         if path.is_file() and path.suffix in {".py", ".json", ".png", ".js", ".md"}
     )
-    for path in sorted(files):
+    # Windows Path ordering folds case, unlike POSIX. Hash identical relative
+    # names in identical order on every runner, without normalizing file bytes.
+    for path in sorted(files, key=lambda item: item.relative_to(ROOT).as_posix()):
         if path.is_symlink():
             raise ValueError("Symlinked source is not a release input")
         digest.update(path.relative_to(ROOT).as_posix().encode() + b"\0")

@@ -77,10 +77,13 @@ async def auth_request(method: str, path: str, *, token: str = "", data=None) ->
                     if response.status_code in {401, 403}:
                         status = 401
                     raise HTTPException(status, "Authentication request rejected")
+                # Supabase's enrollment SVG can exceed 500 KB for long account names.
+                # Keep ordinary auth responses small; enrollment remains bounded.
+                limit = 1048576 if method == "POST" and path == "/factors" else 131072
                 raw = bytearray()
                 async for chunk in response.aiter_bytes(chunk_size=8192):
                     raw.extend(chunk)
-                    if len(raw) > 131072:
+                    if len(raw) > limit:
                         raise ValueError("oversized auth response")
                 body = json.loads(raw)
                 if not isinstance(body, dict):
