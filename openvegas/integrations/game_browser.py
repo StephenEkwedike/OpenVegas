@@ -1,8 +1,11 @@
 """Browser actions for the owned terminal. Existing secure storage, PKCE and account checks."""
 
+import asyncio
 import base64
 import hashlib
 import secrets
+import subprocess
+import sys
 import webbrowser
 from urllib.parse import urlencode
 
@@ -20,14 +23,29 @@ def use_game_login(client, backend):
         client.token = token
 
 
+def open_account_browser(url):
+    try:
+        if sys.platform == 'darwin':
+            # Launch Services does not require Apple Events automation access.
+            return subprocess.run(
+                ['/usr/bin/open', url], stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=5, check=False,
+            ).returncode == 0
+        return bool(webbrowser.open(url))
+    except (OSError, subprocess.TimeoutExpired, webbrowser.Error):
+        return False
+
+
 async def browser_action(action, ask, client, broker):
     from .native_play import choice_model, menu_read
 
     if action == "purchase_v":
         url = broker.backend + "/ui/balance"
-        webbrowser.open(url)
+        opened = await asyncio.to_thread(open_account_browser, url)
         reply = await ask(
-            "Purchase $V in your browser: "
+            ("Purchase $V in your browser: " if opened else
+             "Could not open your browser. Open this wallet link: ")
             + url
             + "\nReturn here after checkout. No charge or wager is made by opening this page.",
             choice_model("BrowserAction", ["continue", "quit"]),
@@ -41,10 +59,11 @@ async def browser_action(action, ask, client, broker):
         broker.request("POST", "/game-login/start", data={"code_challenge": proof})
     )
     url = broker.backend + "/ui/connect?" + urlencode({"code": start["user_code"], "mode": "game"})
-    webbrowser.open(url)
+    opened = await asyncio.to_thread(open_account_browser, url)
     while True:
         reply = await ask(
-            "Sign in/up in your browser. Match code "
+            ("Sign in/up in your browser. Match code " if opened else
+             "Could not open your browser. Open the link below and match code ")
             + start["user_code"]
             + ".\n"
             + url

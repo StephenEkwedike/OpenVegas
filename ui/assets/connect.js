@@ -2,7 +2,7 @@ import { authProbe, apiJson, getLoginHref } from "/ui/assets/page-auth.js?v=2026
 
 const code = new URLSearchParams(location.search).get("code") || "";
 const gameLogin = new URLSearchParams(location.search).get('mode') === 'game';
-if(gameLogin)document.getElementById('connectionScope').textContent='This signs your terminal into your wallet and allows human-controlled games for 24 hours. You enter every wager yourself and can lose the stake. It does not authorize card charges, automatic play or AI spending. Deny if you did not start this connection.';
+if(gameLogin)document.getElementById('connectionScope').textContent='This signs your terminal into your wallet and allows human-controlled games. You enter every wager yourself and can lose the stake. It does not authorize card charges, automatic play or AI spending. Deny if you did not start this connection.';
 const status = document.getElementById("status");
 const approve = document.getElementById("approve");
 const deny = document.getElementById("deny");

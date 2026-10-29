@@ -232,7 +232,7 @@ function ownershipFailure(error, message) {
     owned.clear();
     purchaseKeys.clear();
     tell("Sign in to check ownership, purchase or equip an emote.");
-    const link = node("a", " Sign in");
+    const link = node("a", " Sign in/up");
     link.href = getLoginHref("/ui/emotes");
     $("catalog-status").append(link);
   } else tell(message || "Previews are available. Ownership could not be checked. Actions are disabled until you retry the ownership check.");

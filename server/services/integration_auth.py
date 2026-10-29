@@ -14,6 +14,7 @@ import secrets
 from fastapi import HTTPException
 
 DEVICE_TTL = 30 * 24 * 3600
+GAME_TTL = DEVICE_TTL
 LEASE_TTL = 15 * 60
 APPROVAL_TTL = 300
 HOSTS = frozenset({"claude", "codex"})
@@ -103,8 +104,8 @@ class IntegrationAuth:
             game_token = 'ov_game_' + secrets.token_urlsafe(32)
             await self.redis.set(PREFIX+'token:'+digest(game_token),json.dumps({
                 'user_id':value['user_id'],'kind':'game','parent':digest(result['token']),
-            }),ex=86400)
-            result.update(game_token=game_token,game_expires_in=86400)
+            }),ex=GAME_TTL)
+            result.update(game_token=game_token,game_expires_in=GAME_TTL)
         return result
 
     async def enroll(self, user_id: str):

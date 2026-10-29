@@ -65,8 +65,7 @@
         <h2 class="card-title">Sign in to view billing data</h2>
         <p class="text-mono-sm">This page is available after authentication.</p>
         <div class="cta-row">
-          <a id="loginLink" class="btn btn-primary" href="/ui/login?next=%2Fui%2Fbalance">OpenVegas login</a>
-          <a id="signupLink" class="btn" href="/ui/login?mode=signup&amp;next=%2Fui%2Fbalance">OpenVegas signup</a>
+          <a id="loginLink" class="btn btn-primary" href="/ui/login?next=%2Fui%2Fbalance">Sign in/up</a>
         </div>
       </section>
 
@@ -141,7 +140,7 @@
     <script type="module">
       import {money} from '/ui/assets/currency.js';
       import { renderTopNav, renderFounderLinks, installAssetGuard, byId } from "/ui/assets/site.js?v=20261028";
-      import { apiJson, bootstrapBrowserSession, clearBrowserToken, getBrowserToken, getLoginHref, getSignupHref, showAuthedContent, showSignedOutPanel } from "/ui/assets/page-auth.js?v=20260330";
+      import { apiJson, bootstrapBrowserSession, clearBrowserToken, getBrowserToken, getLoginHref, showAuthedContent, showSignedOutPanel } from "/ui/assets/page-auth.js?v=20260330";
 
       installAssetGuard();
       renderTopNav("siteNav");
@@ -149,8 +148,6 @@
 
       const loginLink = byId("loginLink");
       if (loginLink) loginLink.href = getLoginHref("/ui/balance");
-      const signupLink = byId("signupLink");
-      if (signupLink) signupLink.href = getSignupHref("/ui/balance");
 
       fetch("/promotions/config", { cache: "no-store" }).then(r => r.ok ? r.json() : null)
         .then(config => { byId("promotion").hidden = config?.enabled !== true; }).catch(() => {});

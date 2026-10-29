@@ -92,7 +92,7 @@ for(const [form,input,path] of [['agentOrgForm','agentOrgName',()=>'/v1/agent/or
   el(form).addEventListener('submit',async event=>{event.preventDefault();const button=event.submitter;button.disabled=true;try{const data=await request(path(),{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:el(input).value})});el(input).value='';if(form==='agentOrgForm')await loadOrganizations(data.org_id);else await refresh();}catch(error){message(error.message);}finally{button.disabled=false;}});
 }
 if(await bootstrapBrowserSession()){el('agentWorkspace').hidden=false;loadOrganizations().catch(e=>message(e.message));}
-else {message('Log in to view your agent organizations. ');const a=document.createElement('a');a.href=getLoginHref('/ui/agents');a.textContent='Log in';el('agentMessage').append(a);}
+else {message('Sign in to view your agent organizations. ');const a=document.createElement('a');a.href=getLoginHref('/ui/agents');a.textContent='Sign in/up';el('agentMessage').append(a);}
 
 function fundingPath(){return `/v1/agent/organizations/${encodeURIComponent(el('agentOrg').value)}/agents/${encodeURIComponent(el('fundingAgent').value)}/funding`;}
 async function refreshFunding(){

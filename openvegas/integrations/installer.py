@@ -105,8 +105,8 @@ def companion_art():
 
 
 def mod_source(command, site):
-    graphics = "import { GAME_ART } from './game-art-module.js';\n" + (ASSETS / "game-graphics.js").read_text()
-    return graphics + (ASSETS / "register.js").read_text().replace(
+    graphics = "import { GAME_ART } from './game-art-module.js';\n" + (ASSETS / "game-graphics.js").read_text(encoding="utf-8")
+    return graphics + (ASSETS / "register.js").read_text(encoding="utf-8").replace(
         "__OPENVEGAS_HELPER__", json.dumps(command)).replace(
         "__OPENVEGAS_SITE__", json.dumps(site)).replace(
         "__OPENVEGAS_CONTROLS__", json.dumps({"actions": action_catalog(), "aliases": ALIASES,
@@ -121,7 +121,7 @@ def codex_game_entry_opt_in(marketplace):
     try:
         if path.is_symlink() or path.stat().st_size > 2_000_000:
             return False
-        data = tomllib.loads(path.read_text())
+        data = tomllib.loads(path.read_text(encoding="utf-8"))
         plugin = data.get('plugins', {}).get('openvegas@' + marketplace, {})
         server = plugin.get('mcp_servers', {}).get('openvegas', {})
         return (plugin.get('enabled', True) is True and server.get('enabled', True) is True
@@ -139,7 +139,7 @@ def codex_policy_snapshot(plugin, env):
     path = Path(environment.get('CODEX_HOME', str(home / '.codex'))) / 'config.toml'
     from .game_permissions import _safe
     _safe(path)
-    data = tomllib.loads(path.read_text()) if path.exists() else {}
+    data = tomllib.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
     return path, data.get('plugins', {}).get(plugin)
 
 
@@ -203,7 +203,7 @@ def bundle_files(info, marketplace):
     mcp = {"mcpServers": {"openvegas": {"type": "stdio", "command": cmd[0], "args": cmd[1:]}}}
     metadata = {"name": "openvegas", "version": "0.1.1", "author": {"name": "OpenVegas"}, "description":
                 "Existing OpenVegas wallet and cosmetics inside your native coding host."}
-    files = {"plugins/openvegas/skills/openvegas/SKILL.md": (ASSETS / "SKILL.md").read_text().replace(
+    files = {"plugins/openvegas/skills/openvegas/SKILL.md": (ASSETS / "SKILL.md").read_text(encoding="utf-8").replace(
         "__OPENVEGAS_CONTROLS_TABLE__", skill_controls())}
 
     def put(name, value):
@@ -226,10 +226,10 @@ def bundle_files(info, marketplace):
                 "plugins/openvegas/skills/openvegas/SKILL.md").replace("name: openvegas\n", "name: openvegas-help\n")
             put("plugins/openvegas/hooks/hooks.json", {**billing_hooks, "modules": ["./register.js"]})
             files["plugins/openvegas/hooks/register.js"] = mod_source(cmd, backend_url())
-            files["plugins/openvegas/hooks/pet.js"] = (ASSETS / "pet.js").read_text()
-            files["plugins/openvegas/hooks/game-table.js"] = (ASSETS / "game-table.js").read_text()
+            files["plugins/openvegas/hooks/pet.js"] = (ASSETS / "pet.js").read_text(encoding="utf-8")
+            files["plugins/openvegas/hooks/game-table.js"] = (ASSETS / "game-table.js").read_text(encoding="utf-8")
             for asset in ASSETS.glob('game-art-*.js'):
-                files['plugins/openvegas/hooks/' + asset.name] = asset.read_text()
+                files['plugins/openvegas/hooks/' + asset.name] = asset.read_text(encoding="utf-8")
             # Private equipped frames are fetched at runtime, never bundled.
     else:
         put(".agents/plugins/marketplace.json", {"name": marketplace,
@@ -317,7 +317,7 @@ def _verified_previous(previous, directory, marketplace, actual):
     paths = list(root.rglob("*"))
     if root.is_symlink() or any(p.is_symlink() for p in paths):
         raise IntegrationError("Existing bundle contains symlinks; refusing to update it.")
-    files = {str(p.relative_to(root)).replace(os.sep, "/"): p.read_text() for p in paths if p.is_file()}
+    files = {str(p.relative_to(root)).replace(os.sep, "/"): p.read_text(encoding="utf-8") for p in paths if p.is_file()}
     if hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest() != fingerprint:
         raise IntegrationError("Existing bundle was modified; refusing to replace it.")
     return root
@@ -380,7 +380,7 @@ def install(host, *, dry_run=False, upgrade=False, env=None):
             if any(parent.is_symlink() for parent in (path, *path.parents)):
                 raise IntegrationError("Integration bundle must not contain symlinks.")
             if path.exists():
-                if path.is_symlink() or path.read_text() != text:
+                if path.is_symlink() or path.read_text(encoding="utf-8") != text:
                     raise IntegrationError("Existing bundle was modified; refusing to overwrite it.")
             else:
                 _write(path, text)

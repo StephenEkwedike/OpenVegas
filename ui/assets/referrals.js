@@ -125,8 +125,6 @@ async function start() {
   let current = ++generation;
   const next = location.pathname + location.search;
   $("login-link").href = getLoginHref(next);
-  const signup = new URL(getLoginHref(next), location.origin);
-  signup.searchParams.set("mode", "signup"); $("signup-link").href = signup.pathname + signup.search;
   try {
     const response = await fetch("/referrals/config", {cache:"no-store", signal:AbortSignal.timeout(10000)});
     if (!response.ok || (await response.json()).enabled !== true) {

@@ -544,8 +544,8 @@ class GameScreen(App):
         picker.add_options([Text("Confirm above" if v is True else "Cancel / back" if v is False
                                 else 'Quick Play       (vs House)' if v == 'quick_play'
                                 else 'Arena            (Coming Soon)' if v == 'arena'
-                                else 'Sign in/up       (Browser)' if v == 'sign_in'
-                                else 'Purchase $V      (Browser)' if v == 'purchase_v'
+                                else 'Sign in/up       (opens browser)' if v == 'sign_in'
+                                else 'Purchase $V      (opens browser)' if v == 'purchase_v'
                                 else 'Horse Racing' if v == 'horse'
                                 else str(v).capitalize() + ' / add ' + amount((self.result.get('state') or {}).get('base_wager_v'))
                                 if self.game == 'blackjack' and v in {'split', 'double'}
