@@ -81,7 +81,20 @@ def verify_bundle(*, include_review_packs=False):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 3 and sys.argv[1] == '--_render-terminal-game':
+    if sys.argv[1:3] == ['integration', 'serve'] and '--billing-hook' in sys.argv[3:]:
+        # Five-second host hooks must not import the full chat/audio CLI or MCP
+        # server merely to notify the local terminal supervisor.
+        import argparse
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--host', required=True, choices=('claude', 'codex'))
+        parser.add_argument('--backend')
+        parser.add_argument('--profile')
+        parser.add_argument('--billing-hook', action='store_true')
+        args = parser.parse_args(sys.argv[3:])
+        from openvegas.integrations.use import hook_main
+
+        hook_main(args.host)
+    elif len(sys.argv) == 3 and sys.argv[1] == '--_render-terminal-game':
         from openvegas.integrations.terminal_handoff import render_main
 
         render_main(int(sys.argv[2]))

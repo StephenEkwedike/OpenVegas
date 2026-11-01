@@ -222,8 +222,9 @@ def platform_keychain_available() -> bool:
 
 
 def touchid_enabled() -> bool:
-    default = "1" if sys.platform == "darwin" else "0"
-    return str(os.getenv("OPENVEGAS_ENABLE_TOUCHID", default)).strip().lower() in {"1", "true", "yes", "on"}
+    # Keychain access remains protected by macOS. Extra per-refresh biometric
+    # prompts are opt-in, not a background HUD/login requirement.
+    return str(os.getenv("OPENVEGAS_ENABLE_TOUCHID", "0")).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def touchid_supported() -> bool:

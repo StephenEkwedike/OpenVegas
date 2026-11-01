@@ -12,8 +12,11 @@ import click
 
 from .broker import Broker
 from .credentials import IntegrationError
-from .installer import HOSTS, detect, host_environment, identity, install, registration, uninstall
+from .installer import (HOSTS, detect, host_environment, identity, install, registration, uninstall,
+                        other_installations, retire_installation)
 from .controls import action_catalog
+from .game_result import amount as format_v
+from .credentials import backend_url
 
 
 def _interactive_terminal():
@@ -44,11 +47,11 @@ def _offer_default_terminal():
     if not (home / "Library/Application Support/Code/User").is_dir():
         return
     try:
-        if configure(home, env).get("is_default"):
-            configure(home, env, apply=True)
+        if configure(home, env, replace_owned=True).get("is_default"):
+            configure(home, env, apply=True, replace_owned=True)
             click.echo("OpenVegas Graphics is already your VS Code default. Use a NEW terminal tab.")
         elif _default_terminal_consent():
-            configure(home, env, apply=True, make_default=True)
+            configure(home, env, apply=True, make_default=True, replace_owned=True)
             click.echo("Default saved. Open a NEW VS Code terminal, then run codex or claude normally.")
     except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
         click.echo("Optional terminal setup was not applied: " + str(exc))
@@ -67,8 +70,9 @@ async def browser_login(*, allow_file=False):
 @click.option("--dry-run", is_flag=True, help="Show proposed setup without login or config changes.")
 @click.option("--yes", is_flag=True, help="Approve the displayed plugin setup and narrow game-entry permission.")
 @click.option("--keep-game-approvals", is_flag=True, help="Keep repeated host approval prompts for the game-entry tool.")
+@click.option("--verbose", is_flag=True, help="Show plugin paths and setup diagnostics.")
 @click.option("--allow-file-credential", is_flag=True, help="Accept POSIX 0600 storage if the OS keychain is unavailable.")
-def go(host, dry_run, yes, allow_file_credential, keep_game_approvals):
+def go(host, dry_run, yes, allow_file_credential, keep_game_approvals, verbose):
     """Connect OpenVegas to Claude/Codex once; then launch claude/codex normally."""
     detected = [name for name in HOSTS if detect(name)]
     if not detected:
@@ -77,33 +81,40 @@ def go(host, dry_run, yes, allow_file_credential, keep_game_approvals):
         host = "both" if dry_run else click.prompt("Integrate with", type=click.Choice(detected + ["both"]), default="both")
     hosts = detected if host == "both" else [host]
     try:
+        from urllib.parse import urlsplit
+        site = backend_url()
+        local = urlsplit(site).hostname in {"localhost", "127.0.0.1", "::1"}
+        click.echo("OpenVegas / " + ("Local development" if local else "Hosted") + " / " + site)
         plans = [install(name, dry_run=True) for name in hosts]
+        replacements = {name: other_installations(name) for name in hosts}
         for plan in plans:
-            click.echo(f"{plan['host']} {plan['version']}: {plan['mode']}")
-            click.echo("  Plugin: " + plan["path"])
-            click.echo("  Host home: " + plan["host_home"])
-        click.echo("This is user-level setup, not tied to the current project folder.")
-        click.echo("Native billing, model choice, tools and permissions stay with the host.")
-        click.echo("Codex uses text/MCP controls; automatic rewards are not enabled.")
+            if verbose or dry_run:
+                click.echo(f"{plan['host']} {plan['version']}: {plan['mode']}")
+                click.echo("  Plugin: " + plan["path"])
+                click.echo("  Host home: " + plan["host_home"])
+        click.echo("Connect " + " + ".join(hosts) + ". Host billing stays unchanged.")
+        if any(replacements.values()):
+            click.echo("Replace the older OpenVegas connection. Saved accounts and other plugins stay unchanged.")
         if not keep_game_approvals:
             click.echo("Fast game entry: trust only OpenVegas play, not other tools. You still enter each wager yourself.")
-            click.echo("First-use host trust and existing restrictions stay in force. Undo: ov integration game-permissions --restore")
-        if "codex" in hosts:
-            click.echo("Includes public OpenVegas preview pets for Codex's picker; no private assets, selection or billing changes.")
         if dry_run:
             return
         if not yes:
             click.confirm("Connect your account and apply this OpenVegas plugin/game-entry setup?", abort=True)
         account = asyncio.run(browser_login(allow_file=allow_file_credential))
-        click.echo("Existing wallet: " + account["balance"] + " $V")
+        click.echo("Wallet: " + format_v(account["balance"]))
         for name in hosts:
             result = install(name, upgrade=True)
-            click.echo(name + ": " + ("already installed" if result.get("unchanged") else result["reload"]))
+            for previous in replacements[name]:
+                retire_installation(previous)
+            if verbose:
+                click.echo(name + ": " + ("already installed" if result.get("unchanged") else result["reload"]))
             if not keep_game_approvals:
                 from .game_permissions import configure
                 try:
                     permission = configure(name, apply=True)
-                    click.echo(name + " game entry: " + permission["status"] + ". " + permission.get("message", ""))
+                    if verbose:
+                        click.echo(name + " game entry: " + permission["status"] + ". " + permission.get("message", ""))
                 except (IntegrationError, OSError):
                     click.echo(name + ": game-entry permission unchanged; use the host's approval prompt.")
         if "codex" in hosts:
@@ -117,13 +128,11 @@ def go(host, dry_run, yes, allow_file_credential, keep_game_approvals):
                     install_previews(home, demos=True, upgrade=True)
             except (OSError, ValueError):
                 click.echo("Public pets were not updated; existing files preserved. Run ov integration pets --install --upgrade for details.")
-        click.echo("Setup complete. Launch claude / codex normally and approve the host's plugin/MCP trust prompts.")
-        click.echo("Animations: /pets opens the controls in both hosts; /pets off hides them.")
-        click.echo("Wallet in either host: ask 'OpenVegas: show my wallet'. Native AI billing may apply to that request.")
-        click.echo("Direct shortcuts: Claude /openvegas wallet (no AI); Codex $openvegas (skill, host AI billing).")
-        click.echo("Same action words in both hosts: " + ", ".join(action["name"] for action in action_catalog()) + ".")
-        click.echo("OpenVegas wallet access does not require Claude credits. Normal AI prompts still require the host's own login/billing.")
-        click.echo("Codex does not have an /openvegas slash command. The local OpenVegas MCP needs no 'mcp login' step.")
+        click.echo("Ready. Restart Claude/Codex; accept its one-time plugin trust prompt.")
+        click.echo("Play: Claude /openvegas play | Codex $openvegas play. Pets: /pets.")
+        if verbose:
+            click.echo("Controls: " + ", ".join(action["name"] for action in action_catalog()) + ".")
+            click.echo("Restore game approvals: ov integration game-permissions --restore")
         _offer_default_terminal()
     except (IntegrationError, OSError, ValueError) as exc:
         message = str(exc) if isinstance(exc, IntegrationError) else "Local integration setup failed; existing application data was preserved."

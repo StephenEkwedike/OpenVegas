@@ -316,7 +316,7 @@ class OpenVegasClient:
             raise APIError(401, "Session expired. Run: openvegas login")
 
     async def _request(self, method: str, path: str, **kwargs) -> dict:
-        if str(self.token or '').startswith('ov_game_'):
+        if getattr(self, '_browser_auth_only', False) or str(self.token or '').startswith('ov_game_'):
             # This credential is separately scoped and revocable; never refresh it
             # with another account's Supabase session or retry a rejected wager.
             resp = await self._do_http(method,path,**kwargs)

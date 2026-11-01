@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import ast
 import os
 from pathlib import Path
 import subprocess
@@ -61,7 +62,37 @@ def _write_settings(settings, original, proposed):
         Path(temporary).unlink(missing_ok=True)
 
 
-def configure(home: Path, env: dict, *, apply=False, make_default=False, restore_default=False, game_handoff=False):
+def _generated_profile(spec, root):
+    """Recognize only our exact legacy templates, not user-edited shell commands."""
+    if not isinstance(spec, dict) or set(spec) - {'path', 'args', 'overrideName', 'env'}:
+        return False
+    args = spec.get('args', [])
+    if (spec.get('path') != '/usr/bin/env' or spec.get('overrideName') is not True
+            or args[:6] != profile_spec(root, game_handoff=False)['args'][:6]):
+        return False
+    environment = spec.get('env', {})
+    if set(environment) - {'OPENVEGAS_BACKEND_URL', 'OPENVEGAS_INTEGRATION_PROFILE'}:
+        return False
+    tail = args[6:]
+    if tail == ['/bin/zsh', '-l']:
+        return True
+    if len(tail) == 5 and tail[1:] == ['--_terminal-relay', '--', '/bin/zsh', '-l']:
+        return Path(tail[0]).is_absolute() and Path(tail[0]).name.startswith('openvegas')
+    if len(tail) != 7 or tail[1:3] != ['-I', '-c'] or tail[4:] != ['--', '/bin/zsh', '-l']:
+        return False
+    prefix = 'import sys; sys.path.insert(0, '
+    suffix = '); from openvegas.integrations.terminal_relay import main; main()'
+    if not tail[3].startswith(prefix) or not tail[3].endswith(suffix):
+        return False
+    try:
+        source = ast.literal_eval(tail[3][len(prefix):-len(suffix)])
+        return isinstance(source, str) and Path(source).is_absolute() and Path(tail[0]).is_absolute()
+    except (ValueError, SyntaxError, TypeError):
+        return False
+
+
+def configure(home: Path, env: dict, *, apply=False, make_default=False, restore_default=False, game_handoff=False,
+              replace_owned=False):
     """Add one optional profile; preserve the default, other profiles and backups."""
     settings = home / "Library/Application Support/Code/User/settings.json"
     root = home / "Library/Application Support/OpenVegas/native-terminal"
@@ -92,6 +123,10 @@ def configure(home: Path, env: dict, *, apply=False, make_default=False, restore
     owned_legacy = (profiles.get(profile) in (legacy, unbound) and
                     (root / "owner.json").is_file() and
                     (root / "owner.json").read_text() == json.dumps({"owner": OWNER}) + "\n")
+    if replace_owned and (root / 'owner.json').is_file():
+        owned_legacy = owned_legacy or (
+            (root / 'owner.json').read_text() == json.dumps({'owner': OWNER}) + '\n'
+            and _generated_profile(profiles.get(profile), root))
     if profile in profiles and profiles[profile] != desired and not owned_legacy:
         raise ValueError("Existing OpenVegas Graphics profile was customized; not overwritten")
     if root.exists() and (not root.is_dir() or

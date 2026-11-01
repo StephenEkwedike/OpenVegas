@@ -331,6 +331,60 @@ def _remove_registration(info, marketplace, actual, *, env=None):
         _run([exe, "plugin", "marketplace", "remove", marketplace], env=env)
 
 
+def other_installations(host):
+    """Find verified OpenVegas installs which would shadow a new account setup."""
+    info = detect(host)
+    if not info:
+        return []
+    current, _ = identity(host)
+    try:
+        markets = json.loads(_run([info['executable'], 'plugin', 'marketplace', 'list', '--json']).stdout)
+        if host == 'codex':
+            markets = markets['marketplaces']
+        result = []
+        for market in markets:
+            name = market.get('name', '')
+            if name == current or not re.fullmatch(r'openvegas-local-[a-f0-9]{12}', name):
+                continue
+            actual = registration(info, name)
+            if not actual['installed'] or not actual['enabled']:
+                continue
+            root = Path(actual['path'])
+            receipt = root.parent / 'installed.json'
+            if (not root.is_absolute() or any(p.is_symlink() for p in (receipt, *receipt.parents))
+                    or receipt.stat().st_size > 16384
+                    or os.name == 'posix' and receipt.stat().st_uid != os.getuid()):
+                raise IntegrationError('Existing OpenVegas setup cannot be safely verified; settings preserved.')
+            previous = json.loads(receipt.read_text())
+            _verified_previous(previous, root.parent, name, actual)
+            if previous.get('host') != host:
+                raise IntegrationError('Existing OpenVegas host receipt does not match; settings preserved.')
+            result.append({'host': host, 'marketplace': name, 'receipt': str(receipt)})
+        return result
+    except (OSError, ValueError, KeyError, TypeError):
+        raise IntegrationError('Could not verify an older OpenVegas setup; settings preserved.') from None
+
+
+def retire_installation(plan):
+    """After replacement succeeds, remove only the verified old registration."""
+    from openvegas.emotes.spool import _locked, _read, atomic_write, state_unlink
+    directory = Path(plan['receipt']).parent
+    info = detect(plan['host'])
+    if not info:
+        raise IntegrationError('Host disappeared during setup; old registration preserved.')
+    with _locked(directory) as fd:
+        raw = _read(fd, 'installed.json', 16384)
+        previous = json.loads(raw)
+        actual = registration(info, plan['marketplace'])
+        _verified_previous(previous, directory, plan['marketplace'], actual)
+        _remove_registration(info, plan['marketplace'], actual)
+        remaining = registration(info, plan['marketplace'])
+        if remaining['registered'] or remaining['installed']:
+            raise IntegrationError('Old OpenVegas registration is still active; restart only after inspecting plugin status.')
+        atomic_write(fd, 'uninstalled.json', raw)
+        state_unlink(fd, 'installed.json')
+
+
 def install(host, *, dry_run=False, upgrade=False, env=None):
     info = detect(host)
     if not info:

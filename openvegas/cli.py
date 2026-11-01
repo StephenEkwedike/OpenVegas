@@ -266,6 +266,10 @@ def _load_openvegas_env_defaults_from_dotenv() -> None:
     if _ENV_DEFAULTS_BOOTSTRAPPED:
         return
     _ENV_DEFAULTS_BOOTSTRAPPED = True
+    if os.getenv("OPENVEGAS_LOAD_PROJECT_ENV") == "0" or (
+        getattr(sys, "frozen", False) and not os.getenv("OPENVEGAS_ENV_FILE")
+    ):
+        return
 
     candidates = [
         Path.cwd() / ".env",

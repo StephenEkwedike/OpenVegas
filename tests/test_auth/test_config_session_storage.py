@@ -1,0 +1,234 @@
+from __future__ import annotations
+
+import os
+import stat
+
+import pytest
+
+from openvegas import config as cfg
+from openvegas.telemetry import get_metrics_snapshot, reset_metrics
+
+
+def _bind_temp_config(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    monkeypatch.setattr(cfg, "CONFIG_DIR", tmp_path)
+    monkeypatch.setattr(cfg, "CONFIG_FILE", tmp_path / "config.json")
+
+
+def test_touchid_default_does_not_prompt_for_background_refresh(monkeypatch):
+    monkeypatch.setattr(cfg.sys, 'platform', 'darwin')
+    monkeypatch.delenv('OPENVEGAS_ENABLE_TOUCHID', raising=False)
+    monkeypatch.setattr(cfg, '_touchid_prompt_via_local_auth',
+                        lambda *a: pytest.fail('Unexpected biometric prompt'))
+    assert not cfg.touchid_enabled()
+    assert not cfg.require_touchid_unlock_for_refresh_storage('platform_credential_store')
+    assert cfg.request_touchid_unlock()
+
+
+def test_touchid_explicit_opt_in_remains_fail_closed(monkeypatch):
+    monkeypatch.setenv('OPENVEGAS_ENABLE_TOUCHID', '1')
+    monkeypatch.setattr(cfg, 'touchid_supported', lambda: True)
+    monkeypatch.setattr(cfg, '_touchid_prompt_via_local_auth', lambda *a: False)
+    assert cfg.require_touchid_unlock_for_refresh_storage('platform_credential_store')
+    assert not cfg.request_touchid_unlock()
+
+
+def test_fresh_config_read_does_not_create_state(monkeypatch, tmp_path):
+    directory = tmp_path / "new-profile" / ".openvegas"
+    _bind_temp_config(monkeypatch, directory)
+    with monkeypatch.context() as guarded:
+        guarded.setattr(cfg, "ensure_config_dir", lambda: pytest.fail("read attempted persistence"))
+        loaded = cfg.load_config()
+        assert loaded["session"] == {}
+        assert not directory.exists()
+    cfg.save_config(loaded)
+    assert cfg.CONFIG_FILE.is_file()
+    if os.name == "posix":
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+        assert stat.S_IMODE(cfg.CONFIG_FILE.stat().st_mode) == 0o600
+
+
+def test_save_session_force_config_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    _bind_temp_config(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENVEGAS_FORCE_CONFIG_REFRESH_STORAGE", "1")
+
+    cfg.save_session("access-1", "refresh-1", access_expires_at=1700000000)
+    session = cfg.get_session()
+    assert session["access_token"] == "access-1"
+    assert session["refresh_token"] == "refresh-1"
+    assert session["refresh_storage"] == "config"
+    assert int(session["access_expires_at"]) == 1700000000
+
+    mode = stat.S_IMODE(os.stat(cfg.CONFIG_FILE).st_mode)
+    assert mode & 0o600 == 0o600
+
+
+def test_refresh_retains_file_storage_without_launcher_environment(monkeypatch, tmp_path):
+    _bind_temp_config(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENVEGAS_FORCE_CONFIG_REFRESH_STORAGE", "1")
+    cfg.save_session("first-access", "first-refresh", access_expires_at=1700000000)
+    monkeypatch.delenv("OPENVEGAS_FORCE_CONFIG_REFRESH_STORAGE")
+    monkeypatch.setattr(cfg, "platform_keychain_available", lambda: True)
+    monkeypatch.setattr(cfg, "save_refresh_to_platform_store",
+                        lambda _: pytest.fail("Refresh unexpectedly migrated the local account"))
+    cfg.save_session("next-access", "next-refresh", access_expires_at=1800000000,
+                     preserve_refresh_storage=True)
+    session = cfg.get_session()
+    assert session["refresh_storage"] == "config"
+    assert session["refresh_token"] == "next-refresh"
+    assert session["access_token"] == "next-access"
+
+
+def test_refresh_keeps_existing_keychain_policy(monkeypatch, tmp_path):
+    _bind_temp_config(monkeypatch, tmp_path)
+    monkeypatch.delenv("OPENVEGAS_FORCE_CONFIG_REFRESH_STORAGE", raising=False)
+    cfg.save_config_atomic({"session": {"refresh_storage": "platform_credential_store"}})
+    stored = []
+    monkeypatch.setattr(cfg, "platform_keychain_available", lambda: True)
+    monkeypatch.setattr(cfg, "save_refresh_to_platform_store", stored.append)
+    cfg.save_session("next-access", "next-refresh", preserve_refresh_storage=True)
+    assert stored == ["next-refresh"]
+    assert cfg.load_config()["session"]["refresh_storage"] == "platform_credential_store"
+    assert cfg.load_config()["session"]["refresh_token"] == ""
+
+
+def test_supabase_refresh_requests_storage_preservation(monkeypatch):
+    from types import SimpleNamespace
+    from openvegas import auth
+    monkeypatch.setattr(auth, "get_session", lambda: {"refresh_token": "old-refresh"})
+    calls = []
+    monkeypatch.setattr(auth, "save_session", lambda *args, **kwargs: calls.append((args, kwargs)))
+    instance = object.__new__(auth.SupabaseAuth)
+    instance.client = SimpleNamespace(auth=SimpleNamespace(refresh_session=lambda token:
+        SimpleNamespace(session=SimpleNamespace(access_token="new-access",
+            refresh_token="new-refresh", expires_at=1800000000))))
+    assert instance.refresh_token() == "new-access"
+    assert calls == [(("new-access", "new-refresh"),
+                      {"access_expires_at": 1800000000, "preserve_refresh_storage": True})]
+
+
+def test_platform_store_then_config_write_failure_emits_structured_degraded_metric(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    _bind_temp_config(monkeypatch, tmp_path)
+    monkeypatch.delenv("OPENVEGAS_FORCE_CONFIG_REFRESH_STORAGE", raising=False)
+    reset_metrics()
+
+    monkeypatch.setattr(cfg, "platform_keychain_available", lambda: True)
+    monkeypatch.setattr(cfg, "save_refresh_to_platform_store", lambda _token: None)
+    monkeypatch.setattr(cfg, "save_config_atomic", lambda _config: (_ for _ in ()).throw(RuntimeError("write_failed")))
+    monkeypatch.setattr(
+        cfg,
+        "_clear_platform_refresh_token_only",
+        lambda: (_ for _ in ()).throw(RuntimeError("rollback_failed")),
+    )
+
+    with pytest.raises(RuntimeError):
+        cfg.save_session("access-1", "refresh-1", access_expires_at=1700000000)
+
+    snapshot = get_metrics_snapshot()
+    metric_key = next((k for k in snapshot if k.startswith("auth_session_save_degraded_total|")), "")
+    assert metric_key
+    assert "reason=rollback_failed" in metric_key
+    assert "config_write_state=write_attempted_unknown" in metric_key
+    assert "platform_saved=true" in metric_key
+    assert "rollback_attempted=true" in metric_key
+    assert "rollback_succeeded=false" in metric_key
+
+
+def test_save_config_atomic_roundtrip(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    _bind_temp_config(monkeypatch, tmp_path)
+    payload = {"session": {"access_token": "a", "refresh_token": "r"}}
+    cfg.save_config_atomic(payload)
+    assert cfg.CONFIG_FILE.exists()
+    loaded = cfg.load_config()
+    assert loaded["session"]["access_token"] == "a"
+
+
+def test_force_config_storage_override_used_in_headless_ci(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    _bind_temp_config(monkeypatch, tmp_path)
+    monkeypatch.setenv("OPENVEGAS_FORCE_CONFIG_REFRESH_STORAGE", "1")
+    monkeypatch.setattr(cfg, "platform_keychain_available", lambda: True)
+    cfg.save_session("a2", "r2")
+    sess = cfg.get_session()
+    assert sess["refresh_storage"] == "config"
+    assert sess["refresh_token"] == "r2"
+
+
+def test_load_config_migrates_stale_localhost_backend_url(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    _bind_temp_config(monkeypatch, tmp_path)
+    monkeypatch.delenv("OPENVEGAS_BACKEND_URL", raising=False)
+    cfg.CONFIG_FILE.write_text('{"backend_url":"http://127.0.0.1:8000"}', encoding="utf-8")
+
+    loaded = cfg.load_config()
+
+    assert loaded["backend_url"] == "https://app.openvegas.ai"
+    persisted = cfg.CONFIG_FILE.read_text(encoding="utf-8")
+    assert '"backend_url": "https://app.openvegas.ai"' in persisted
+
+
+def test_load_config_migrates_stale_railway_backend_url(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    _bind_temp_config(monkeypatch, tmp_path)
+    monkeypatch.delenv("OPENVEGAS_BACKEND_URL", raising=False)
+    cfg.CONFIG_FILE.write_text(
+        '{"backend_url":"https://openvegasdeployed-production.up.railway.app"}',
+        encoding="utf-8",
+    )
+
+    loaded = cfg.load_config()
+
+    assert loaded["backend_url"] == "https://app.openvegas.ai"
+    persisted = cfg.CONFIG_FILE.read_text(encoding="utf-8")
+    assert '"backend_url": "https://app.openvegas.ai"' in persisted
+
+
+def test_get_backend_url_prefers_env_override(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    _bind_temp_config(monkeypatch, tmp_path)
+    cfg.CONFIG_FILE.write_text('{"backend_url":"https://old.example.com"}', encoding="utf-8")
+    monkeypatch.setenv("OPENVEGAS_BACKEND_URL", "https://app.openvegas.ai/")
+
+    assert cfg.get_backend_url() == "https://app.openvegas.ai"
+
+
+def test_get_backend_url_falls_back_to_api_base_env_override(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    _bind_temp_config(monkeypatch, tmp_path)
+    monkeypatch.delenv("OPENVEGAS_BACKEND_URL", raising=False)
+    monkeypatch.delenv("OPENVEGAS_API_URL", raising=False)
+    cfg.CONFIG_FILE.write_text('{"backend_url":"https://old.example.com"}', encoding="utf-8")
+    monkeypatch.setenv("OPENVEGAS_API_BASE_URL", "https://api-base.example.com/")
+
+    assert cfg.get_backend_url() == "https://api-base.example.com"
+
+
+def test_load_config_migrates_legacy_backend_url_to_api_alias_env(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    _bind_temp_config(monkeypatch, tmp_path)
+    monkeypatch.delenv("OPENVEGAS_BACKEND_URL", raising=False)
+    monkeypatch.delenv("OPENVEGAS_API_BASE_URL", raising=False)
+    monkeypatch.setenv("OPENVEGAS_API_URL", "https://alias-api.example.com/")
+    cfg.CONFIG_FILE.write_text('{"backend_url":"https://api.openvegas.gg"}', encoding="utf-8")
+
+    loaded = cfg.load_config()
+
+    assert loaded["backend_url"] == "https://alias-api.example.com"
+    persisted = cfg.CONFIG_FILE.read_text(encoding="utf-8")
+    assert '"backend_url": "https://alias-api.example.com"' in persisted
+
+def test_save_session_keychain_store_failure_falls_back_to_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+):
+    _bind_temp_config(monkeypatch, tmp_path)
+    monkeypatch.delenv("OPENVEGAS_FORCE_CONFIG_REFRESH_STORAGE", raising=False)
+
+    monkeypatch.setattr(cfg, "platform_keychain_available", lambda: True)
+
+    def _raise_owner_mismatch(_token: str):
+        raise RuntimeError("Can't store password on keychain: (-25244, 'Unknown Error')")
+
+    monkeypatch.setattr(cfg, "save_refresh_to_platform_store", _raise_owner_mismatch)
+
+    cfg.save_session("access-2", "refresh-2", access_expires_at=1700000001)
+    sess = cfg.get_session()
+    assert sess["refresh_storage"] == "config"
+    assert sess["refresh_token"] == "refresh-2"
+    assert sess["access_token"] == "access-2"

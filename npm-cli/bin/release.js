@@ -29,8 +29,34 @@ try {
   fail('native package is missing or unreadable. Reinstall with optional dependencies enabled.');
 }
 const args = process.argv.slice(2);
+// A terminal installed for development can export a localhost account. The
+// public launcher must not silently adopt it (or a project's backend .env).
+const local = args[0] === '--local';
+if (local) args.shift();
+const env = {...process.env};
+if (local) {
+  let url;
+  try { url = new URL(env.OPENVEGAS_BACKEND_URL || ''); } catch {}
+  if (!url || !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) {
+    fail('--local requires OPENVEGAS_BACKEND_URL pointing to localhost. Nothing was changed.');
+  }
+} else {
+  const home = env.OPENVEGAS_HOST_HOME || env.HOME || env.USERPROFILE;
+  if (!home) fail('home directory unavailable. Nothing was changed.');
+  for (const key of Object.keys(env)) {
+    if (key.startsWith('OPENVEGAS_') && ![
+      'OPENVEGAS_TERMINAL_SOCKET', 'OPENVEGAS_TERMINAL_TOKEN',
+      'OPENVEGAS_ENABLE_TOUCHID', 'OPENVEGAS_TOUCHID_REQUIRE_BIOMETRIC',
+    ].includes(key)) delete env[key];
+  }
+  env.HOME = env.USERPROFILE = home;
+  env.OPENVEGAS_BACKEND_URL = 'https://app.openvegas.ai';
+  env.OPENVEGAS_INTEGRATION_PROFILE = join(home, '.openvegas');
+  env.OPENVEGAS_HOSTED_LAUNCH = '1';
+}
+env.OPENVEGAS_LOAD_PROJECT_ENV = '0';
 if (!args.length && process.stdin.isTTY && process.stdout.isTTY && !process.env.CI) args.push('go');
-const result = spawnSync(binary, args, {stdio: 'inherit', shell: false});
+const result = spawnSync(binary, args, {stdio: 'inherit', shell: false, env});
 if (result.error) fail('native runtime could not start. No fallback command was run.');
 if (result.signal) {
   process.kill(process.pid, result.signal);

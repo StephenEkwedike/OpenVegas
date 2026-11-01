@@ -7,7 +7,7 @@ import secrets
 import subprocess
 import sys
 import webbrowser
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 from .credentials import Credentials, IntegrationError
 
@@ -18,6 +18,11 @@ def game_credentials(backend):
 
 
 def use_game_login(client, backend):
+    if urlsplit(backend).hostname not in {'localhost', '127.0.0.1', '::1'}:
+        # Hosted games use the backend-bound browser grant. Do not refresh or
+        # forward a legacy CLI login inherited from a local development server.
+        client.token = None
+        client._browser_auth_only = True
     token = game_credentials(backend).load()
     if token:
         client.token = token
@@ -67,7 +72,7 @@ async def browser_action(action, ask, client, broker):
             + start["user_code"]
             + ".\n"
             + url
-            + "\nApprove human-game access there, then Continue here. Quit returns to coding.",
+            + "\nApprove the matching code, then Continue here. Esc / Quit returns to coding.",
             choice_model("BrowserAction", ["continue", "quit"]),
         )
         if reply is None or reply.choice == "quit":
