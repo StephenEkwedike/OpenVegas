@@ -115,6 +115,11 @@ process.exit(result.status ?? 1);
     return launcher
 
 
+def verify_version_output(output, version):
+    if not output.strip().endswith(f", version {version}"):
+        raise ValueError("Native runtime version differs from release package version")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
@@ -130,6 +135,8 @@ def main(argv=None):
     sources = source_digest()
     output.mkdir(parents=True, mode=0o700)
     version = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
+    if runpy.run_path(str(ROOT / "openvegas/__init__.py"))["__version__"] != version:
+        raise ValueError("Source runtime version differs from release package version")
     command = [
         sys.executable,
         "-m",
@@ -180,7 +187,7 @@ def main(argv=None):
         # Clean home/cwd: do not accidentally validate against the developer's config.
         env = clean_environment(home)
         bundle_args = ["--verify-bundle", *(["--include-review-packs"] if args.include_review_packs else [])]
-        for arguments in (bundle_args, ["emote", "doctor"], ["--help"]):
+        for arguments in (bundle_args, ["emote", "doctor"], ["--help"], ["--version"]):
             result = subprocess.run(
                 [str(binary), *arguments],
                 cwd=home,
@@ -197,6 +204,8 @@ def main(argv=None):
                 result.stdout + result.stderr, encoding="utf-8"
             )
             result.check_returncode()
+            if arguments == ["--version"]:
+                verify_version_output(result.stdout, version)
             if arguments == bundle_args and operating_system == 'darwin':
                 profile = json.loads(result.stdout)['terminal_profile']
                 probe = subprocess.run(
