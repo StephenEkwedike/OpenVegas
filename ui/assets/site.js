@@ -421,6 +421,12 @@ export function renderTopNav(targetId = "siteNav") {
 export function renderFounderLinks(targetId = "founderLinks") {
   const node = document.getElementById(targetId);
   if (!node) return;
+  const local = ["localhost", "127.0.0.1", "[::1]"].includes(window.location.hostname);
+  node.hidden = !local;
+  if (!local) {
+    node.replaceChildren();
+    return;
+  }
   node.innerHTML = `<a href="/ui/slidedeck/00-founders.html" class="text-mono-sm">[ FOUNDER DECK ]</a>`;
 }
 

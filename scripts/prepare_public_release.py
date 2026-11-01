@@ -54,6 +54,8 @@ def include(path: Path) -> bool:
             return len(parts) == 4 and path.suffix in {".js", ".md"}
         return parts[:3] == ("openvegas", "tv", "assets") and path.suffix == ".json"
     if parts[0] == "ui":
+        if parts[:2] == ("ui", "slidedeck"):
+            return False
         if parts[:3] == ("ui", "assets", "tv"):
             return False
         if (
