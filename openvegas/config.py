@@ -6,9 +6,7 @@ import json
 import logging
 import os
 import tempfile
-import sys
 import time
-import threading
 from pathlib import Path
 from typing import Any
 
@@ -219,99 +217,6 @@ def platform_keychain_available() -> bool:
         return True
     except Exception:
         return False
-
-
-def touchid_enabled() -> bool:
-    # Keychain access remains protected by macOS. Extra per-refresh biometric
-    # prompts are opt-in, not a background HUD/login requirement.
-    return str(os.getenv("OPENVEGAS_ENABLE_TOUCHID", "0")).strip().lower() in {"1", "true", "yes", "on"}
-
-
-def touchid_supported() -> bool:
-    if sys.platform != "darwin":
-        return False
-    return platform_keychain_available()
-
-
-def require_touchid_unlock_for_refresh_storage(refresh_storage: str | None = None) -> bool:
-    if not touchid_enabled():
-        return False
-    storage = str(refresh_storage or "").strip().lower()
-    return storage in {"platform_credential_store", "platform", "keychain"}
-
-
-def _touchid_prompt_via_local_auth(reason: str = "Unlock OpenVegas session") -> bool:
-    if sys.platform != "darwin":
-        return False
-    try:
-        # Declared macOS runtime dependency; still fail safely if damaged/missing.
-        from LocalAuthentication import (  # type: ignore
-            LAContext,
-            LAPolicyDeviceOwnerAuthenticationWithBiometrics,
-        )
-    except Exception:
-        return False
-
-    completed = threading.Event()
-    outcome: dict[str, bool] = {"ok": False}
-
-    try:
-        context = LAContext.alloc().init()
-        can_eval, _err = context.canEvaluatePolicy_error_(
-            LAPolicyDeviceOwnerAuthenticationWithBiometrics,
-            None,
-        )
-        if not bool(can_eval):
-            return False
-
-        def _reply(success: bool, _error: object) -> None:
-            outcome["ok"] = bool(success)
-            completed.set()
-
-        context.evaluatePolicy_localizedReason_reply_(
-            LAPolicyDeviceOwnerAuthenticationWithBiometrics,
-            str(reason or "Unlock OpenVegas session"),
-            _reply,
-        )
-        completed.wait(timeout=20.0)
-    except Exception:
-        return False
-
-    return bool(outcome.get("ok", False))
-
-
-def request_touchid_unlock() -> bool:
-    """Best-effort biometric + keychain unlock gate on macOS.
-
-    1) Attempt explicit LocalAuthentication biometric prompt when available.
-    2) Confirm keychain retrieval succeeds for refresh token entry.
-
-    The refresh token remains stored only in keychain/config according to existing
-    storage policy. This function never broadens secret scope.
-    """
-    if not touchid_enabled():
-        return True
-    if not touchid_supported():
-        return False
-
-    require_biometric = str(os.getenv("OPENVEGAS_TOUCHID_REQUIRE_BIOMETRIC", "1")).strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-    biometric_ok = _touchid_prompt_via_local_auth("Unlock OpenVegas session")
-    if require_biometric and not biometric_ok:
-        return False
-
-    keyring = _try_import_keyring()
-    if keyring is None:
-        return False
-    try:
-        token = keyring.get_password(_PLATFORM_STORE_SERVICE, _PLATFORM_STORE_ACCOUNT)
-    except Exception:
-        return False
-    return bool(str(token or "").strip())
 
 
 def save_refresh_to_platform_store(refresh_token: str) -> None:

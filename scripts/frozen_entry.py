@@ -38,18 +38,14 @@ def verify_bundle(*, include_review_packs=False):
 
     from openvegas.emotes.resources import PackRepository
 
-    local_authentication_imported = None
+    keychain_frameworks_imported = None
     if sys.platform == "darwin":
-        # Import the bridge and framework symbols only; never instantiate LAContext.
+        # Import Keychain bridges only; never read credentials during verification.
         import objc  # noqa: F401
         import Security  # noqa: F401
         from Foundation import NSObject  # noqa: F401
-        from LocalAuthentication import (  # noqa: F401
-            LAContext,
-            LAPolicyDeviceOwnerAuthenticationWithBiometrics,
-        )
 
-        local_authentication_imported = True
+        keychain_frameworks_imported = True
 
     repository = PackRepository()
     names = repository.names()
@@ -70,10 +66,10 @@ def verify_bundle(*, include_review_packs=False):
         "numpy": numpy.__version__,
         "portaudio_loaded": bool(sounddevice.get_portaudio_version()[0]),
         "keyring_backend": type(backend).__module__ + "." + type(backend).__name__,
-        "local_authentication_imported": local_authentication_imported,
+        "keychain_frameworks_imported": keychain_frameworks_imported,
         "native_plugin_assets": verify_integration_assets(),
         "terminal_profile": terminal_profile,
-        "scope": "bundle dependency check, not microphone/biometric/native UX approval",
+        "scope": "bundle dependency check, not microphone/credential/native UX approval",
     }
     if not report["frozen"] or not report["portaudio_loaded"]:
         raise ValueError("Incomplete frozen runtime")

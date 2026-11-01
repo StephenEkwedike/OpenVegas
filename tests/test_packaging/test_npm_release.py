@@ -197,3 +197,64 @@ def test_launcher_fails_closed_before_execution(installed, damage):
     result = invoke('play')
     assert result.returncode == 1 and not result.stdout
     assert 'OpenVegas:' in result.stderr
+
+
+@pytest.mark.skipif(os.name != 'posix', reason='POSIX PTY contract')
+@pytest.mark.parametrize('finish', ['success', 'failure', 'cancel'])
+def test_loading_preserves_tty_and_clears_before_prompt(installed, tmp_path, finish):
+    import pty
+    import select
+    import sys
+    import time
+    package, native, _ = installed
+    binary = next((native / 'bin').iterdir())
+    binary.write_text(f'''#!{sys.executable}
+import os, time
+time.sleep(.3)
+assert all(os.isatty(fd) for fd in (0,1,2))
+os.write(3, b'ready\\n')
+assert os.read(3,1) == b'1'
+print('PROMPT', flush=True)
+answer = input()
+print('FINISHED', flush=True)
+raise SystemExit(7 if answer == 'failure' else 0)
+''')
+    index = package / 'release.json'
+    data = json.loads(index.read_text())
+    for value in data['platforms'].values():
+        if value['binary'] == binary.name:
+            value['sha256'] = hashlib.sha256(binary.read_bytes()).hexdigest()
+    index.write_text(json.dumps(data))
+    master, slave = pty.openpty()
+    proc = subprocess.Popen([shutil.which('node'), str(package / 'bin/openvegas.js'), 'go'],
+        stdin=slave, stdout=slave, stderr=slave,
+        env={'HOME': str(tmp_path), 'PATH': '/nonexistent', 'TERM': 'xterm'})
+    os.close(slave)
+    output = b''
+    sent = False
+    try:
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            if select.select([master], [], [], .1)[0]:
+                try:
+                    output += os.read(master, 65536)
+                except OSError:
+                    break
+            if b'PROMPT' in output and not sent:
+                sent = True
+                if finish == 'cancel':
+                    proc.terminate()
+                else:
+                    os.write(master, (finish + '\n').encode())
+            if proc.poll() is not None:
+                break
+        code = proc.wait(timeout=2)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        os.close(master)
+    assert b'\x1b[34m' in output and b'Starting OpenVegas...' in output
+    assert output.index(b'\x1b[2K') < output.index(b'PROMPT')
+    assert b'Starting OpenVegas' not in output.split(b'PROMPT', 1)[1]
+    assert code == {'success': 0, 'failure': 7, 'cancel': -15}[finish]

@@ -70,7 +70,10 @@ def test_custom_bundle_cannot_be_retired(old_install):
 
 @pytest.mark.asyncio
 async def test_hosted_game_never_refreshes_or_sends_local_cli_token(monkeypatch):
+    from openvegas import client as client_module
     from openvegas.client import OpenVegasClient, APIError
+    monkeypatch.setattr(client_module, 'get_session', lambda: {})
+    monkeypatch.setattr(client_module, 'get_bearer_token', lambda: None)
     client = OpenVegasClient()
     client.token = 'fixture-local-token'
     monkeypatch.setattr(game_browser, 'game_credentials', lambda _: SimpleNamespace(load=lambda: None))

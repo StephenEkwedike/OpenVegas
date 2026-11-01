@@ -28,8 +28,6 @@ from openvegas.config import (
     get_bearer_token,
     get_session,
     invalidate_session_cache,
-    request_touchid_unlock,
-    require_touchid_unlock_for_refresh_storage,
     token_expires_soon,
 )
 from openvegas.contracts.native_handoff import (
@@ -172,22 +170,6 @@ class OpenVegasClient:
 
     async def _refresh_once(self, trigger: str) -> str:
         self._session_snapshot = get_session()
-        refresh_storage = str(self._session_snapshot.get("refresh_storage", "") or "")
-        if require_touchid_unlock_for_refresh_storage(refresh_storage):
-            if not request_touchid_unlock():
-                emit_metric(
-                    "auth_refresh_attempt_total",
-                    {
-                        "surface": "cli",
-                        "trigger": trigger,
-                        "outcome": "failure",
-                        "reason": "touchid_unlock_failed",
-                    },
-                )
-                raise CliAuthError("touchid_unlock_required")
-            # Keychain-backed storage may hydrate refresh token post-unlock.
-            self._session_snapshot = get_session()
-
         refresh_value = str(self._session_snapshot.get("refresh_token", "") or "").strip()
         if not refresh_value:
             emit_metric(
@@ -306,9 +288,7 @@ class OpenVegasClient:
             except ValueError:
                 self._invalidate_session_cache("refresh_malformed")
                 raise APIError(401, "Session refresh returned invalid payload. Run: openvegas login")
-            except CliAuthError as e:
-                if str(e) == "touchid_unlock_required":
-                    raise APIError(401, "Touch ID unlock required for saved session. Run: openvegas login")
+            except CliAuthError:
                 self._invalidate_session_cache("refresh_rejected")
                 raise APIError(401, "Session expired. Run: openvegas login")
 
@@ -346,9 +326,7 @@ class OpenVegasClient:
             except ValueError:
                 self._invalidate_session_cache("refresh_malformed")
                 raise APIError(401, "Session refresh returned invalid payload. Run: openvegas login")
-            except CliAuthError as e:
-                if str(e) == "touchid_unlock_required":
-                    raise APIError(401, "Touch ID unlock required for saved session. Run: openvegas login")
+            except CliAuthError:
                 self._invalidate_session_cache("refresh_rejected")
                 raise APIError(401, "Session expired. Run: openvegas login")
             resp = await self._do_http(method, path, **kwargs)

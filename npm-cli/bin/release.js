@@ -3,7 +3,7 @@ import {createHash} from 'node:crypto';
 import {readFileSync} from 'node:fs';
 import {createRequire} from 'node:module';
 import {dirname, join} from 'node:path';
-import {spawnSync} from 'node:child_process';
+import {spawn} from 'node:child_process';
 
 const require = createRequire(import.meta.url);
 const release = JSON.parse(readFileSync(new URL('../release.json', import.meta.url), 'utf8'));
@@ -46,7 +46,6 @@ if (local) {
   for (const key of Object.keys(env)) {
     if (key.startsWith('OPENVEGAS_') && ![
       'OPENVEGAS_TERMINAL_SOCKET', 'OPENVEGAS_TERMINAL_TOKEN',
-      'OPENVEGAS_ENABLE_TOUCHID', 'OPENVEGAS_TOUCHID_REQUIRE_BIOMETRIC',
     ].includes(key)) delete env[key];
   }
   env.HOME = env.USERPROFILE = home;
@@ -56,10 +55,46 @@ if (local) {
 }
 env.OPENVEGAS_LOAD_PROJECT_ENV = '0';
 if (!args.length && process.stdin.isTTY && process.stdout.isTTY && !process.env.CI) args.push('go');
-const result = spawnSync(binary, args, {stdio: 'inherit', shell: false, env});
-if (result.error) fail('native runtime could not start. No fallback command was run.');
-if (result.signal) {
-  process.kill(process.pid, result.signal);
-  process.exit(1);
+delete env.OPENVEGAS_LAUNCH_NOTIFY_FD;
+const loading = args[0] === 'go' && !args.includes('--dry-run') && process.stderr.isTTY && !process.env.CI;
+let timer;
+let shown = false;
+function clearLoading() {
+  clearInterval(timer);
+  if (shown) process.stderr.write('\r\x1b[2K');
+  shown = false;
 }
-process.exit(result.status ?? 1);
+if (loading && process.platform !== 'win32') {
+  env.OPENVEGAS_LAUNCH_NOTIFY_FD = '3';
+  let frame = 0;
+  const draw = () => {
+    shown = true;
+    process.stderr.write(`\r\x1b[34m${['|', '/', '-', '\\'][frame++ % 4]} Starting OpenVegas...\x1b[0m`);
+  };
+  draw();
+  timer = setInterval(draw, 100);
+} else if (loading) {
+  process.stderr.write('Starting OpenVegas...\n');
+}
+const child = spawn(binary, args, {stdio: ['inherit', 'inherit', 'inherit', 'pipe'], shell: false, env});
+child.stdio[3].once('data', () => {
+  clearLoading();
+  child.stdio[3].end('1');
+});
+child.stdio[3].on('error', () => {});
+const signals = ['SIGINT', 'SIGTERM'];
+const handlers = signals.map(signal => {
+  const handler = () => { clearLoading(); child.kill(signal); };
+  process.on(signal, handler);
+  return handler;
+});
+child.once('error', () => {
+  clearLoading();
+  fail('native runtime could not start. No fallback command was run.');
+});
+child.once('close', (code, signal) => {
+  clearLoading();
+  signals.forEach((name, i) => process.removeListener(name, handlers[i]));
+  if (signal) process.kill(process.pid, signal);
+  process.exit(code ?? 1);
+});

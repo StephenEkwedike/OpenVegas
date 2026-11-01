@@ -91,6 +91,25 @@ def test_permission_failure_keeps_working_plugin(setup):
     assert "permission unchanged; use the host's approval prompt" in result.output
 
 
+def test_success_is_blue_and_after_terminal_setup(setup, monkeypatch):
+    monkeypatch.setattr(commands, '_offer_default_terminal',
+                        lambda: commands.click.echo('terminal step complete'))
+    result = CliRunner().invoke(commands.go, ['--host', 'claude', '--yes'], color=True)
+    assert result.exit_code == 0, result.output
+    assert '\x1b[34mOpenVegas ready.' in result.output
+    assert result.output.index('terminal step complete') < result.output.index('OpenVegas ready.')
+
+
+def test_failed_install_never_prints_success(setup):
+    installer, _, _ = setup
+    plan = installer.return_value
+    installer.side_effect = [plan, IntegrationError('Host registration failed')]
+    result = CliRunner().invoke(commands.go, ['--host', 'claude', '--yes'])
+    assert result.exit_code == 1
+    assert 'Host registration failed' in result.output
+    assert 'OpenVegas ready' not in result.output
+
+
 def test_explicit_restore_dry_run_and_uninstall(setup, monkeypatch):
     _, permission, _ = setup
     result = CliRunner().invoke(commands.integration, ["game-permissions", "--host", "claude", "--restore", "--dry-run"])

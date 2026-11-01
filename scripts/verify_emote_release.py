@@ -68,7 +68,7 @@ def clean_environment(home: Path) -> dict[str, str]:
         "TMPDIR": str(home), "TMP": str(home), "TEMP": str(home),
         "PATH": os.defpath, "LANG": "C.UTF-8", "NO_COLOR": "1", "TERM": "dumb",
         "OPENVEGAS_TEST_MODE": "1", "OPENVEGAS_RUNTIME_ENV": "test",
-        "OPENVEGAS_DOTENV_OVERRIDE": "0", "OPENVEGAS_ENABLE_TOUCHID": "0",
+        "OPENVEGAS_DOTENV_OVERRIDE": "0",
         "PYTHON_KEYRING_BACKEND": "keyring.backends.null.Keyring",
     })
     return env

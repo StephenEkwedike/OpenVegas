@@ -4554,7 +4554,8 @@ from openvegas.product_analytics import ActivityGroup, analytics as analytics_co
 @click.version_option(version=__version__)
 def cli():
     """OpenVegas -- Terminal Arcade for Developers"""
-    pass
+    from openvegas.integrations.setup_progress import launcher_ready
+    launcher_ready()
 
 
 cli.add_command(analytics_command)
@@ -4580,44 +4581,11 @@ def login(otp: bool, browser: bool = False, allow_file_credential: bool = False)
             raise click.ClickException(str(exc)) from None
         return
     from openvegas.auth import SupabaseAuth, AuthError
-    from openvegas.config import (
-        get_session,
-        load_refresh_from_platform_store,
-        request_touchid_unlock,
-        require_touchid_unlock_for_refresh_storage,
-        touchid_enabled,
-        touchid_supported,
-    )
 
     try:
         auth = SupabaseAuth()
     except AuthError as e:
         raise click.ClickException(str(e)) from e
-
-    if not otp:
-        try:
-            session = get_session()
-            refresh_storage = str(session.get("refresh_storage", "") or "")
-            has_keychain_refresh = bool(str(load_refresh_from_platform_store() or "").strip())
-            should_try_touchid = bool(touchid_enabled() and touchid_supported() and (
-                require_touchid_unlock_for_refresh_storage(refresh_storage) or has_keychain_refresh
-            ))
-            if should_try_touchid:
-                console.print("[dim]Attempting Touch ID unlock...[/dim]")
-                if request_touchid_unlock():
-                    try:
-                        auth.refresh_token()
-                        console.print("[green]Unlocked with Touch ID.[/green]")
-                        return
-                    except Exception as e:
-                        console.print(f"[yellow]Touch ID unlock failed ({e}); falling back to email/password.[/yellow]")
-                else:
-                    console.print("[yellow]Touch ID was unavailable or declined; falling back to email/password.[/yellow]")
-            elif touchid_enabled() and not touchid_supported():
-                console.print("[yellow]Touch ID enabled but unavailable on this setup (Keychain/keyring/LocalAuthentication unavailable); falling back to email/password.[/yellow]")
-        except Exception:
-            # Never block login on Touch ID preflight problems.
-            pass
 
     email = Prompt.ask("Email")
 
@@ -4645,23 +4613,17 @@ def doctor_auth():
         get_session,
         load_refresh_from_platform_store,
         platform_keychain_available,
-        touchid_enabled,
-        touchid_supported,
     )
 
     session = get_session()
     refresh_storage = str(session.get("refresh_storage", "") or "")
     has_keychain_token = bool(str(load_refresh_from_platform_store() or "").strip())
-    enabled = bool(touchid_enabled())
     keychain_ok = bool(platform_keychain_available())
-    supported = bool(touchid_supported())
-    ready = bool(enabled and supported and keychain_ok and has_keychain_token)
+    ready = bool(keychain_ok and has_keychain_token)
 
     console.print(
         "doctor-auth: "
         f"ready={'1' if ready else '0'} "
-        f"touchid_enabled={'1' if enabled else '0'} "
-        f"touchid_supported={'1' if supported else '0'} "
         f"keychain_available={'1' if keychain_ok else '0'} "
         f"keychain_token={'1' if has_keychain_token else '0'} "
         f"refresh_storage={refresh_storage or 'none'} "
@@ -4725,7 +4687,7 @@ def doctor_runtime():
     """Print one-line runtime diagnostics for deployment parity checks."""
     _load_openvegas_env_defaults_from_dotenv()
     import sys as _sys
-    from openvegas.config import get_backend_url, platform_keychain_available, touchid_enabled, touchid_supported
+    from openvegas.config import get_backend_url, platform_keychain_available
 
     try:
         import keyring  # type: ignore
@@ -4753,8 +4715,6 @@ def doctor_runtime():
         f"exe={Path(_sys.argv[0]).name} "
         f"python={_sys.executable} "
         f"api_base={get_backend_url()} "
-        f"touchid_enabled={'1' if touchid_enabled() else '0'} "
-        f"touchid_supported={'1' if touchid_supported() else '0'} "
         f"keychain_available={'1' if platform_keychain_available() else '0'} "
         f"keyring_ready={'1' if keyring_ready else '0'} "
         f"numpy_ready={'1' if numpy_ready else '0'} "
@@ -4814,7 +4774,7 @@ def logout():
 
 @cli.command("quit")
 def quit_session():
-    """Quick-lock local session but keep refresh/keychain for Touch ID unlock."""
+    """Clear the access token while retaining the saved refresh credential."""
     from openvegas.config import clear_access_token_keep_refresh
 
     try:
@@ -4823,7 +4783,7 @@ def quit_session():
         console.print(f"[red]Unable to lock session: {e}[/red]")
         return
 
-    console.print("Session locked. Use `openvegas login` to unlock with Touch ID.")
+    console.print("Access token cleared. Saved sign-in remains; use `openvegas logout` to sign out fully.")
 
 
 @cli.command()

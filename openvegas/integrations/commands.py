@@ -17,6 +17,7 @@ from .installer import (HOSTS, detect, host_environment, identity, install, regi
 from .controls import action_catalog
 from .game_result import amount as format_v
 from .credentials import backend_url
+from .setup_progress import setup_progress
 
 
 def _interactive_terminal():
@@ -24,9 +25,8 @@ def _interactive_terminal():
 
 
 def _default_terminal_consent():
-    click.echo("Recommended for OpenVegas games and Codex animations in VS Code: connects game tables and enables images.")
-    click.echo("This changes ALL new VS Code integrated terminals, not just Codex. Existing tabs stay unchanged.")
-    click.echo("Undo: ov integration terminal --install --restore-default. Host billing and shell startup files stay unchanged.")
+    click.echo("Enable games and pets in ALL new VS Code terminals. Existing tabs stay unchanged.")
+    click.echo("Undo: ov integration terminal --install --restore-default")
     if not _interactive_terminal():
         click.echo("Interactive confirmation required; default terminal unchanged.")
         return False
@@ -49,18 +49,18 @@ def _offer_default_terminal():
     try:
         if configure(home, env, replace_owned=True).get("is_default"):
             configure(home, env, apply=True, replace_owned=True)
-            click.echo("OpenVegas Graphics is already your VS Code default. Use a NEW terminal tab.")
+            return True
         elif _default_terminal_consent():
             configure(home, env, apply=True, make_default=True, replace_owned=True)
-            click.echo("Default saved. Open a NEW VS Code terminal, then run codex or claude normally.")
+            return True
     except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
         click.echo("Optional terminal setup was not applied: " + str(exc))
 
 
-async def browser_login(*, allow_file=False):
+async def browser_login(*, allow_file=False, emit=click.echo):
     broker = Broker()
     try:
-        return await broker.authorize(allow_file=allow_file, emit=click.echo)
+        return await broker.authorize(allow_file=allow_file, emit=emit)
     finally:
         await broker.close()
 
@@ -74,7 +74,8 @@ async def browser_login(*, allow_file=False):
 @click.option("--allow-file-credential", is_flag=True, help="Accept POSIX 0600 storage if the OS keychain is unavailable.")
 def go(host, dry_run, yes, allow_file_credential, keep_game_approvals, verbose):
     """Connect OpenVegas to Claude/Codex once; then launch claude/codex normally."""
-    detected = [name for name in HOSTS if detect(name)]
+    with setup_progress("Checking Claude / Codex", verbose=verbose):
+        detected = [name for name in HOSTS if detect(name)]
     if not detected:
         raise click.ClickException("Install Claude Code or Codex first. No host settings were changed.")
     if host is None:
@@ -85,34 +86,41 @@ def go(host, dry_run, yes, allow_file_credential, keep_game_approvals, verbose):
         site = backend_url()
         local = urlsplit(site).hostname in {"localhost", "127.0.0.1", "::1"}
         click.echo("OpenVegas / " + ("Local development" if local else "Hosted") + " / " + site)
-        plans = [install(name, dry_run=True) for name in hosts]
-        replacements = {name: other_installations(name) for name in hosts}
+        with setup_progress("Checking OpenVegas setup", verbose=verbose):
+            plans = [install(name, dry_run=True) for name in hosts]
+            replacements = {name: other_installations(name) for name in hosts}
         for plan in plans:
             if verbose or dry_run:
                 click.echo(f"{plan['host']} {plan['version']}: {plan['mode']}")
                 click.echo("  Plugin: " + plan["path"])
                 click.echo("  Host home: " + plan["host_home"])
-        click.echo("Connect " + " + ".join(hosts) + ". Host billing stays unchanged.")
+        if not yes or verbose or dry_run:
+            click.echo("Connect " + " + ".join(hosts) + ". Host billing stays unchanged.")
         if any(replacements.values()):
             click.echo("Replace the older OpenVegas connection. Saved accounts and other plugins stay unchanged.")
-        if not keep_game_approvals:
+        if not keep_game_approvals and (not yes or verbose or dry_run):
             click.echo("Fast game entry: trust only OpenVegas play, not other tools. You still enter each wager yourself.")
         if dry_run:
             return
         if not yes:
-            click.confirm("Connect your account and apply this OpenVegas plugin/game-entry setup?", abort=True)
-        account = asyncio.run(browser_login(allow_file=allow_file_credential))
-        click.echo("Wallet: " + format_v(account["balance"]))
+            click.confirm(click.style("Set up OpenVegas?", fg="blue"), abort=True)
+        with setup_progress("Connecting your account", verbose=verbose) as emit:
+            def login_message(text):
+                if verbose or not text.startswith(("Reusing your existing", "Account connected;")):
+                    emit(text)
+            account = asyncio.run(browser_login(allow_file=allow_file_credential, emit=login_message))
         for name in hosts:
-            result = install(name, upgrade=True)
-            for previous in replacements[name]:
-                retire_installation(previous)
+            with setup_progress("Connecting " + name, verbose=verbose):
+                result = install(name, upgrade=True)
+                for previous in replacements[name]:
+                    retire_installation(previous)
             if verbose:
                 click.echo(name + ": " + ("already installed" if result.get("unchanged") else result["reload"]))
             if not keep_game_approvals:
                 from .game_permissions import configure
                 try:
-                    permission = configure(name, apply=True)
+                    with setup_progress("Preparing " + name + " game entry", verbose=verbose):
+                        permission = configure(name, apply=True)
                     if verbose:
                         click.echo(name + " game entry: " + permission["status"] + ". " + permission.get("message", ""))
                 except (IntegrationError, OSError):
@@ -124,16 +132,19 @@ def go(host, dry_run, yes, allow_file_credential, keep_game_approvals, verbose):
                 if info and tuple(map(int, info["version"].split("."))) >= (0, 163, 0):
                     env = host_environment() or os.environ
                     home = Path(env.get("CODEX_HOME") or str(Path(env.get("HOME", str(Path.home()))) / ".codex"))
-                    install_previews(home, upgrade=True)
-                    install_previews(home, demos=True, upgrade=True)
+                    with setup_progress("Preparing pets", verbose=verbose):
+                        install_previews(home, upgrade=True)
+                        install_previews(home, demos=True, upgrade=True)
             except (OSError, ValueError):
                 click.echo("Public pets were not updated; existing files preserved. Run ov integration pets --install --upgrade for details.")
-        click.echo("Ready. Restart Claude/Codex; accept its one-time plugin trust prompt.")
+        new_terminal = _offer_default_terminal()
+        click.secho("OpenVegas ready. Wallet: " + format_v(account["balance"]), fg="blue")
+        click.echo("Open a new VS Code terminal, then run codex or claude." if new_terminal else
+                   "Restart Claude/Codex; accept its one-time plugin trust prompt.")
         click.echo("Play: Claude /openvegas play | Codex $openvegas play. Pets: /pets.")
         if verbose:
             click.echo("Controls: " + ", ".join(action["name"] for action in action_catalog()) + ".")
             click.echo("Restore game approvals: ov integration game-permissions --restore")
-        _offer_default_terminal()
     except (IntegrationError, OSError, ValueError) as exc:
         message = str(exc) if isinstance(exc, IntegrationError) else "Local integration setup failed; existing application data was preserved."
         raise click.ClickException(message) from None

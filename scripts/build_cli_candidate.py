@@ -82,7 +82,6 @@ def clean_environment(home):
         {
             "PATH": os.defpath,
             "OPENVEGAS_DOTENV_OVERRIDE": "0",
-            "OPENVEGAS_ENABLE_TOUCHID": "0",
             "NO_COLOR": "1",
             "TERM": "dumb",
             "LANG": "C.UTF-8",
@@ -169,7 +168,6 @@ def main(argv=None):
             "--collect-all", "objc",
             "--collect-all", "Foundation",
             "--collect-all", "Security",
-            "--collect-all", "LocalAuthentication",
         ]
     with tempfile.TemporaryDirectory(prefix="openvegas-build-home-") as build_home:
         run(command, cwd=ROOT, env=clean_environment(build_home))

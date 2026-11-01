@@ -449,7 +449,6 @@ class InlinePromptUI:
             for token in (
                 "expired",
                 "refresh token",
-                "touch id",
                 "_refresh_token_timer",
                 "keychain",
                 "unauthorized",

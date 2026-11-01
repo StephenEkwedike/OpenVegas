@@ -14,22 +14,10 @@ def _bind_temp_config(monkeypatch: pytest.MonkeyPatch, tmp_path):
     monkeypatch.setattr(cfg, "CONFIG_FILE", tmp_path / "config.json")
 
 
-def test_touchid_default_does_not_prompt_for_background_refresh(monkeypatch):
-    monkeypatch.setattr(cfg.sys, 'platform', 'darwin')
-    monkeypatch.delenv('OPENVEGAS_ENABLE_TOUCHID', raising=False)
-    monkeypatch.setattr(cfg, '_touchid_prompt_via_local_auth',
-                        lambda *a: pytest.fail('Unexpected biometric prompt'))
-    assert not cfg.touchid_enabled()
-    assert not cfg.require_touchid_unlock_for_refresh_storage('platform_credential_store')
-    assert cfg.request_touchid_unlock()
-
-
-def test_touchid_explicit_opt_in_remains_fail_closed(monkeypatch):
+def test_biometric_feature_removed_even_with_legacy_opt_in(monkeypatch):
     monkeypatch.setenv('OPENVEGAS_ENABLE_TOUCHID', '1')
-    monkeypatch.setattr(cfg, 'touchid_supported', lambda: True)
-    monkeypatch.setattr(cfg, '_touchid_prompt_via_local_auth', lambda *a: False)
-    assert cfg.require_touchid_unlock_for_refresh_storage('platform_credential_store')
-    assert not cfg.request_touchid_unlock()
+    for name in ('touchid_enabled', 'request_touchid_unlock', '_touchid_prompt_via_local_auth'):
+        assert not hasattr(cfg, name)
 
 
 def test_fresh_config_read_does_not_create_state(monkeypatch, tmp_path):

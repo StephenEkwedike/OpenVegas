@@ -1,7 +1,7 @@
 """Online, account-bound emote access. Cached data is never an entitlement.
 
 Transport owns authentication and response-byte limits; it must never open a
-Touch ID prompt during background refresh. Mutating async operations reject
+authentication prompt during background refresh. Mutating async operations reject
 overlap, including across event loops/threads. authorize() performs no network.
 """
 

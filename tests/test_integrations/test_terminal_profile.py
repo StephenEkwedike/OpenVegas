@@ -259,7 +259,8 @@ def test_go_yes_does_not_consent_to_default_and_dry_run_never_asks(settings, tmp
     assert result.exit_code == 0, result.output
     assert json.loads(settings.read_text())['terminal.integrated.defaultProfile.osx'] == PROFILE
     result = CliRunner().invoke(commands.go, ['--host', 'codex', '--yes'])
-    assert result.exit_code == 0 and 'already your VS Code default' in result.output
+    assert result.exit_code == 0 and 'Open a new VS Code terminal' in result.output
+    assert 'Make OpenVegas Graphics' not in result.output
     assert '[y/N]' not in result.output
 
 
