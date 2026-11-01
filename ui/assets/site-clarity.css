@@ -60,6 +60,8 @@ body.site-clarity { background: var(--bg-main); font: 1rem/1.6 var(--font-sans);
 .site-footer p { color: var(--muted); margin-top: .4rem; }
 .site-footer-links { display: flex; gap: .25rem 1.5rem; flex-wrap: wrap; grid-column: 1 / -1; }
 .site-footer-links a { padding-block: .5rem; font-size: .9rem; }
+.legal-page .guide-section { max-width: 48rem; }
+.legal-page .guide-section a { overflow-wrap: anywhere; text-decoration: underline; }
 .site-footer .partnership-cta { display: inline-flex; padding: 1rem 1.5rem; min-height: 52px; background: var(--aqua); color: var(--bg-main); text-decoration: none; justify-content: center; font-weight: 500; }
 @media (max-width: 1000px) { .site-clarity .top-nav { align-items: flex-start; flex-direction: column; gap: .5rem; } .site-clarity .ov-nav-right, .site-clarity .nav-links { justify-content: flex-start; } }
 @media (max-width: 760px) {

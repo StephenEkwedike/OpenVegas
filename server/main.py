@@ -234,6 +234,8 @@ UI_NO_CACHE_HEADERS = {
 }
 
 UI_PAGES = {
+    "privacy": UI_DIR / "privacy.html",
+    "terms": UI_DIR / "terms.html",
     "arena": UI_DIR / "arena.html",
     "data-partnerships": UI_DIR / "data-partnerships.html",
     "referrals": UI_DIR / "referrals.html",

@@ -9,10 +9,13 @@ context and model orchestration. Do not replace its agent loop.
 ## Play Dispatch First
 
 Managed-terminal exact `openvegas play` commands are handled by a local pre-model
-hook where the host supports it. F8 opens local OpenVegas controls even if the host
+hook where the host supports it. Ctrl+], then O opens local OpenVegas controls even if the host
 rejects prompts because its allowance is exhausted. It uses the same terminal,
-not a new tab, and does not invoke a model. On Mac keyboards F8 may require Fn.
-The HUD shows this shortcut and a low-allowance reminder only when host usage
+not a new tab, and does not invoke a model. Hold Control and press X, release,
+then press O. Do not use F8: Codex uses it for voice. To exit Codex voice, type
+`/voice stop` and press Enter. Only use the menu shortcut when the HUD shows it;
+older running terminal relays need a restart, not just a host restart.
+The HUD shows a low-allowance reminder only when host usage
 metadata is available. Do not invent remaining usage from context-window size.
 If this skill reaches the model instead, follow the MCP fallback below; that
 fallback DOES require available host inference. Do not claim it works at zero quota.

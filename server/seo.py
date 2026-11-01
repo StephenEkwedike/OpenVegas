@@ -9,6 +9,8 @@ from fastapi.responses import HTMLResponse, Response
 
 ORIGIN = "https://openvegas.ai"
 PAGES = {
+    "/ui/privacy": ("Privacy Policy | OpenVegas", "How OpenVegas handles Google sign-in, terminal request context, wallet records, optional analytics and privacy requests."),
+    "/ui/terms": ("Terms of Use | OpenVegas", "Read OpenVegas terms for account access, service credits, game risk, separately billed AI requests and payment questions."),
     "/ui/arena": ("Arena: PvP for Humans and Agents, Coming Soon | OpenVegas", "Explore OpenVegas Arena: upcoming human and agent PvP, equal stakes and bounded matchmaking. Public paid play is not open; the private pilot uses test chips."),
     "/ui/data-partnerships": ("Agent Evaluation and Data Partnerships | OpenVegas", "Partner on controlled agent studies: risk, budget decisions, opponent adaptation and human intervention, with consented, replayable evaluation data."),
     "/ui": ("OpenVegas | Terminal Games and AI Credits for Claude & Codex", "Play terminal games with $V, explore emotes, and fund separately billed AI requests in Claude Code and Codex. Games can win or lose credits."),

@@ -23,6 +23,8 @@ from .terminal_handoff import SOCKET_ENV, TOKEN_ENV, validate_socket
 REFRESH_SECONDS = 5
 REQUEST_SECONDS = 3
 MAX_MESSAGE = 1024
+LOCAL_CONTROL_SHORTCUT = 'ctrl-bracket-o'
+LOCAL_CONTROL_LABEL = 'Ctrl+] then O'
 
 
 class WalletCredentials:
@@ -124,15 +126,23 @@ def wallet_label(payload, columns):
         value = {"loading": "wallet loading", "login": "sign in to OpenVegas",
                  "unavailable": "wallet unavailable"}.get(state, "wallet unavailable")
     mode = "$V billing" if payload.get("billing") == "v" else "host billing"
-    suffix = ' / F8 OpenVegas' if payload.get('controls') is True else ''
+    controls = (payload.get('controls') is True
+                and payload.get('controls_shortcut') == LOCAL_CONTROL_SHORTCUT)
+    suffix = f' / {LOCAL_CONTROL_LABEL}: OpenVegas' if controls else ''
     quota = payload.get('quota_remaining')
     low = (payload.get('billing') != 'v' and type(quota) in (int, float)
            and math.isfinite(quota) and 0 <= quota <= 10)
     if low:
-        suffix = f' / Host {quota:g}% left / F8: switch to $V'
-    if payload.get('local_error') is True:
-        suffix = ' / local menu unavailable; F8 to retry'
-    compact = f'{value} / host {quota:g}% / F8' if low else f'{value} / F8' if suffix else value
+        suffix = f' / Host {quota:g}% left'
+        if controls:
+            suffix += f' / {LOCAL_CONTROL_LABEL}: switch to $V'
+    if payload.get('local_error') is True and controls:
+        suffix = f' / local menu unavailable; {LOCAL_CONTROL_LABEL} to retry'
+    if payload.get('relay_restart_required') is True:
+        suffix += ' / restart terminal for local menu'
+    compact = value + (f' / host {quota:g}%' if low else '')
+    if controls:
+        compact += f' / {LOCAL_CONTROL_LABEL}'
     for text in (f" OPENVEGAS / {value} / {mode}{suffix}", f" OV / {value}{suffix}", compact, f" OV / {value}", value):
         if len(text) < columns:
             return text
@@ -159,12 +169,24 @@ async def monitor(env, billing, *, broker_factory=Broker, interval=REFRESH_SECON
             writer.write(json.dumps({"kind": "wallet", "token": env[TOKEN_ENV],
                                      "billing": billing}).encode() + b"\n")
             await writer.drain()
-            if json.loads(await reader.readline()).get("wallet") != 1:
+            handshake = json.loads(await reader.readline())
+            if handshake.get("wallet") != 1:
                 return  # Older relay: leave its screen and the host untouched.
+            controls_supported = handshake.get('controls_shortcut') == LOCAL_CONTROL_SHORTCUT
         if ready:
             ready.set()
         broker = broker_factory()
         account_credentials = account_factory(broker)
+        def display_status():
+            payload = dict(status() if status else {})
+            payload['controls'] = controls_supported and payload.get('controls') is True
+            payload['controls_shortcut'] = LOCAL_CONTROL_SHORTCUT if payload['controls'] else None
+            payload['relay_restart_required'] = control is not None and not controls_supported
+            if not controls_supported:
+                # Old relays label these fields with F8 even when controls=False.
+                payload.pop('quota_remaining', None)
+                payload.pop('local_error', None)
+            return payload
         refresh, disconnected = asyncio.Event(), asyncio.Event()
         async def receive():
             try:
@@ -182,7 +204,7 @@ async def monitor(env, billing, *, broker_factory=Broker, interval=REFRESH_SECON
             # Input must not wait behind wallet network latency.
             receiver = asyncio.create_task(receive())
             writer.write(json.dumps({'state': 'loading', 'billing': billing,
-                                     **(status() if status else {})}).encode() + b'\n')
+                                     **display_status()}).encode() + b'\n')
             await writer.drain()
         while not disconnected.is_set():
             payload = {"state": "unavailable", "billing": billing}
@@ -200,8 +222,7 @@ async def monitor(env, billing, *, broker_factory=Broker, interval=REFRESH_SECON
                 payload["state"] = "login" if exc.status in (401, 403) else "unavailable"
             except (TimeoutError, OSError, ValueError, TypeError, AttributeError):
                 pass
-            if status:
-                payload.update(status())
+            payload.update(display_status())
             writer.write(json.dumps(payload).encode() + b"\n")
             await writer.drain()
             # The relay sends a refresh after a game closes. Otherwise poll at

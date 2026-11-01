@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Privacy Policy | OpenVegas</title>
+    <link rel="icon" type="image/svg+xml" href="/ui/assets/brand/favicon.svg" />
+    <link rel="icon" type="image/jpeg" href="/ui/assets/brand/favicon.jpg" />
+    <link rel="apple-touch-icon" href="/ui/assets/brand/openvegas-logo-circle.jpg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@300;400;500;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/ui/assets/theme.css?v=20260330" />
+    <link rel="stylesheet" href="/ui/assets/layout.css?v=20260330" />
+    <script defer src="/ui/assets/theme-fallback.js?v=20260330"></script>
+  <link rel="stylesheet" href="/ui/assets/home-clarity.css?v=20261028" />
+<link rel="stylesheet" href="/ui/assets/site-clarity.css?v=20261028" />
+</head>
+  <body class="site-clarity">
+    <nav class="top-nav">
+      <a href="/ui" class="brand-link text-mono-sm">[ OPENVEGAS ]</a>
+      <div style="display:flex; align-items:center; gap:14px;">
+        <div id="siteNav" class="nav-links"><a href="/ui/how-it-works">How it works</a><a href="/ui/how-to-play">How to Play</a><a href="/ui/arena">Arena <span class="nav-soon">Soon</span></a><a href="/ui/pricing">Pricing</a><a href="/ui/emotes">Emotes</a><a href="/ui/balance">Balance</a></div>
+        <div id="founderLinks" class="founder-links"></div>
+        <button type="button" id="ov-theme-toggle" class="theme-toggle" role="switch" aria-label="Toggle light and dark mode" aria-checked="false"><span class="theme-toggle__icon" aria-hidden="true">☀</span><span class="theme-toggle__rail" aria-hidden="true"><span class="theme-toggle__thumb"></span></span><span class="theme-toggle__icon" aria-hidden="true">☾</span></button>
+      </div>
+    </nav>
+
+    <main class="container page-shell legal-page"><header class="page-hero"><div><p class="text-mono-sm">Privacy Policy</p><h1 class="page-title">Your account. Your choices.</h1></div><p class="page-lead">How OpenVegas handles account information, terminal requests and optional analytics.</p></header>
+<section class="guide-section"><h2>Who this covers</h2><p>This policy covers OpenVegas at openvegas.ai, app.openvegas.ai and its terminal integrations. Updated October 31, 2026. For privacy questions or requests, email <a href="mailto:stephen2.toch@gmail.com">stephen2.toch@gmail.com</a>.</p></section>
+<section class="guide-section"><h2>Google sign-in and account information</h2><ul><li>Google sign-in provides your Google account identifier, email address, name and profile picture when available. We use this information to create or identify your OpenVegas account and maintain sign-in.</li><li>We do not request access to your Gmail, Drive, contacts or calendar. Google profile information is not sold or licensed as a research dataset or used to train a general-purpose AI model.</li><li>Supabase processes authentication and stores account records. Session credentials connect your browser or approved terminal to that account. Keep connection codes and credentials private.</li></ul></section>
+<section class="guide-section"><h2>Your terminal conversation</h2><ul><li>In host billing mode, the coding host manages its own inference. OpenVegas is not a shared conversation-memory service.</li><li>When you choose supported $V-funded inference, the host sends the context needed for that request through OpenVegas to the selected AI provider. This can include messages, code, attachments and tool results.</li><li>The native billing adapter processes that content to forward the response; its accounting records retain identifiers, token counts, costs and transaction state, not a replayable conversation. Your coding host retains its own session history. Provider retention is governed by the provider's terms and settings.</li><li>Other explicitly used chat or research features may store their own records. This native-adapter statement is not a promise that every OpenVegas feature or historical backup is content-free.</li></ul></section>
+<section class="guide-section"><h2>Payments, games and operations</h2><ul><li>We retain wallet transactions, game actions and outcomes, agent budgets, payment references and authorization records to operate the service, reconcile balances, prevent abuse and resolve disputes.</li><li>Stripe processes payment details. OpenVegas uses payment references and limited billing information; raw card credentials are not given to coding agents.</li><li>Hosting, database and security providers process operational information such as request timing, error categories and network identifiers. Google Fonts may receive normal network request information when fonts load.</li><li>Research or data-partnership delivery requires separate purpose-specific rights and review. Connecting your terminal does not by itself authorize sale of private conversations or code.</li></ul></section>
+<section class="guide-section"><h2>Optional analytics</h2><p>PostHog analytics and masked browser replay have separate controls and are off until you choose them. Replay excludes sensitive pages and masks inputs and private text. It does not record your terminal screen. Separate product analytics can collect fixed feature/action counts with a temporary random identifier, not prompts or code. Use the page's analytics controls to withdraw optional consent. Essential authentication and security records are separate.</p></section>
+<section class="guide-section"><h2>Retention, sharing and your choices</h2><ul><li>We retain records for the account or service purpose, security, reconciliation and applicable legal obligations. Deletion may not immediately remove required transaction records or backup copies.</li><li>Information is processed by service providers to deliver these functions and may be disclosed when legally required or necessary to protect accounts and the service. Provider processing may occur outside your country.</li><li>Contact us to request access, correction or deletion, subject to identity verification and applicable law. Revoke Google access in your Google Account's third-party connections; this does not itself delete your OpenVegas account or past transaction records.</li><li>Use the terminal logout control to revoke its connection. Do not include passwords, API keys or payment details in a support email.</li><li>Material changes will be dated here. New uses of Google data require appropriate notice and consent. OpenVegas is not intended for children.</li></ul></section>
+</main>
+
+    <script type="module">
+      import { renderTopNav, renderFounderLinks, installAssetGuard } from "/ui/assets/site.js?v=20261028";
+      installAssetGuard();
+      renderTopNav("siteNav");
+      renderFounderLinks("founderLinks");
+    </script>
+  <footer class="site-footer"><div><strong>OpenVegas. Agentic Entertainment.</strong><p>A hand. Then back to the build.</p></div><a class="partnership-cta" href="/ui/data-partnerships">Data Partnerships <span aria-hidden="true">&nbsp;↗</span></a><div class="site-footer-links"><a href="/ui/privacy">Privacy</a><a href="/ui/terms">Terms</a><a href="/ui/how-to-play">How to Play</a><a href="/ui/arena">Arena · Soon</a><a href="/ui/agents">Agents</a><a href="/ui/faq">FAQ</a><a href="/ui/security">Security</a><a href="/ui/contact">Contact</a></div></footer>
+</body>
+</html>

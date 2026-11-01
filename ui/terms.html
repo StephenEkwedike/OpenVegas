@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Terms of Use | OpenVegas</title>
+    <link rel="icon" type="image/svg+xml" href="/ui/assets/brand/favicon.svg" />
+    <link rel="icon" type="image/jpeg" href="/ui/assets/brand/favicon.jpg" />
+    <link rel="apple-touch-icon" href="/ui/assets/brand/openvegas-logo-circle.jpg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@300;400;500;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/ui/assets/theme.css?v=20260330" />
+    <link rel="stylesheet" href="/ui/assets/layout.css?v=20260330" />
+    <script defer src="/ui/assets/theme-fallback.js?v=20260330"></script>
+  <link rel="stylesheet" href="/ui/assets/home-clarity.css?v=20261028" />
+<link rel="stylesheet" href="/ui/assets/site-clarity.css?v=20261028" />
+</head>
+  <body class="site-clarity">
+    <nav class="top-nav">
+      <a href="/ui" class="brand-link text-mono-sm">[ OPENVEGAS ]</a>
+      <div style="display:flex; align-items:center; gap:14px;">
+        <div id="siteNav" class="nav-links"><a href="/ui/how-it-works">How it works</a><a href="/ui/how-to-play">How to Play</a><a href="/ui/arena">Arena <span class="nav-soon">Soon</span></a><a href="/ui/pricing">Pricing</a><a href="/ui/emotes">Emotes</a><a href="/ui/balance">Balance</a></div>
+        <div id="founderLinks" class="founder-links"></div>
+        <button type="button" id="ov-theme-toggle" class="theme-toggle" role="switch" aria-label="Toggle light and dark mode" aria-checked="false"><span class="theme-toggle__icon" aria-hidden="true">☀</span><span class="theme-toggle__rail" aria-hidden="true"><span class="theme-toggle__thumb"></span></span><span class="theme-toggle__icon" aria-hidden="true">☾</span></button>
+      </div>
+    </nav>
+
+    <main class="container page-shell legal-page"><header class="page-hero"><div><p class="text-mono-sm">Terms of Use</p><h1 class="page-title">Know the rules before you play.</h1></div><p class="page-lead">Account access, $V, game risk and optional AI billing. Updated October 31, 2026.</p></header>
+<section class="guide-section"><h2>Using OpenVegas</h2><p>These terms apply to OpenVegas's website and terminal integrations. Use only features enabled for your account and location, and only where lawful. You must be at least 18 and meet any higher applicable age requirement for wagering. Do not use someone else's account or bypass eligibility, payment, spending or security controls. Contact <a href="mailto:stephen2.toch@gmail.com">stephen2.toch@gmail.com</a> for support.</p></section>
+<section class="guide-section"><h2>What $V does</h2><ul><li>$V is an OpenVegas service credit, not a bank deposit, investment or promise of profit. No cash-out, transfer to fiat or redemption outside supported OpenVegas services is offered.</li><li>Admin test credits and private Arena chips are separate from customer purchases and are not redeemable for money.</li><li>Features, supported models and prices may differ by deployment. A preview or coming-soon page does not establish that a paid service is available.</li></ul></section>
+<section class="guide-section"><h2>Games and outcomes</h2><ul><li>Games can lose your entire committed stake. Wins, continued inference and profitable play are not guaranteed. Review the game's rules, stake and applicable payout before entering.</li><li>Submitting a wager authorizes that game transaction. Some actions, such as blackjack double or split, commit additional credits. Quitting an unfinished wager forfeits the committed stake under the game rules; it is not a refund.</li><li>Server-recorded settlement determines the balance, not the timing of an animation. A delayed or interrupted result is not permission to place a duplicate wager.</li><li>Public paid Arena/PvP and OVTV are not currently launched. Any future paid mode requires its own disclosed rules and applicable authorizations.</li></ul></section>
+<section class="guide-section"><h2>AI usage and agents</h2><ul><li>Host billing remains the default. Switching with <code>openvegas use v</code> requires an available model, a quote and your approved spending limit. <code>openvegas use host</code> returns to host billing.</li><li>$V-funded requests are separately billed API requests, not a refill or bypass of a Claude or Codex subscription allowance. They remain subject to provider availability and policies.</li><li>The native host manages conversation continuity. Switching billing is not a promise of identical models, outputs or every host feature.</li><li>Authorize an agent only within budgets and permissions you control. Automatic funding requires separate owner consent and configured limits; installing OpenVegas does not authorize card charges.</li></ul></section>
+<section class="guide-section"><h2>Purchases and problems</h2><ul><li>Review the amount and credit allocation before confirming checkout. Payment confirmation comes from the payment processor, not merely returning to a success page.</li><li>Do not repeat a charge or request to fix an uncertain result. Contact support with the transaction reference, not card details. Refunds and reversals are reviewed against payment and ledger records and applicable consumer rights.</li><li>Abusive activity, unauthorized access or unresolved payment problems may restrict the affected account or feature. This does not remove rights you have under applicable law.</li></ul></section>
+<section class="guide-section"><h2>Privacy and service changes</h2><p>The <a href="/ui/privacy">Privacy Policy</a> describes data handling. Keep rights to any code or content you submit, and respect third-party rights. Service changes or outages can affect availability; do not rely on OpenVegas as your only way to access critical work. Material changes to these terms will be dated here. These terms do not claim payment-provider approval, regulatory licensing, security certification or endorsement by a coding-host provider.</p></section>
+</main>
+
+    <script type="module">
+      import { renderTopNav, renderFounderLinks, installAssetGuard } from "/ui/assets/site.js?v=20261028";
+      installAssetGuard();
+      renderTopNav("siteNav");
+      renderFounderLinks("founderLinks");
+    </script>
+  <footer class="site-footer"><div><strong>OpenVegas. Agentic Entertainment.</strong><p>A hand. Then back to the build.</p></div><a class="partnership-cta" href="/ui/data-partnerships">Data Partnerships <span aria-hidden="true">&nbsp;↗</span></a><div class="site-footer-links"><a href="/ui/privacy">Privacy</a><a href="/ui/terms">Terms</a><a href="/ui/how-to-play">How to Play</a><a href="/ui/arena">Arena · Soon</a><a href="/ui/agents">Agents</a><a href="/ui/faq">FAQ</a><a href="/ui/security">Security</a><a href="/ui/contact">Contact</a></div></footer>
+</body>
+</html>

@@ -43,8 +43,8 @@ async def controls(mode, *, game=None, menu=False):
 
 
 class LocalKeys:
-    """Recognize F8 across reads, without treating pasted bytes as commands."""
-    F8 = b'\x1b[19~'
+    """Recognize Ctrl+] then O, leaving host leader/voice keys untouched."""
+    MENU = b'\x1do'
     START, END = b'\x1b[200~', b'\x1b[201~'
 
     def __init__(self):
@@ -61,17 +61,22 @@ class LocalKeys:
                     self.paste = value == self.START
                     output.extend(value)
                     self.pending.clear()
-                elif value == self.F8:
+                elif value == self.MENU:
                     if enabled and not self.paste:
                         opened = True
                     else:
                         output.extend(value)
                     self.pending.clear()
-                elif any(key.startswith(value) for key in (self.START, self.END, self.F8)):
+                elif any(key.startswith(value) for key in (
+                        self.START, self.END, *((self.MENU,) if enabled and not self.paste else ()))):
                     break
                 else:
                     output.append(self.pending.pop(0))
         return bytes(output), opened
+
+    @property
+    def wait_seconds(self):
+        return 1.5 if self.pending == self.MENU[:1] else .15
 
     def flush(self):
         data = bytes(self.pending)

@@ -25,7 +25,7 @@ import time
 from pathlib import Path
 
 from .terminal_handoff import SOCKET_ENV, TOKEN_ENV
-from .terminal_wallet import MAX_MESSAGE, WalletScreen, wallet_label
+from .terminal_wallet import LOCAL_CONTROL_SHORTCUT, MAX_MESSAGE, WalletScreen, wallet_label
 
 MAX_BACKLOG = 1024 * 1024
 
@@ -212,7 +212,7 @@ def run(shell):
         resize()
         tty.setraw(0)
         while True:
-            if keys.pending and time.monotonic() - key_time > .15:
+            if keys.pending and time.monotonic() - key_time > keys.wait_seconds:
                 write_all(game_fd if game_fd is not None else host_fd, keys.flush())
             if wallet_resized:
                 update_wallet()
@@ -248,7 +248,8 @@ def run(shell):
                             candidate.settimeout(None)
                             wallet.payload = {'state': 'loading', 'billing': request['billing']}
                             update_wallet()
-                            candidate.sendall(b'{"wallet":1}\n')
+                            candidate.sendall(json.dumps({'wallet': 1,
+                                'controls_shortcut': LOCAL_CONTROL_SHORTCUT}).encode() + b'\n')
                             continue
                         if request['kind'] == 'status':
                             candidate.sendall(b'{"ready":true}\n')
@@ -299,6 +300,8 @@ def run(shell):
                                     raise ValueError
                                 # Billing comes from the authenticated lease, not wallet JSON.
                                 payload['billing'] = wallet.payload['billing']
+                                payload['controls'] = (payload.get('controls') is True and
+                                    payload.get('controls_shortcut') == LOCAL_CONTROL_SHORTCUT)
                                 wallet_label(payload, wallet.columns)
                                 wallet.payload = payload
                             if len(wallet_buffer) > MAX_MESSAGE:

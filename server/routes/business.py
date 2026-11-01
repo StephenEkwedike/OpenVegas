@@ -133,7 +133,7 @@ async def mfa_enroll(request: Request, identity: AdminIdentity):
     if any(f.get("status") == "verified" for f in factors) and identity["aal"] != "aal2":
         raise HTTPException(403, "Verify your existing factor before enrolling another")
     for factor in factors:
-        if factor.get("friendly_name") != "OpenVegas business":
+        if factor.get("friendly_name") not in {"OpenVegas business", "OpenVegas Admin"}:
             continue
         if factor.get("status") != "unverified" or factor.get("factor_type") != "totp":
             raise HTTPException(409, "Enrollment exists; use your existing authenticator")
@@ -145,7 +145,7 @@ async def mfa_enroll(request: Request, identity: AdminIdentity):
         "POST",
         "/factors",
         token=_token(request),
-        data={"factor_type": "totp", "friendly_name": "OpenVegas business"},
+        data={"factor_type": "totp", "friendly_name": "OpenVegas Admin", "issuer": "OpenVegas Admin"},
     )
     uri = body.get("totp", {}).get("uri", "")
     if not isinstance(uri, str) or not uri.startswith("otpauth://totp/") or len(uri) > 1000:
