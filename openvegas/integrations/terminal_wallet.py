@@ -12,6 +12,7 @@ import os
 import re
 import stat
 import threading
+import math
 from decimal import Decimal
 
 from .broker import Broker
@@ -123,14 +124,23 @@ def wallet_label(payload, columns):
         value = {"loading": "wallet loading", "login": "sign in to OpenVegas",
                  "unavailable": "wallet unavailable"}.get(state, "wallet unavailable")
     mode = "$V billing" if payload.get("billing") == "v" else "host billing"
-    for text in (f" OPENVEGAS / {value} / {mode}", f" OV / {value}", value):
+    suffix = ' / F8 OpenVegas' if payload.get('controls') is True else ''
+    quota = payload.get('quota_remaining')
+    low = (payload.get('billing') != 'v' and type(quota) in (int, float)
+           and math.isfinite(quota) and 0 <= quota <= 10)
+    if low:
+        suffix = f' / Host {quota:g}% left / F8: switch to $V'
+    if payload.get('local_error') is True:
+        suffix = ' / local menu unavailable; F8 to retry'
+    compact = f'{value} / host {quota:g}% / F8' if low else f'{value} / F8' if suffix else value
+    for text in (f" OPENVEGAS / {value} / {mode}{suffix}", f" OV / {value}{suffix}", compact, f" OV / {value}", value):
         if len(text) < columns:
             return text
     return value[:max(0, columns - 1)]
 
 
 async def monitor(env, billing, *, broker_factory=Broker, interval=REFRESH_SECONDS, ready=None,
-                  credentials=None, account_factory=WalletCredentials):
+                  credentials=None, account_factory=WalletCredentials, control=None, status=None):
     """Lease the strip to this native child, not to a long-lived shell or MCP.
 
     Closing the pipe removes the strip even after a crash. Never authorize,
@@ -140,7 +150,7 @@ async def monitor(env, billing, *, broker_factory=Broker, interval=REFRESH_SECON
         if ready:
             ready.set()
         return
-    writer = broker = None
+    writer = broker = receiver = None
     credentials = credentials or CredentialReader()
     try:
         async with asyncio.timeout(REQUEST_SECONDS):
@@ -155,7 +165,26 @@ async def monitor(env, billing, *, broker_factory=Broker, interval=REFRESH_SECON
             ready.set()
         broker = broker_factory()
         account_credentials = account_factory(broker)
-        while True:
+        refresh, disconnected = asyncio.Event(), asyncio.Event()
+        async def receive():
+            try:
+                while line := await reader.readline():
+                    event = json.loads(line)
+                    if isinstance(event, dict):
+                        if control:
+                            control(event)
+                        if event.get('refresh') is True:
+                            refresh.set()
+            finally:
+                disconnected.set()
+                refresh.set()
+        if control:
+            # Input must not wait behind wallet network latency.
+            receiver = asyncio.create_task(receive())
+            writer.write(json.dumps({'state': 'loading', 'billing': billing,
+                                     **(status() if status else {})}).encode() + b'\n')
+            await writer.drain()
+        while not disconnected.is_set():
             payload = {"state": "unavailable", "billing": billing}
             try:
                 async with asyncio.timeout(REQUEST_SECONDS):
@@ -171,14 +200,24 @@ async def monitor(env, billing, *, broker_factory=Broker, interval=REFRESH_SECON
                 payload["state"] = "login" if exc.status in (401, 403) else "unavailable"
             except (TimeoutError, OSError, ValueError, TypeError, AttributeError):
                 pass
+            if status:
+                payload.update(status())
             writer.write(json.dumps(payload).encode() + b"\n")
             await writer.drain()
             # The relay sends a refresh after a game closes. Otherwise poll at
             # a bounded cadence, never in the host's model/tool execution loop.
             try:
                 async with asyncio.timeout(interval):
-                    if not await reader.readline():
+                    if receiver:
+                        await refresh.wait()
+                        refresh.clear()
+                        continue
+                    line = await reader.readline()
+                    if not line:
                         return
+                    event = json.loads(line)
+                    if control and isinstance(event, dict):
+                        control(event)
             except TimeoutError:
                 pass
     except (OSError, ValueError, TimeoutError, IntegrationError):
@@ -186,6 +225,9 @@ async def monitor(env, billing, *, broker_factory=Broker, interval=REFRESH_SECON
     finally:
         if ready:
             ready.set()
+        if receiver:
+            receiver.cancel()
+            await asyncio.gather(receiver, return_exceptions=True)
         if writer:
             writer.close()
             try:

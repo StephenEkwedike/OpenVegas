@@ -42,7 +42,10 @@ def inspect_candidates(candidates):
             raise ValueError('Invalid source identity')
         pair = (record['version'], record['source_sha256'])
         if identity is not None and pair != identity:
-            raise ValueError('Native candidates have different versions or source digests')
+            raise ValueError(
+                'Native candidates have different versions or source digests: '
+                f'{platform} has {pair}, expected {identity}'
+            )
         identity = pair
         expected = 'openvegas-' + platform + ('.exe' if record['os'] == 'win32' else '')
         if record['binary'] != expected:

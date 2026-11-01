@@ -176,8 +176,8 @@ async def _run(request, protocol, slot):
         body = json.loads(raw, object_pairs_hook=unique_pairs, parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
         prepared, key = prepare_request(session, body, protocol, beta=request.headers.get("anthropic-beta", ""))
         engine = gateway()
-        # Reject unsupported work before reserving session allowance. Completed
-        # replays remain available even after the current model review expires.
+        # Reject unsupported work before reserving allowance. Settled duplicates
+        # are blocked without retaining/replaying answers or fetching new keys.
         replay = await engine._replay_native(prepared)
         if replay is None:
             if session["host"] not in get_model_review(prepared.provider, prepared.model).get("native_hosts", []):

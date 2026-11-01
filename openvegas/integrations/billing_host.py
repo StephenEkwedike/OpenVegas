@@ -87,6 +87,10 @@ class Supervisor:
         self.changed = asyncio.Event()
         self.original_provider = None
         self.wallet_credentials = None
+        self.local_task = None
+        self.local_error = False
+        from .host_quota import HostQuota
+        self.quota = HostQuota(host, env)
         if host == 'codex':
             # Read routing labels only. Saved authentication is never read/copied.
             path = Path(env.get('CODEX_HOME', str(Path(env['HOME']) / '.codex'))) / 'config.toml'
@@ -106,15 +110,29 @@ class Supervisor:
                         or self.child is None or self.child.returncode is not None):
                     raise ValueError
                 identifier = session_id(data.get('session_id'))
+                if identifier is not None and self.identifier not in (None, identifier):
+                    raise ValueError
                 if data.get('action') == 'register':
                     if not identifier or self.identifier not in (None, identifier):
                         raise ValueError
                     self.identifier = identifier
+                    self.quota.transcript(data.get('transcript_path'), identifier)
                     if self.mode == 'host' and self.original_model is None:
                         model = data.get('model')
                         if isinstance(model, str) and native._MODEL.fullmatch(model):
                             self.original_model = model
                     response = {'ok': True, 'message': 'Native billing command connected.'}
+                elif data.get('action') == 'quota':
+                    if self.host != 'claude' or not identifier or identifier != self.identifier:
+                        raise ValueError
+                    self.quota.observe(data.get('rate_limits'))
+                    response = {'ok': True, 'message': 'Usage metadata received.'}
+                elif data.get('action') == 'play':
+                    from .local_controls import GAMES
+                    if data.get('game') is not None and data['game'] not in GAMES:
+                        raise ValueError
+                    self.open_controls(game=data.get('game'), delay=.75)
+                    response = {'ok': True, 'message': 'Opening OpenVegas locally in this terminal. No model request sent.'}
                 elif data.get('action') in ('v', 'host'):
                     # Codex may trust plugin hooks after SessionStart. The first
                     # exact prompt supplies the same host-owned identity fields.
@@ -125,7 +143,7 @@ class Supervisor:
                             self.original_model = model
                     if identifier is not None and identifier != self.identifier:
                         raise ValueError
-                    if not self.identifier or self.pending:
+                    if not self.identifier or self.pending or (self.local_task and not self.local_task.done()):
                         raise IntegrationError('Native session is not ready or a switch is already pending.')
                     resume_args(self.host, self.args, self.identifier)
                     target = data['action']
@@ -150,17 +168,53 @@ class Supervisor:
             writer.close()
             await writer.wait_closed()
 
+    def open_controls(self, *, menu=False, game=None, delay=0):
+        from .terminal_handoff import SOCKET_ENV, TOKEN_ENV
+        if not self.env.get(SOCKET_ENV) or not self.env.get(TOKEN_ENV):
+            raise IntegrationError('OpenVegas local controls need the managed terminal. No model request or wager sent.')
+        if (self.child is None or self.child.returncode is not None or self.pending
+                or (self.local_task and not self.local_task.done())):
+            raise IntegrationError('A game or billing change is already open. No second action started.')
+        self.local_error = False
+        self.local_task = asyncio.create_task(self.run_controls(menu=menu, game=game, delay=delay))
+
+    async def run_controls(self, *, menu, game, delay):
+        from .local_controls import controls
+        try:
+            await asyncio.sleep(delay)
+            action = await controls(self.mode, game=game, menu=menu)
+            if action in ('use_v', 'use_host'):
+                # Selection alone never spends: choose_v still quotes and asks
+                # for a spending limit after safely closing this owned child.
+                resume_args(self.host, self.args, self.identifier)
+                self.pending = action[4:]
+                self.changed.set()
+        except (IntegrationError, OSError, ValueError, TimeoutError):
+            self.local_error = True  # No terminal bytes injected over the host.
+
+    def control_event(self, event):
+        if event.get('control') == 'menu':
+            try:
+                self.open_controls(menu=True)
+            except IntegrationError:
+                pass  # Repeated key presses never open parallel games.
+
+    def local_status(self):
+        return {'controls': True, 'local_error': self.local_error,
+                'quota_remaining': self.quota.remaining() if self.mode == 'host' else None}
+
     async def run_child(self, argv, env):
         self.changed.clear()
         attributes = termios.tcgetattr(0) if os.isatty(0) else None
         wallet = None
-        if self.host == 'codex' and self.env.get('OPENVEGAS_CODEX_WALLET') != '0':
+        if self.env.get('OPENVEGAS_LOCAL_CONTROLS') != '0' and self.env.get('OPENVEGAS_CODEX_WALLET') != '0':
             from .terminal_wallet import CredentialReader, monitor
             if self.wallet_credentials is None:
                 self.wallet_credentials = CredentialReader()
             ready = asyncio.Event()
             wallet = asyncio.create_task(monitor(env, self.mode, ready=ready,
-                                                 credentials=self.wallet_credentials))
+                                                 credentials=self.wallet_credentials,
+                                                 control=self.control_event, status=self.local_status))
             try:
                 await asyncio.wait_for(ready.wait(), 3.5)
             except TimeoutError:
@@ -168,6 +222,9 @@ class Supervisor:
                 await asyncio.gather(wallet, return_exceptions=True)
                 wallet = None
         try:
+            if self.host == 'claude' and self.mode == 'host' and wallet is not None:
+                from .host_quota import claude_settings
+                argv = claude_settings(argv, env)
             self.child = await asyncio.create_subprocess_exec(*argv, env=env)
         except BaseException:
             if wallet:
@@ -197,6 +254,9 @@ class Supervisor:
                     await self.child.wait()
             raise
         finally:
+            if self.local_task and not self.local_task.done():
+                self.local_task.cancel()
+                await asyncio.gather(self.local_task, return_exceptions=True)
             change.cancel()
             await asyncio.gather(change, return_exceptions=True)
             if wallet:

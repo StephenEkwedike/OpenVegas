@@ -210,6 +210,7 @@ def main(argv=None):
     parser.add_argument("--profile")
     parser.add_argument("--action", choices=("state", "cosmetics", "review-q50", "start", "waiting", "stopped", "failed", "cancelled", "session_end", "use-v", "use-host"))
     parser.add_argument('--billing-hook', action='store_true')
+    parser.add_argument('--quota-statusline', action='store_true')
     parser.add_argument('--supervise', nargs=argparse.REMAINDER)
     args = parser.parse_args(argv)
     if args.backend:
@@ -222,6 +223,10 @@ def main(argv=None):
     if args.billing_hook:
         from .use import hook_main
         hook_main(args.host)
+        return
+    if args.quota_statusline:
+        from .host_quota import statusline_main
+        statusline_main()
         return
     if args.action in ('use-v', 'use-host'):
         from .use import request

@@ -8,6 +8,17 @@ context and model orchestration. Do not replace its agent loop.
 
 ## Play Dispatch First
 
+Managed-terminal exact `openvegas play` commands are handled by a local pre-model
+hook where the host supports it. F8 opens local OpenVegas controls even if the host
+rejects prompts because its allowance is exhausted. It uses the same terminal,
+not a new tab, and does not invoke a model. On Mac keyboards F8 may require Fn.
+The HUD shows this shortcut and a low-allowance reminder only when host usage
+metadata is available. Do not invent remaining usage from context-window size.
+If this skill reaches the model instead, follow the MCP fallback below; that
+fallback DOES require available host inference. Do not claim it works at zero quota.
+Local menu entry never places a wager or switches billing automatically.
+`openvegas use v` and `openvegas use host` retain their names and spending consent.
+
 For human multiplayer, call `pvp` once. Claude uses `/openvegas pvp`; Codex uses
 `$openvegas pvp`. This reuses the same-terminal relay with a configured human seat
 and non-redeemable test chips. The human controls every form; never answer for them.

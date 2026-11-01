@@ -21,6 +21,7 @@ import sys
 import tempfile
 import termios
 import tty
+import time
 from pathlib import Path
 
 from .terminal_handoff import SOCKET_ENV, TOKEN_ENV
@@ -98,6 +99,9 @@ def run(shell):
     wallet_buffer = bytearray()
     wallet = WalletScreen()
     wallet_resized = False
+    from .local_controls import LocalKeys
+    keys = LocalKeys()
+    key_time = 0
     size = fcntl.ioctl(0, termios.TIOCGWINSZ, bytes(8))
     token = secrets.token_hex(32)
     directory = tempfile.TemporaryDirectory(prefix="ov-terminal-", dir="/tmp")
@@ -208,6 +212,8 @@ def run(shell):
         resize()
         tty.setraw(0)
         while True:
+            if keys.pending and time.monotonic() - key_time > .15:
+                write_all(game_fd if game_fd is not None else host_fd, keys.flush())
             if wallet_resized:
                 update_wallet()
             # Pets/progress can keep drawing while their host is hidden. Apply
@@ -304,6 +310,15 @@ def run(shell):
                     data = os.read(0, 65536)
                     if not data:
                         return
+                    data, menu = keys.feed(data, game_fd is None and not modes.alternate
+                                           and wallet_connection is not None
+                                           and wallet.payload.get('controls') is True)
+                    key_time = time.monotonic()
+                    if menu:
+                        try:
+                            wallet_connection.sendall(b'{"control":"menu"}\n')
+                        except OSError:
+                            close_wallet()
                     write_all(game_fd if game_fd is not None else host_fd, data)
                 elif ready == host_fd:
                     try:

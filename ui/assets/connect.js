@@ -8,6 +8,8 @@ const approve = document.getElementById("approve");
 const deny = document.getElementById("deny");
 const login = document.getElementById("login");
 let submitting = false;
+login.hidden = approve.hidden = deny.hidden = true;
+approve.disabled = deny.disabled = true;
 
 async function decide(approved) {
   if (submitting) return;
@@ -38,6 +40,8 @@ if (!/^[A-F0-9]{12}$/.test(code)) {
     const result = await authProbe();
     if (result.ok) {
       status.textContent = "Signed in. Compare the code before approving.";
+      login.hidden = true;
+      approve.hidden = deny.hidden = false;
       approve.disabled = deny.disabled = false;
     } else {
       status.textContent = "Sign in to your existing account, or sign up on the login page.";

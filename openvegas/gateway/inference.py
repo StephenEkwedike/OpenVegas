@@ -1897,6 +1897,17 @@ class AIGateway:
 
     @staticmethod
     def _serialize_success_body(result: InferenceResult, *, reward_v: Decimal = Decimal("0")) -> str:
+        if result._host_wire_response is not None or result._host_wire_receipt is not None:
+            # Native hosts own history. Keep accounting, not an answer replay cache.
+            return json.dumps({
+                "native_content_retained": False,
+                "input_tokens": result.input_tokens,
+                "output_tokens": result.output_tokens,
+                "v_cost": str(result.v_cost),
+                "actual_cost_usd": str(result.actual_cost_usd),
+                "reward_v": str(reward_v),
+                "provider_request_id": result.provider_request_id,
+            }, separators=(",", ":"))
         return json.dumps(
             {
                 "text": result.text,
@@ -1908,8 +1919,6 @@ class AIGateway:
                 "reward_v": str(reward_v),
                 "provider_request_id": result.provider_request_id,
                 "tool_calls": result.tool_calls or [],
-                **({"host_wire_response": result._host_wire_response}
-                   if result._host_wire_response is not None else {}),
                 "web_search_used": bool(result.web_search_used),
                 "web_search_sources": list(result.web_search_sources or []),
                 "web_search_retry_without_tool": bool(result.web_search_retry_without_tool),
@@ -1931,6 +1940,14 @@ class AIGateway:
                 "Idempotent replay body missing for succeeded request.",
             )
         payload = json.loads(str(raw))
+        if payload.get("native_content_retained") is False or "host_wire_response" in payload:
+            # Applies to old content-bearing rows too: never serve stored native
+            # content or turn a duplicate request into another paid generation.
+            raise ContractError(
+                APIErrorCode.HOLD_CONFLICT,
+                "This native request is already settled. Response replay is disabled; "
+                "continue from your Codex or Claude session history. No new request or charge was made.",
+            )
         if "managed_web_accounting" in payload:
             from openvegas.gateway.openrouter_web import (
                 WebValidationError,
@@ -1961,7 +1978,6 @@ class AIGateway:
             web_search_cost_v=Decimal(str(payload.get("web_search_cost_v", "0"))),
         )
         result._managed_web_accounting = payload.get("managed_web_accounting")
-        result._host_wire_response = payload.get("host_wire_response")
         result.inference_request_id = str(row["id"]) if row.get("id") is not None else None
         return result
 

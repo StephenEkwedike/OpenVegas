@@ -243,7 +243,7 @@ def prepare_request(session, body, protocol, *, beta=""):
     context = model_capabilities(provider, session["model"])["context_window_tokens"]
     if has_media(body) or web_calls:
         # No new multimodal dispatch without a reviewed native fee schedule.
-        # Keep replay possible after review expiry; preflight gates fresh work.
+        # Duplicate detection precedes fresh-work review; no answer is cached.
         input_bound = context - limit if type(context) is int else input_bound
     # Cache-control can increase supplier input charges; reserve it conservatively.
     cache_factor = 2 if '"cache_control"' in encoded else 1
@@ -420,14 +420,9 @@ class NativeGateway(AIGateway):
         if replay is None:
             ctx, replay = await self._prepare_inference_execution(req)
         if replay is not None:
-            saved = replay._host_wire_response
-            if not saved or saved.get("protocol") != req._host_wire.protocol:
-                reject("Native replay evidence is unavailable.", APIErrorCode.HOLD_CONFLICT)
-            yield replay
-            for chunk in saved.get("events", []):
-                yield chunk
-            return
-        wire, body, seen = req._host_wire, json.loads(req._host_wire.encoded), []
+            reject("Native response replay is disabled; use the host's saved conversation. "
+                   "No new request or charge was made.", APIErrorCode.HOLD_CONFLICT)
+        wire, body = req._host_wire, json.loads(req._host_wire.encoded)
         usage, response_body, terminal = {}, {}, None
         identifier = None
         aliases = {req.model, *get_model_review(req.provider, req.model).get("response_model_ids", [])}
@@ -513,7 +508,6 @@ class NativeGateway(AIGateway):
                                                           ctx.request_id, identifier)
                                 ctx.provider_request_id = identifier
                                 chunk = frame(name, value)
-                                seen.append(chunk)
                                 if kind in {"message_stop", "response.completed", "response.incomplete"}:
                                     terminal = chunk
                                     break
@@ -591,7 +585,7 @@ class NativeGateway(AIGateway):
                                          actual_cost_usd=actual_cost, provider_request_id=identifier,
                                          completion_status="completed")
                 result._host_wire_receipt = Receipt(ctx.payload_hash, identifier, actual_cost, *counts)
-                result._host_wire_response = {"protocol": wire.protocol, "events": seen,
+                result._host_wire_response = {"protocol": wire.protocol,
                                              "body": response_body if not wire.streaming else None,
                                              "pricing": wire.pricing, "supplier_cost_usd": str(actual_cost)}
                 result = await self._finalize_inference_execution(ctx, req, result)
