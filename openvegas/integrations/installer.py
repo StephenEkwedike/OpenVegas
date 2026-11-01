@@ -210,8 +210,13 @@ def bundle_files(info, marketplace):
         files[name] = json.dumps(value, indent=2) + "\n"
 
     import shlex
+    from .use import MISSING
+    node = shutil.which('node')
+    hook_command = (shlex.join([node, '-e', (ASSETS / 'billing-hook.js').read_text().replace(
+        '__OPENVEGAS_MISSING__', json.dumps(MISSING)), host, '--billing-hook'])
+        if node else shlex.join(cmd + ['--billing-hook']))
     billing_hooks = {'hooks': {event: [{'hooks': [{'type': 'command',
-        'command': shlex.join(cmd + ['--billing-hook']), 'timeout': 5}]}]
+        'command': hook_command, 'timeout': 5 if node else 15}]}]
         for event in ('SessionStart', 'UserPromptSubmit')}}
     put('plugins/openvegas/hooks/hooks.json', billing_hooks)
 
