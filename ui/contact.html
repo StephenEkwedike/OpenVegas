@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenVegas | Contact</title>
+    <link rel="icon" type="image/svg+xml" href="/ui/assets/brand/favicon.svg" />
+    <link rel="icon" type="image/jpeg" href="/ui/assets/brand/favicon.jpg" />
+    <link rel="apple-touch-icon" href="/ui/assets/brand/openvegas-logo-circle.jpg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@300;400;500;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/ui/assets/theme.css?v=20260330" />
+    <link rel="stylesheet" href="/ui/assets/layout.css?v=20260330" />
+    <script defer src="/ui/assets/theme-fallback.js?v=20260330"></script>
+    <style>
+      .contact-grid { display:grid; grid-template-columns: 1fr 1fr; gap: 16px; border-top:1px solid var(--grey-dark); }
+      @media (max-width: 900px){ .contact-grid{ grid-template-columns:1fr; } }
+    </style>
+  <link rel="stylesheet" href="/ui/assets/home-clarity.css?v=20261028" />
+<link rel="stylesheet" href="/ui/assets/site-clarity.css?v=20261028" />
+</head>
+  <body class="site-clarity">
+    <nav class="top-nav">
+      <a href="/ui" class="brand-link text-mono-sm">[ OPENVEGAS ]</a>
+      <div style="display:flex; align-items:center; gap:14px;">
+        <div id="siteNav" class="nav-links"><a href="/ui/how-it-works">How it works</a><a href="/ui/how-to-play">How to Play</a><a href="/ui/arena">Arena <span class="nav-soon">Soon</span></a><a href="/ui/pricing">Pricing</a><a href="/ui/emotes">Emotes</a><a href="/ui/balance">Balance</a></div>
+        <div id="founderLinks" class="founder-links"></div>
+        <button type="button" id="ov-theme-toggle" class="theme-toggle" role="switch" aria-label="Toggle light and dark mode" aria-checked="false"><span class="theme-toggle__icon" aria-hidden="true">☀</span><span class="theme-toggle__rail" aria-hidden="true"><span class="theme-toggle__thumb"></span></span><span class="theme-toggle__icon" aria-hidden="true">☾</span></button>
+      </div>
+    </nav>
+
+    <main class="container page-shell">
+      <header class="page-hero">
+        <div>
+          <div class="text-mono-xs" style="margin-bottom:1rem">CONTACT</div>
+          <h1 class="page-title">Building the financial layer for AI runtime.</h1>
+        </div>
+        <p class="text-mono-sm page-lead">We’re looking for early users, partners, and investors who believe AI usage needs better balance, replenishment, and control infrastructure.</p>
+      </header>
+
+      <section class="contact-grid">
+        <article class="card">
+          <div class="tag">USERS</div>
+          <h2 class="card-title">Early users and design partners</h2>
+          <p class="card-copy">Join the feedback loop for balance, top-up, and continuity workflows.</p>
+          <div class="spec-row"><span class="text-mono-xs">Email</span><span class="text-mono-xs">support@openvegas.ai</span></div>
+          <div class="cta-row" style="margin-top:1rem;">
+            <a class="btn btn-primary" href="https://discord.gg/VkyFrjXuTX" target="_blank" rel="noreferrer noopener" aria-label="Join OpenVegas Discord">
+              <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true" focusable="false" style="display:block;">
+                <path fill="currentColor" d="M20.317 4.369A19.791 19.791 0 0 0 15.885 3c-.191.328-.403.769-.552 1.116a18.27 18.27 0 0 0-6.666 0A11.713 11.713 0 0 0 8.115 3a19.736 19.736 0 0 0-4.433 1.369C.874 8.58.106 12.687.491 16.738a19.9 19.9 0 0 0 5.993 3.03c.484-.665.916-1.37 1.291-2.11a12.97 12.97 0 0 1-2.033-.98c.171-.125.338-.255.5-.389 3.92 1.84 8.17 1.84 12.043 0 .163.134.33.264.5.389a12.88 12.88 0 0 1-2.037.982c.375.738.807 1.443 1.291 2.108a19.88 19.88 0 0 0 5.995-3.03c.452-4.697-.77-8.766-3.726-12.369zM9.75 14.562c-1.183 0-2.157-1.085-2.157-2.419 0-1.334.955-2.419 2.157-2.419 1.21 0 2.175 1.094 2.157 2.419 0 1.334-.955 2.419-2.157 2.419zm4.5 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.334.955-2.419 2.157-2.419 1.21 0 2.175 1.094 2.157 2.419 0 1.334-.946 2.419-2.157 2.419z"/>
+              </svg>
+              Join OpenVegas Discord
+            </a>
+          </div>
+        </article>
+        <article class="card" id="partnerships">
+          <div class="tag">PARTNERSHIPS</div>
+          <h2 class="card-title">Investors and data labs</h2>
+          <p class="card-copy">Interested in backing OpenVegas or designing an agent evaluation pilot? Tell us what you want to build or measure.</p>
+          <div class="spec-row"><span class="text-mono-xs">Email</span><span class="text-mono-xs">founders@openvegas.ai</span></div>
+        </article>
+      </section>
+    </main>
+
+    <script type="module">
+      import { renderTopNav, renderFounderLinks, installAssetGuard } from "/ui/assets/site.js?v=20261028";
+      installAssetGuard();
+      renderTopNav("siteNav");
+      renderFounderLinks("founderLinks");
+    </script>
+  <footer class="site-footer"><div><strong>OpenVegas. Agentic Entertainment.</strong><p>A hand. Then back to the build.</p></div><a class="partnership-cta" href="/ui/data-partnerships">Data Partnerships <span aria-hidden="true">&nbsp;↗</span></a><div class="site-footer-links"><a href="/ui/how-to-play">How to Play</a><a href="/ui/arena">Arena · Soon</a><a href="/ui/agents">Agents</a><a href="/ui/faq">FAQ</a><a href="/ui/security">Security</a><a href="/ui/contact">Contact</a></div></footer>
+</body>
+</html>

@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+
+<html class="dark" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>OPENVEGAS // WAGERED COMPUTE</title>
+    <link rel="icon" type="image/svg+xml" href="/ui/assets/brand/favicon.svg" />
+    <link rel="icon" type="image/jpeg" href="/ui/assets/brand/favicon.jpg" />
+    <link rel="apple-touch-icon" href="/ui/assets/brand/openvegas-logo-circle.jpg" />
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300..700&amp;family=IBM+Plex+Mono:wght@300;400;500;600&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    colors: {
+                        "surface-variant": "#353534",
+                        "on-primary-fixed": "#001f25",
+                        "primary-fixed": "#a2eeff",
+                        "secondary-fixed-dim": "#79dc79",
+                        "on-secondary-fixed-variant": "#005314",
+                        "surface-container-low": "#1c1b1b",
+                        "surface-container-highest": "#353534",
+                        "on-primary-container": "#004f5b",
+                        "surface-dim": "#131313",
+                        "primary": "#67e2fa",
+                        "on-secondary-container": "#96fb94",
+                        "on-error-container": "#ffdad6",
+                        "surface": "#131313",
+                        "on-primary": "#00363e",
+                        "error": "#ffb4ab",
+                        "surface-container-high": "#2a2a2a",
+                        "primary-fixed-dim": "#59d7ee",
+                        "outline-variant": "#3d494c",
+                        "on-tertiary-container": "#004f5b",
+                        "on-secondary-fixed": "#002204",
+                        "on-surface": "#e5e2e1",
+                        "inverse-primary": "#006877",
+                        "on-background": "#e5e2e1",
+                        "tertiary-container": "#44c6dd",
+                        "tertiary-fixed-dim": "#59d7ee",
+                        "error-container": "#93000a",
+                        "surface-bright": "#3a3939",
+                        "on-surface-variant": "#bcc9cc",
+                        "primary-container": "#44c6dd",
+                        "outline": "#869396",
+                        "surface-container-lowest": "#0e0e0e",
+                        "on-tertiary": "#00363e",
+                        "on-primary-fixed-variant": "#004e5a",
+                        "tertiary-fixed": "#a2eeff",
+                        "on-tertiary-fixed-variant": "#004e5a",
+                        "on-tertiary-fixed": "#001f25",
+                        "secondary-container": "#027621",
+                        "secondary": "#79dc79",
+                        "surface-tint": "#59d7ee",
+                        "background": "#040404",
+                        "on-secondary": "#00390b",
+                        "inverse-on-surface": "#313030",
+                        "on-error": "#690005",
+                        "secondary-fixed": "#95f993"
+                    },
+                    fontFamily: {
+                        "headline": ["Space Grotesk"],
+                        "body": ["IBM Plex Mono"],
+                        "label": ["Space Grotesk"]
+                    },
+                    borderRadius: {"DEFAULT": "0px", "lg": "0px", "xl": "0px", "full": "9999px"},
+                },
+            },
+        }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: "FILL" 0, "wght" 400, "GRAD" 0, "opsz" 24
+        }
+        .kinetic-bg {
+            background-image: linear-gradient(rgba(4, 4, 4, 0.85), rgba(4, 4, 4, 0.95)), url(https://lh3.googleusercontent.com/aida-public/AB6AXuBqDUSCIBY_x8V-AVxrip_Ns2fDtaMUxoYSEM8Zeuz7DUlkZgD_5rBbz9tS6266KXhbO1vd9622blFWl0czbgw4lhu9DrfScSTc1Q-L4muGuP1ObWR2fFfa11xyQLh-Aczxc7-hRj6W9e7wUHewVGz1dTKynxJL-98UZl568MWwMUBH0xoY-2bf021Sd2IEQ92GiLB1SLU5D3RlxCHq3aJHGFWu7v1LH_nQv0-5oMpYv8bfkp8lAScR2iZvR8RrgCmhLRAL7b1RD7HD);
+            background-size: cover;
+            background-position: center;
+            background-attachment: fixed
+        }
+        .ascii-bracket-tl {
+            border-top: 1px solid #67e2fa;
+            border-left: 1px solid #67e2fa;
+            width: 12px;
+            height: 12px;
+            position: absolute;
+            top: 0;
+            left: 0
+        }
+        .ascii-bracket-tr {
+            border-top: 1px solid #67e2fa;
+            border-right: 1px solid #67e2fa;
+            width: 12px;
+            height: 12px;
+            position: absolute;
+            top: 0;
+            right: 0
+        }
+        .ascii-bracket-bl {
+            border-bottom: 1px solid #67e2fa;
+            border-left: 1px solid #67e2fa;
+            width: 12px;
+            height: 12px;
+            position: absolute;
+            bottom: 0;
+            left: 0
+        }
+        .ascii-bracket-br {
+            border-bottom: 1px solid #67e2fa;
+            border-right: 1px solid #67e2fa;
+            width: 12px;
+            height: 12px;
+            position: absolute;
+            bottom: 0;
+            right: 0
+        }
+        .pulse-line {
+            height: 2px;
+            background: linear-gradient(90deg, transparent, #79dc79, transparent);
+            background-size: 200% 100%
+        }
+    </style>
+</head>
+<body class="bg-background text-on-background font-body selection:bg-primary selection:text-on-primary">
+<!-- Top Navigation -->
+<nav class="fixed top-0 left-0 w-full z-50 flex justify-between items-center px-8 py-4 bg-[#040404]/70 backdrop-blur-xl border-b border-[#3d494c]/20">
+<div class="flex items-center gap-6">
+<span class="font-body text-[10px] text-primary tracking-widest cursor-pointer hover:opacity-80 transition-opacity">[ BACK TO INDEX ]</span>
+<div class="h-4 w-px bg-outline-variant/30"></div>
+<span class="font-body text-[10px] text-on-surface-variant tracking-widest">DIRECTORY: OPENVEGAS_COMPUTE_MESH_V1</span>
+</div>
+<div class="flex gap-8 items-center">
+<div class="hidden md:flex gap-8">
+<a class="font-label font-bold tracking-tighter uppercase text-sm text-primary border-b-2 border-primary pb-1" href="#">NODES</a>
+<a class="font-label font-bold tracking-tighter uppercase text-sm text-outline hover:text-primary transition-colors" href="#">LIQUIDITY</a>
+<a class="font-label font-bold tracking-tighter uppercase text-sm text-outline hover:text-primary transition-colors" href="#">TERMINAL</a>
+<a class="font-label font-bold tracking-tighter uppercase text-sm text-outline hover:text-primary transition-colors" href="#">DOCS</a>
+</div>
+<button class="bg-primary text-on-primary font-body text-[10px] px-4 py-2 uppercase tracking-tighter hover:shadow-[0_0_15px_rgba(103,226,250,0.3)] transition-all active:scale-95">CONNECT_NODE</button>
+</div>
+</nav>
+<!-- Global Background Container -->
+<div class="kinetic-bg min-h-screen pt-24 pb-12 px-8">
+<!-- Hero Section -->
+<section class="max-w-7xl mx-auto mt-20 mb-32 relative">
+<div class="relative z-10 max-w-4xl">
+<span class="font-body text-secondary text-xs tracking-[0.3em] mb-4 block uppercase">Protocol Status: Optimal</span>
+<h1 class="font-headline font-black text-6xl md:text-8xl tracking-tighter text-primary leading-none mb-8">
+                    Wagered Compute.
+                </h1>
+<p class="font-body text-lg text-on-surface-variant leading-relaxed max-w-2xl border-l-2 border-primary/20 pl-6">
+                    A decentralized high-frequency infrastructure mesh designed for low-latency settlement and trustless execution environments. OpenVegas leverages local-first compute clusters to distribute operational risk across the global mesh.
+                </p>
+<div class="mt-12 flex gap-4">
+<div class="w-48 h-1 bg-surface-container-highest relative overflow-hidden">
+<div class="absolute inset-0 pulse-line w-full"></div>
+</div>
+</div>
+</div>
+<!-- Hero Focal Background (Neon Horse Positioned Relative to Hero) -->
+<div class="absolute top-0 right-0 w-1/2 h-full opacity-60 pointer-events-none hidden lg:block overflow-hidden">
+<img alt="Neon blue wireframe horse rearing on hind legs facing left" class="w-full h-full object-contain object-right transform" src="https://lh3.googleusercontent.com/aida-public/AB6AXuDERQlu5tT1JrnZnvehk2H5jFje_3QJU2PeboD9McK4haIwEQD5s7radZgPWxcxc5gjvS72tcQQR4-TbdZedOLKkq2MT_yH02-CjUKN6mCsgiLJ3K9xvAuzs0wxlPzBpv8X_PJxh9950UMQuz_IPq6flHG6v_tOiooVsVAsK0BKg9IqkE4bD21CzeAOEIMLRIZalyfdWf0dPkYe5Jhq0H215dgC1bBx_21lpSmAeno5oYfHtpOArugA5uJd6spsiciOX6xX-TJbCXKi"/>
+</div>
+</section>
+<!-- Main Grid -->
+<main class="max-w-7xl mx-auto grid grid-cols-1 md:grid-cols-3 gap-8 mb-32">
+<!-- Card 1 -->
+<div class="relative bg-surface-container-lowest/40 backdrop-blur-sm p-8 transition-all hover:bg-surface-container-low group">
+<div class="ascii-bracket-tl"></div><div class="ascii-bracket-tr"></div><div class="ascii-bracket-bl"></div><div class="ascii-bracket-br"></div>
+<div class="flex justify-between items-start mb-6">
+<span class="material-symbols-outlined text-primary" style="font-variation-settings: 'FILL' 1;">account_balance_wallet</span>
+<span class="font-body text-[10px] text-secondary">01_ACTIVE</span>
+</div>
+<h3 class="font-headline font-bold text-2xl text-on-surface mb-4 tracking-tight uppercase">Credit Exchange</h3>
+<p class="font-body text-sm text-on-surface-variant mb-8 h-16">Real-time atomic swaps between compute credits and secondary liquidity pools.</p>
+<div class="space-y-3 pt-6 border-t border-outline-variant/20">
+<div class="flex justify-between text-[10px] uppercase tracking-widest">
+<span class="text-outline">Settlement</span>
+<span class="text-secondary">Instant</span>
+</div>
+<div class="flex justify-between text-[10px] uppercase tracking-widest">
+<span class="text-outline">Provider Coverage</span>
+<span class="text-on-surface">94.2%</span>
+</div>
+<div class="flex justify-between text-[10px] uppercase tracking-widest">
+<span class="text-outline">Idempotency</span>
+<span class="text-secondary">Verified</span>
+</div>
+</div>
+</div>
+<!-- Card 2 -->
+<div class="relative bg-surface-container-lowest/40 backdrop-blur-sm p-8 transition-all hover:bg-surface-container-low group">
+<div class="ascii-bracket-tl"></div><div class="ascii-bracket-tr"></div><div class="ascii-bracket-bl"></div><div class="ascii-bracket-br"></div>
+<div class="flex justify-between items-start mb-6">
+<span class="material-symbols-outlined text-primary" style="font-variation-settings: 'FILL' 1;">layers</span>
+<span class="font-body text-[10px] text-secondary">02_ACTIVE</span>
+</div>
+<h3 class="font-headline font-bold text-2xl text-on-surface mb-4 tracking-tight uppercase">Session Envelope</h3>
+<p class="font-body text-sm text-on-surface-variant mb-8 h-16">Encapsulated execution environments for ephemeral workload isolation.</p>
+<div class="space-y-3 pt-6 border-t border-outline-variant/20">
+<div class="flex justify-between text-[10px] uppercase tracking-widest">
+<span class="text-outline">Settlement</span>
+<span class="text-on-surface">Batch</span>
+</div>
+<div class="flex justify-between text-[10px] uppercase tracking-widest">
+<span class="text-outline">Provider Coverage</span>
+<span class="text-on-surface">100.0%</span>
+</div>
+<div class="flex justify-between text-[10px] uppercase tracking-widest">
+<span class="text-outline">Idempotency</span>
+<span class="text-secondary">Enabled</span>
+</div>
+</div>
+</div>
+<!-- Card 3 -->
+<div class="relative bg-surface-container-lowest/40 backdrop-blur-sm p-8 transition-all hover:bg-surface-container-low group">
+<div class="ascii-bracket-tl"></div><div class="ascii-bracket-tr"></div><div class="ascii-bracket-bl"></div><div class="ascii-bracket-br"></div>
+<div class="flex justify-between items-start mb-6">
+<span class="material-symbols-outlined text-primary" style="font-variation-settings: 'FILL' 1;">security</span>
+<span class="font-body text-[10px] text-secondary">03_ACTIVE</span>
+</div>
+<h3 class="font-headline font-bold text-2xl text-on-surface mb-4 tracking-tight uppercase">Risk Engine</h3>
+<p class="font-body text-sm text-on-surface-variant mb-8 h-16">Autonomous heuristic analysis for mesh-wide threat detection and mitigation.</p>
+<div class="space-y-3 pt-6 border-t border-outline-variant/20">
+<div class="flex justify-between text-[10px] uppercase tracking-widest">
+<span class="text-outline">Settlement</span>
+<span class="text-secondary">Real-Time</span>
+</div>
+<div class="flex justify-between text-[10px] uppercase tracking-widest">
+<span class="text-outline">Provider Coverage</span>
+<span class="text-on-surface">88.5%</span>
+</div>
+<div class="flex justify-between text-[10px] uppercase tracking-widest">
+<span class="text-outline">Idempotency</span>
+<span class="text-secondary">Strict</span>
+</div>
+</div>
+</div>
+</main>
+</div>
+<!-- Footer / Metrics -->
+<footer class="bg-[#0e0e0e] border-t border-[#3d494c]/20 py-12 px-8">
+<div class="max-w-7xl mx-auto grid grid-cols-2 md:grid-cols-4 gap-12">
+<div>
+<span class="font-body text-[10px] text-outline uppercase tracking-widest block mb-4">Node_Alpha</span>
+<div class="flex items-center gap-2">
+<div class="w-1.5 h-1.5 bg-secondary"></div>
+<span class="font-body text-xs text-on-surface">43.2ms Latency</span>
+</div>
+<span class="font-body text-[8px] text-outline-variant mt-1 block">UID: 0x82...F9A</span>
+</div>
+<div>
+<span class="font-body text-[10px] text-outline uppercase tracking-widest block mb-4">Node_Bravo</span>
+<div class="flex items-center gap-2">
+<div class="w-1.5 h-1.5 bg-secondary"></div>
+<span class="font-body text-xs text-on-surface">12.8ms Latency</span>
+</div>
+<span class="font-body text-[8px] text-outline-variant mt-1 block">UID: 0xA1...34E</span>
+</div>
+<div>
+<span class="font-body text-[10px] text-outline uppercase tracking-widest block mb-4">Node_Charlie</span>
+<div class="flex items-center gap-2">
+<div class="w-1.5 h-1.5 bg-secondary"></div>
+<span class="font-body text-xs text-on-surface">22.1ms Latency</span>
+</div>
+<span class="font-body text-[8px] text-outline-variant mt-1 block">UID: 0xB5...992</span>
+</div>
+<div>
+<span class="font-body text-[10px] text-outline uppercase tracking-widest block mb-4">System Health</span>
+<div class="flex items-center gap-2">
+<span class="font-body text-xs text-secondary font-bold">99.98% UPTIME</span>
+</div>
+<span class="font-body text-[8px] text-primary mt-1 block tracking-widest uppercase">SYSTEM_READY // 4312H</span>
+</div>
+</div>
+<div class="max-w-7xl mx-auto mt-12 pt-8 border-t border-outline-variant/10 flex flex-col md:flex-row justify-between items-center gap-4">
+<span class="font-body text-[10px] text-outline uppercase tracking-widest">©2024 OPENVEGAS // GLOBAL_MESH_OPERATIONS</span>
+<div class="flex gap-6">
+<span class="font-body text-[10px] text-outline hover:text-primary cursor-pointer transition-colors">PRIVACY_PROTOCOL</span>
+<span class="font-body text-[10px] text-outline hover:text-primary cursor-pointer transition-colors">USAGE_TERMS</span>
+<span class="font-body text-[10px] text-outline hover:text-primary cursor-pointer transition-colors">API_STATUS</span>
+</div>
+</div>
+</footer>
+</body></html>

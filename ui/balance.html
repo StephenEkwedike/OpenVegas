@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenVegas | Balance</title>
+    <link rel="icon" type="image/svg+xml" href="/ui/assets/brand/favicon.svg" />
+    <link rel="icon" type="image/jpeg" href="/ui/assets/brand/favicon.jpg" />
+    <link rel="apple-touch-icon" href="/ui/assets/brand/openvegas-logo-circle.jpg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@300;400;500;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/ui/assets/theme.css?v=20260330" />
+    <link rel="stylesheet" href="/ui/assets/layout.css?v=20260330" />
+    <script defer src="/ui/assets/theme-fallback.js?v=20260330"></script>
+    <style>
+      .balance-layout { display: grid; grid-template-columns: 240px 1fr; gap: 16px; margin-top: 1rem; }
+      .subnav { position: sticky; top: 92px; align-self: start; min-height: auto; padding: 1rem; }
+      .subnav a {
+        display: block;
+        font-family: var(--font-mono);
+        font-size: 10px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        color: var(--grey-light);
+        text-decoration: none;
+        padding: 8px 0;
+        border-bottom: 1px solid var(--grey-dark);
+      }
+      .subnav a:hover { color: var(--white); }
+      .subnav .btn { width: 100%; margin-top: 10px; }
+      .panel-stack { display: grid; gap: 12px; }
+      .mini-grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 12px; }
+      .checkout-link { word-break: break-all; color: var(--aqua); }
+      @media (max-width: 960px) {
+        .balance-layout { grid-template-columns: 1fr; }
+        .subnav { position: static; }
+        .mini-grid { grid-template-columns: 1fr; }
+      }
+    </style>
+  <link rel="stylesheet" href="/ui/assets/home-clarity.css?v=20261028" />
+<link rel="stylesheet" href="/ui/assets/site-clarity.css?v=20261028" />
+</head>
+  <body class="site-clarity">
+    <nav class="top-nav">
+      <a href="/ui" class="brand-link text-mono-sm">[ OPENVEGAS ]</a>
+      <div style="display:flex; align-items:center; gap:14px;">
+        <div id="siteNav" class="nav-links"><a href="/ui/how-it-works">How it works</a><a href="/ui/how-to-play">How to Play</a><a href="/ui/arena">Arena <span class="nav-soon">Soon</span></a><a href="/ui/pricing">Pricing</a><a href="/ui/emotes">Emotes</a><a href="/ui/balance">Balance</a></div>
+        <div id="founderLinks" class="founder-links"></div>
+        <button type="button" id="ov-theme-toggle" class="theme-toggle" role="switch" aria-label="Toggle light and dark mode" aria-checked="false"><span class="theme-toggle__icon" aria-hidden="true">☀</span><span class="theme-toggle__rail" aria-hidden="true"><span class="theme-toggle__thumb"></span></span><span class="theme-toggle__icon" aria-hidden="true">☾</span></button>
+      </div>
+    </nav>
+
+    <main class="container page-shell">
+      <header class="page-hero">
+        <div>
+          <div class="text-mono-xs" style="margin-bottom:1rem">BALANCE</div>
+          <h1 class="page-title">Your AI operating balance.</h1>
+        </div>
+        <p class="text-mono-sm page-lead">Track available funds, monitor usage, and act before work stalls.</p>
+      </header>
+
+      <section id="authState" class="auth-state" hidden>
+        <div class="text-mono-xs">AUTH REQUIRED</div>
+        <h2 class="card-title">Sign in to view billing data</h2>
+        <p class="text-mono-sm">This page is available after authentication.</p>
+        <div class="cta-row">
+          <a id="loginLink" class="btn btn-primary" href="/ui/login?next=%2Fui%2Fbalance">Sign in/up</a>
+        </div>
+      </section>
+
+      <section id="authContent" hidden>
+        <div class="balance-layout">
+          <aside class="card subnav">
+            <div class="text-mono-xs" style="margin-bottom:10px">BALANCE NAV</div>
+            <a href="#overview">Overview</a>
+            <a href="#payments">Payments</a>
+            <a href="#transactions">Transactions</a>
+            <button id="refreshAll" class="btn" type="button">Refresh data</button>
+            <button id="logoutBtn" class="btn" type="button">Logout</button>
+          </aside>
+
+          <div class="panel-stack">
+            <article id="overview" class="card">
+              <div class="text-mono-xs">AVAILABLE BALANCE</div>
+              <div id="balanceV" class="metric">--</div>
+              <div id="balanceMeta" class="text-mono-sm">loading...</div>
+              <p class="card-copy" style="margin-top:.8rem; margin-bottom:0;">Use balance thresholds to avoid surprise interruptions in active workflows.</p>
+            </article>
+
+            <article id="payments" class="card">
+              <div class="text-mono-xs">PAYMENTS</div>
+              <h2 class="card-title">Funding flows built for AI usage.</h2>
+              <p class="card-copy">OpenVegas makes it easier to add funds, review payment state, and move from one-off checkout events to a more continuous operating balance.</p>
+              <p class="text-mono-sm" style="margin:0 0 .9rem 0; color:var(--grey-light);">Final repayment is computed at settlement.</p>
+              <div class="cta-row">
+                <button id="createCheckout" class="btn btn-primary" type="button">Top up now</button>
+                <button id="openSubscription" class="btn" type="button">Monthly subscription</button>
+              </div>
+              <p class="text-mono-sm"><a href="/billing/tv/manage">Cancel an existing OVTV subscription</a>. This does not start a new subscription.</p>
+            </article>
+
+            <article id="promotion" class="card" hidden>
+              <div class="text-mono-xs">PROMOTION</div>
+              <h2 class="card-title">Have an OpenVegas code?</h2>
+              <p class="card-copy">Redeem an eligible code for 50 $V. Codes expire within seven days. One redemption per verified account per campaign; no purchase or wager required.</p>
+              <form id="promotionForm">
+                <label for="promotionCode">Promotion code</label>
+                <input id="promotionCode" name="code" type="text" required maxlength="68" autocomplete="off" spellcheck="false" pattern="ovp_[a-f0-9]{64}" style="width:100%;box-sizing:border-box;margin:12px 0" />
+                <button id="promotionSubmit" class="btn" type="submit">Redeem code</button>
+              </form>
+              <p id="promotionStatus" class="text-mono-sm" role="status" aria-live="polite"></p>
+            </article>
+
+            <article id="transactions" class="card">
+              <div class="text-mono-xs">TRANSACTIONS</div>
+              <h2 class="card-title">Funding and balance history.</h2>
+              <p class="card-copy">Review paid and failed top-ups plus gameplay wins and losses.</p>
+              <p id="topupFx" class="text-mono-sm" style="margin:0 0 .9rem 0;">Conversion rate: loading...</p>
+              <div class="table-shell">
+                <table>
+                  <thead>
+                    <tr><th>TIME</th><th>TYPE</th><th>AMOUNT</th><th>STATUS</th></tr>
+                  </thead>
+                  <tbody id="txBody">
+                    <tr><td colspan="4" class="text-mono-sm">Loading...</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </article>
+
+            <article class="card" style="min-height:auto;">
+              <p class="card-copy" style="margin:0; color:var(--white);">OpenVegas is built around continuity: fewer hard stops, cleaner replenishment, better visibility.</p>
+            </article>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script type="module">
+      import {money} from '/ui/assets/currency.js';
+      import { renderTopNav, renderFounderLinks, installAssetGuard, byId } from "/ui/assets/site.js?v=20261028";
+      import { apiJson, bootstrapBrowserSession, clearBrowserToken, getBrowserToken, getLoginHref, showAuthedContent, showSignedOutPanel } from "/ui/assets/page-auth.js?v=20260330";
+
+      installAssetGuard();
+      renderTopNav("siteNav");
+      renderFounderLinks("founderLinks");
+
+      const loginLink = byId("loginLink");
+      if (loginLink) loginLink.href = getLoginHref("/ui/balance");
+
+      fetch("/promotions/config", { cache: "no-store" }).then(r => r.ok ? r.json() : null)
+        .then(config => { byId("promotion").hidden = config?.enabled !== true; }).catch(() => {});
+      byId("promotionForm").addEventListener("submit", async event => {
+        event.preventDefault();
+        const button = byId("promotionSubmit");
+        if (button.disabled) return;
+        button.disabled = true;
+        byId("promotionStatus").textContent = "Checking code...";
+        try {
+          const result = await apiJson("/promotions/redeem", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ code: byId("promotionCode").value.trim() })
+          });
+          byId("promotionStatus").textContent = result.replayed ? "This code was already credited to your account." : "$V 50.00 added to your balance.";
+          byId("promotionCode").value = "";
+          await loadWallet();
+        } catch (err) {
+          byId("promotionStatus").textContent = err?.message || "Code could not be redeemed. Try again safely.";
+        } finally { button.disabled = false; }
+      });
+
+      function renderBalance(data) {
+        const raw = String(data?.balance ?? "0");
+        const n = Number.parseFloat(raw);
+        byId("balanceV").textContent = money(raw);
+        byId("balanceMeta").textContent = `tier=${data?.tier ?? "free"}`;
+      }
+
+      function renderHistory(data) {
+        const entries = Array.isArray(data?.entries) ? data.entries : [];
+        const conv = data?.conversion || {};
+        const fx = byId("topupFx");
+        if (fx) {
+          const vPerUsd = conv?.v_per_usd || "?";
+          const usdPerV = conv?.usd_per_v || "?";
+          fx.textContent = `Conversion rate: 1 USD = ${money(vPerUsd)} · $V 1.00 = ${usdPerV} USD`;
+        }
+        const body = byId("txBody");
+        if (!body) return;
+        if (!entries.length) {
+          body.innerHTML = `<tr><td colspan="4" class="text-mono-sm">No entries found.</td></tr>`;
+          return;
+        }
+        body.innerHTML = entries
+          .map((e) => {
+            const t = String(e.time || "").replace("T", " ").slice(0, 19);
+            const kind = String(e.type || "top_up");
+            let amount = "";
+            if (kind === "gameplay") {
+              const vv = e.amount_v_2dp ?? e.amount_v ?? "0.00";
+              const n = Number.parseFloat(String(vv));
+              const signed = Number.isFinite(n) ? `${n > 0 ? "+" : ""}${n.toFixed(2)}` : String(vv);
+              amount = money(vv);
+            } else {
+              const usd = e.amount_usd ? `$${e.amount_usd}` : "$0.00";
+              const vv = e.amount_v_2dp ?? e.amount_v ?? "0.00";
+              amount = `${usd} · ${money(vv)}`;
+            }
+            return `<tr><td>${t}</td><td>${kind}</td><td>${amount}</td><td>${e.status || "n/a"}</td></tr>`;
+          })
+          .join("");
+      }
+
+      function renderDataError(err) {
+        const message = String(err || "Failed to load wallet data.");
+        const meta = byId("balanceMeta");
+        if (meta) meta.textContent = message;
+        const body = byId("txBody");
+        if (body) body.innerHTML = `<tr><td colspan="4" class="text-mono-sm c-bad">${message}</td></tr>`;
+      }
+
+      async function loadWallet() {
+        try {
+          const balanceData = await apiJson("/wallet/balance", { method: "GET" });
+          renderBalance(balanceData);
+          const historyData = await apiJson("/billing/activity?limit=50", { method: "GET" });
+          renderHistory(historyData);
+        } catch (err) {
+          renderDataError(err);
+        }
+      }
+
+      async function initAuthContent() {
+        showAuthedContent();
+        const loadPromise = loadWallet();
+
+        byId("refreshAll")?.addEventListener("click", async () => {
+          await loadWallet();
+        });
+
+        byId("logoutBtn")?.addEventListener("click", async () => {
+          try {
+            await fetch("/ui/auth/logout", {
+              method: "POST",
+              credentials: "include",
+              headers: { "Content-Type": "application/json" },
+            });
+          } catch (_) {
+            // Network logout is best-effort; still clear local auth state.
+          }
+          clearBrowserToken();
+          window.location.assign(getLoginHref("/ui/balance"));
+        });
+
+        byId("createCheckout")?.addEventListener("click", () => {
+          window.location.assign("/ui/topup-checkout");
+        });
+
+        byId("openSubscription")?.addEventListener("click", () => {
+          window.location.assign("/ui/subscription");
+        });
+
+        await loadPromise;
+      }
+
+      (async () => {
+        try {
+          await bootstrapBrowserSession();
+          if (!getBrowserToken()) {
+            showSignedOutPanel();
+          } else {
+            await initAuthContent();
+          }
+        } catch (err) {
+          const raw = String(err || "");
+          const authErr = raw.includes("unauthorized") || raw.includes("401") || raw.includes("403");
+          if (authErr) {
+            showSignedOutPanel();
+            const panel = byId("authState");
+            if (panel) panel.insertAdjacentHTML("beforeend", `<p class=\"text-mono-sm c-bad\">${raw}</p>`);
+          } else {
+            showAuthedContent();
+            renderDataError(raw);
+          }
+        }
+      })();
+    </script>
+  <footer class="site-footer"><div><strong>OpenVegas. Agentic Entertainment.</strong><p>A hand. Then back to the build.</p></div><a class="partnership-cta" href="/ui/data-partnerships">Data Partnerships <span aria-hidden="true">&nbsp;↗</span></a><div class="site-footer-links"><a href="/ui/how-to-play">How to Play</a><a href="/ui/arena">Arena · Soon</a><a href="/ui/agents">Agents</a><a href="/ui/faq">FAQ</a><a href="/ui/security">Security</a><a href="/ui/contact">Contact</a></div></footer>
+</body>
+</html>

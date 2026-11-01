@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenVegas | Transactions</title>
+    <link rel="icon" type="image/svg+xml" href="/ui/assets/brand/favicon.svg" />
+    <link rel="icon" type="image/jpeg" href="/ui/assets/brand/favicon.jpg" />
+    <link rel="apple-touch-icon" href="/ui/assets/brand/openvegas-logo-circle.jpg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@300;400;500;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/ui/assets/theme.css?v=20260330" />
+    <link rel="stylesheet" href="/ui/assets/layout.css?v=20260330" />
+    <script defer src="/ui/assets/theme-fallback.js?v=20260330"></script>
+  <link rel="stylesheet" href="/ui/assets/home-clarity.css?v=20261028" />
+<link rel="stylesheet" href="/ui/assets/site-clarity.css?v=20261028" />
+</head>
+  <body class="site-clarity">
+    <nav class="top-nav">
+      <a href="/ui" class="brand-link text-mono-sm">[ OPENVEGAS ]</a>
+      <div style="display:flex; align-items:center; gap:14px;">
+        <div id="siteNav" class="nav-links"><a href="/ui/how-it-works">How it works</a><a href="/ui/how-to-play">How to Play</a><a href="/ui/arena">Arena <span class="nav-soon">Soon</span></a><a href="/ui/pricing">Pricing</a><a href="/ui/emotes">Emotes</a><a href="/ui/balance">Balance</a></div>
+        <div id="founderLinks" class="founder-links"></div>
+        <button type="button" id="ov-theme-toggle" class="theme-toggle" role="switch" aria-label="Toggle light and dark mode" aria-checked="false"><span class="theme-toggle__icon" aria-hidden="true">☀</span><span class="theme-toggle__rail" aria-hidden="true"><span class="theme-toggle__thumb"></span></span><span class="theme-toggle__icon" aria-hidden="true">☾</span></button>
+      </div>
+    </nav>
+
+    <main class="container page-shell">
+      <header class="page-hero">
+        <div>
+          <div class="text-mono-xs" style="margin-bottom:1rem">TRANSACTIONS</div>
+          <h1 class="page-title">Funding and balance history.</h1>
+        </div>
+        <p class="text-mono-sm page-lead">Review paid and failed top-ups, plus gameplay wins and losses, in one place.</p>
+      </header>
+
+      <section id="authState" class="auth-state" hidden>
+        <div class="text-mono-xs">AUTH REQUIRED</div>
+        <h2 class="card-title">Sign in to view transaction history</h2>
+        <p class="text-mono-sm">This page is available after authentication.</p>
+        <div class="cta-row"><a id="loginLink" class="btn btn-primary" href="/ui/login?next=%2Fui%2Ftransactions">Sign in/up</a></div>
+      </section>
+
+      <section id="authContent" hidden>
+        <p class="text-mono-sm" style="margin-bottom: 10px;">Every balance system needs trust. OpenVegas makes money movement visible.</p>
+        <div class="table-shell">
+          <table>
+            <thead>
+              <tr><th>Time</th><th>Type</th><th>Amount</th><th>Status</th></tr>
+            </thead>
+            <tbody id="txBody">
+              <tr><td colspan="4" class="text-mono-sm">Loading...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <script type="module">
+      import {money} from '/ui/assets/currency.js';
+      import { renderTopNav, renderFounderLinks, installAssetGuard, byId } from "/ui/assets/site.js?v=20261028";
+      import { apiJson, authProbe, getLoginHref, showSignedOutPanel, showAuthedContent } from "/ui/assets/page-auth.js?v=20260330";
+
+      installAssetGuard();
+      renderTopNav("siteNav");
+      renderFounderLinks("founderLinks");
+
+      const loginLink = byId("loginLink");
+      if (loginLink) loginLink.href = getLoginHref("/ui/transactions");
+
+      try {
+        const probe = await authProbe();
+        if (!probe.ok) {
+          showSignedOutPanel();
+        } else {
+          showAuthedContent();
+          const data = await apiJson("/billing/activity?limit=50", { method: "GET" });
+          const entries = Array.isArray(data?.entries) ? data.entries : [];
+          const body = byId("txBody");
+          if (!body) throw new Error("Missing tx table body");
+          if (!entries.length) {
+            body.innerHTML = `<tr><td colspan=\"4\" class=\"text-mono-sm\">No entries found.</td></tr>`;
+          } else {
+            body.innerHTML = entries
+              .map((e) => {
+                const t = String(e.time || "").replace("T", " ").slice(0, 19);
+                const kind = String(e.type || "top_up");
+                let amount = "";
+                if (kind === "gameplay") {
+                  const vv = e.amount_v_2dp ?? e.amount_v ?? "0.00";
+                  const n = Number.parseFloat(String(vv));
+                  const signed = Number.isFinite(n) ? `${n > 0 ? "+" : ""}${n.toFixed(2)}` : String(vv);
+                  amount = money(vv);
+                } else {
+                  const usd = e.amount_usd ? `$${e.amount_usd}` : "$0.00";
+                  const vv = e.amount_v_2dp ?? e.amount_v ?? "0.00";
+                  amount = `${usd} · ${money(vv)}`;
+                }
+                return `<tr><td>${t}</td><td>${kind}</td><td>${amount}</td><td>${e.status || "n/a"}</td></tr>`;
+              })
+              .join("");
+          }
+        }
+      } catch (err) {
+        showSignedOutPanel();
+        const panel = byId("authState");
+        if (panel) panel.insertAdjacentHTML("beforeend", `<p class=\"text-mono-sm c-bad\">${String(err)}</p>`);
+      }
+    </script>
+  <footer class="site-footer"><div><strong>OpenVegas. Agentic Entertainment.</strong><p>A hand. Then back to the build.</p></div><a class="partnership-cta" href="/ui/data-partnerships">Data Partnerships <span aria-hidden="true">&nbsp;↗</span></a><div class="site-footer-links"><a href="/ui/how-to-play">How to Play</a><a href="/ui/arena">Arena · Soon</a><a href="/ui/agents">Agents</a><a href="/ui/faq">FAQ</a><a href="/ui/security">Security</a><a href="/ui/contact">Contact</a></div></footer>
+</body>
+</html>

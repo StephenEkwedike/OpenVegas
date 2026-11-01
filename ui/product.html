@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenVegas | Product</title>
+    <link rel="icon" type="image/svg+xml" href="/ui/assets/brand/favicon.svg" />
+    <link rel="icon" type="image/jpeg" href="/ui/assets/brand/favicon.jpg" />
+    <link rel="apple-touch-icon" href="/ui/assets/brand/openvegas-logo-circle.jpg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@300;400;500;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/ui/assets/theme.css?v=20260330" />
+    <link rel="stylesheet" href="/ui/assets/layout.css?v=20260330" />
+    <script defer src="/ui/assets/theme-fallback.js?v=20260330"></script>
+  <link rel="stylesheet" href="/ui/assets/home-clarity.css?v=20261028" />
+<link rel="stylesheet" href="/ui/assets/site-clarity.css?v=20261028" />
+</head>
+  <body class="site-clarity">
+    <nav class="top-nav">
+      <a href="/ui" class="brand-link text-mono-sm">[ OPENVEGAS ]</a>
+      <div style="display:flex; align-items:center; gap:14px;">
+        <div id="siteNav" class="nav-links"><a href="/ui/how-it-works">How it works</a><a href="/ui/how-to-play">How to Play</a><a href="/ui/arena">Arena <span class="nav-soon">Soon</span></a><a href="/ui/pricing">Pricing</a><a href="/ui/emotes">Emotes</a><a href="/ui/balance">Balance</a></div>
+        <div id="founderLinks" class="founder-links"></div>
+        <button type="button" id="ov-theme-toggle" class="theme-toggle" role="switch" aria-label="Toggle light and dark mode" aria-checked="false"><span class="theme-toggle__icon" aria-hidden="true">☀</span><span class="theme-toggle__rail" aria-hidden="true"><span class="theme-toggle__thumb"></span></span><span class="theme-toggle__icon" aria-hidden="true">☾</span></button>
+      </div>
+    </nav>
+
+    <main class="container page-shell">
+      <header class="page-hero">
+        <div>
+          <div class="text-mono-xs" style="margin-bottom:1rem">PRODUCT OVERVIEW</div>
+          <h1 class="page-title">A wallet layer for AI usage.</h1>
+        </div>
+        <p class="text-mono-sm page-lead">
+          OpenVegas gives users a simple way to hold value, top up balances, and keep AI workflows running.
+          What starts as a better credit experience becomes a broader control layer for usage, thresholds, and replenishment.
+        </p>
+      </header>
+
+      <section class="card" style="min-height:auto; margin-top:12px;">
+        <div class="text-mono-xs">WHAT THE PRODUCT DOES</div>
+        <p class="card-copy" style="margin-top:.7rem;">OpenVegas combines four primitives into one surface:</p>
+        <ul class="card-copy" style="margin-left:1rem; margin-bottom:0; color:var(--white);">
+          <li>Wallet-backed balances</li>
+          <li>Clean top-up and payment flows</li>
+          <li>Usage continuity when budgets get tight</li>
+          <li>A future path to agent-native budget controls</li>
+        </ul>
+      </section>
+
+      <section class="section-grid-2" style="margin-top:12px;">
+        <article class="card border-r">
+          <div class="tag">WHY USERS CARE</div>
+          <h2 class="card-title">Less friction. More runtime.</h2>
+          <p class="card-copy">
+            The problem is not just paying for AI. The problem is what happens when funding breaks the flow.
+            OpenVegas is designed to reduce those interruptions and make AI usage feel continuous.
+          </p>
+        </article>
+        <article class="card">
+          <div class="tag">HUMAN FIRST, AGENT NEXT</div>
+          <h2 class="card-title">Built for people now. Built for agents next.</h2>
+          <p class="card-copy">
+            Today, OpenVegas helps human users manage AI credit balances.
+            Over time, the same system can support autonomous agents that need operating budgets, refill thresholds, and policy-aware limits.
+          </p>
+        </article>
+      </section>
+    </main>
+
+    <script type="module">
+      import { renderTopNav, renderFounderLinks, installAssetGuard } from "/ui/assets/site.js?v=20261028";
+      installAssetGuard();
+      renderTopNav("siteNav");
+      renderFounderLinks("founderLinks");
+    </script>
+  <footer class="site-footer"><div><strong>OpenVegas. Agentic Entertainment.</strong><p>A hand. Then back to the build.</p></div><a class="partnership-cta" href="/ui/data-partnerships">Data Partnerships <span aria-hidden="true">&nbsp;↗</span></a><div class="site-footer-links"><a href="/ui/how-to-play">How to Play</a><a href="/ui/arena">Arena · Soon</a><a href="/ui/agents">Agents</a><a href="/ui/faq">FAQ</a><a href="/ui/security">Security</a><a href="/ui/contact">Contact</a></div></footer>
+</body>
+</html>

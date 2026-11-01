@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>How OpenVegas Works | OpenVegas</title>
+    <link rel="icon" type="image/svg+xml" href="/ui/assets/brand/favicon.svg" />
+    <link rel="icon" type="image/jpeg" href="/ui/assets/brand/favicon.jpg" />
+    <link rel="apple-touch-icon" href="/ui/assets/brand/openvegas-logo-circle.jpg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@300;400;500;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/ui/assets/theme.css?v=20260330" />
+    <link rel="stylesheet" href="/ui/assets/layout.css?v=20260330" />
+    <script defer src="/ui/assets/theme-fallback.js?v=20260330"></script>
+  <link rel="stylesheet" href="/ui/assets/home-clarity.css?v=20261028" />
+<link rel="stylesheet" href="/ui/assets/site-clarity.css?v=20261028" />
+</head>
+  <body class="site-clarity">
+    <nav class="top-nav">
+      <a href="/ui" class="brand-link text-mono-sm">[ OPENVEGAS ]</a>
+      <div style="display:flex; align-items:center; gap:14px;">
+        <div id="siteNav" class="nav-links"><a href="/ui/how-it-works">How it works</a><a href="/ui/how-to-play">How to Play</a><a href="/ui/arena">Arena <span class="nav-soon">Soon</span></a><a href="/ui/pricing">Pricing</a><a href="/ui/emotes">Emotes</a><a href="/ui/balance">Balance</a></div>
+        <div id="founderLinks" class="founder-links"></div>
+        <button type="button" id="ov-theme-toggle" class="theme-toggle" role="switch" aria-label="Toggle light and dark mode" aria-checked="false"><span class="theme-toggle__icon" aria-hidden="true">☀</span><span class="theme-toggle__rail" aria-hidden="true"><span class="theme-toggle__thumb"></span></span><span class="theme-toggle__icon" aria-hidden="true">☾</span></button>
+      </div>
+    </nav>
+
+    <main class="container page-shell">
+<header class="guide-hero"><div><h1>Stake. Play.<br>Keep building.</h1><p class="lead">OpenVegas puts optional games and $V-funded AI usage alongside the coding tools you already use.</p><a class="btn btn-primary" href="/ui/how-to-play">See how to play</a></div><aside class="guide-stage"><h2>One balance. Your choice.</h2><ul><li>Buy $V when you need credits.</li><li>Play a game if you want to risk some.</li><li>Use available $V for separately billed AI requests.</li></ul><p>No guaranteed winnings. No subscription refill.</p></aside></header>
+<section class="guide-section guide-split"><div><h2>Connect once.</h2></div><div class="guide-commands"><pre><code>npx openvegas-ai</code></pre><ul><li>Have Node.js/npm and Claude Code or Codex installed.</li><li>Sign in to OpenVegas and approve the integration. Match the browser code to your terminal.</li><li>Use the configured terminal for game graphics and the wallet strip. After installation, start a fresh <code>claude</code> or <code>codex</code> session there.</li></ul><p class="guide-note">Native features require a compatible OpenVegas release and enabled backend. Older published builds may not include every feature yet.</p></div></section>
+<section class="guide-section guide-split"><div><h2>Play in place.</h2><p>Pick a game, submit your stake, then return to your project. No second coding environment.</p></div><div class="guide-commands"><p>Inside Claude Code</p><pre><code>/openvegas play</code></pre><p>Inside Codex</p><pre><code>$openvegas play</code></pre><p class="guide-note">Choose Quick Play (vs House), then a game. Arena is Coming Soon. Quit returns to coding in the same terminal.</p></div></section>
+<section class="guide-section guide-split" id="inference"><div><h2>Choose how you fund AI.</h2><p>Your own host billing is the default. Switching to $V is an explicit choice.</p></div><div class="guide-commands"><p>Inside your connected host</p><pre><code>openvegas use v</code></pre><ul><li>Review model pricing and confirm a session spending limit before starting.</li><li>OpenVegas routes supported API usage through its backend. No personal provider key needed.</li><li>Return with <code>openvegas use host</code>.</li></ul><p class="guide-note">Provider and feature availability apply. This requires the connected OpenVegas terminal integration; a disconnected session cannot switch billing. Switching may briefly restart and resume the same conversation. This does not refill Claude or ChatGPT subscription quotas. Native subscription billing stays unchanged until you choose another mode.</p></div></section>
+<section class="guide-section guide-split"><div><h2>Make it yours.</h2><p>Companions for quiet moments. Emotes for the finish.</p></div><div><p>Cosmetics stay out of your way. They do not add model power. Rendering depends on the host and graphics terminal; text controls remain available.</p><p><a href="/ui/emotes">Browse emotes</a> · <a href="/ui/arena">Explore Arena, coming soon</a></p></div></section><section class="guide-section"><details><summary>Before you connect or play</summary><p>Match the browser code to your terminal before approving an integration. Games are optional and can lose credits; coding activity does not earn $V rewards.</p><p>A compatible graphics terminal enables animation. Text controls or a separate companion pane are the fallback where your host cannot render a companion.</p></details></section></main>
+
+    <script type="module">
+      import { renderTopNav, renderFounderLinks, installAssetGuard } from "/ui/assets/site.js?v=20261028";
+      installAssetGuard();
+      renderTopNav("siteNav");
+      renderFounderLinks("founderLinks");
+    </script>
+  <footer class="site-footer"><div><strong>OpenVegas. Agentic Entertainment.</strong><p>A hand. Then back to the build.</p></div><a class="partnership-cta" href="/ui/data-partnerships">Data Partnerships <span aria-hidden="true">&nbsp;↗</span></a><div class="site-footer-links"><a href="/ui/how-to-play">How to Play</a><a href="/ui/arena">Arena · Soon</a><a href="/ui/agents">Agents</a><a href="/ui/faq">FAQ</a><a href="/ui/security">Security</a><a href="/ui/contact">Contact</a></div></footer>
+</body>
+</html>

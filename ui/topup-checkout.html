@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenVegas | Top-Up Checkout</title>
+    <link rel="icon" type="image/svg+xml" href="/ui/assets/brand/favicon.svg" />
+    <link rel="icon" type="image/jpeg" href="/ui/assets/brand/favicon.jpg" />
+    <link rel="apple-touch-icon" href="/ui/assets/brand/openvegas-logo-circle.jpg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@300;400;500;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/ui/assets/theme.css?v=20260330" />
+    <link rel="stylesheet" href="/ui/assets/layout.css?v=20260330" />
+    <script defer src="/ui/assets/theme-fallback.js?v=20260330"></script>
+    <style>
+      .checkout-link { word-break: break-all; color: var(--aqua); }
+      .field-stack { display:flex; flex-direction:column; gap:6px; margin:.8rem 0; }
+      .field-stack input {
+        border: 1px solid var(--line);
+        background: var(--input-bg);
+        color: var(--input-text);
+        border-radius: 8px;
+        padding: .6rem .7rem;
+        font-family: var(--font-mono);
+      }
+      .field-hint { color: var(--grey-light); font-size: 11px; font-family: var(--font-mono); }
+      .qr-wrap { margin-top: 10px; }
+      .qr {
+        width: min(300px, 80vw);
+        background: var(--qr-bg);
+        padding: 8px;
+        border-radius: 8px;
+        border: 1px solid var(--line);
+      }
+    </style>
+  <link rel="stylesheet" href="/ui/assets/home-clarity.css?v=20261028" />
+<link rel="stylesheet" href="/ui/assets/site-clarity.css?v=20261028" />
+</head>
+  <body class="site-clarity">
+    <nav class="top-nav">
+      <a href="/ui" class="brand-link text-mono-sm">[ OPENVEGAS ]</a>
+      <div style="display:flex; align-items:center; gap:14px;">
+        <div id="siteNav" class="nav-links"><a href="/ui/how-it-works">How it works</a><a href="/ui/how-to-play">How to Play</a><a href="/ui/arena">Arena <span class="nav-soon">Soon</span></a><a href="/ui/pricing">Pricing</a><a href="/ui/emotes">Emotes</a><a href="/ui/balance">Balance</a></div>
+        <div id="founderLinks" class="founder-links"></div>
+        <button type="button" id="ov-theme-toggle" class="theme-toggle" role="switch" aria-label="Toggle light and dark mode" aria-checked="false"><span class="theme-toggle__icon" aria-hidden="true">☀</span><span class="theme-toggle__rail" aria-hidden="true"><span class="theme-toggle__thumb"></span></span><span class="theme-toggle__icon" aria-hidden="true">☾</span></button>
+      </div>
+    </nav>
+
+    <main class="container page-shell">
+      <header class="page-hero">
+        <div>
+          <div class="text-mono-xs" style="margin-bottom:1rem">TOP-UP</div>
+          <h1 class="page-title">Create one-time top-up checkout.</h1>
+        </div>
+        <p class="text-mono-sm page-lead">Add funds with a one-time payment. Minimum amount is $10.00.</p>
+      </header>
+
+      <section id="authState" class="auth-state" hidden>
+        <div class="text-mono-xs">AUTH REQUIRED</div>
+        <h2 class="card-title">Sign in to create top-up checkout</h2>
+        <p class="text-mono-sm">This page is available after authentication.</p>
+        <div class="cta-row"><a id="loginLink" class="btn btn-primary" href="/ui/login?next=%2Fui%2Ftopup-checkout">Sign in/up</a></div>
+      </section>
+
+      <section id="authContent" hidden>
+        <article class="card">
+          <div class="text-mono-xs">CHECKOUT</div>
+          <h2 class="card-title">Create top-up checkout</h2>
+          <div class="field-stack">
+            <label class="text-mono-xs" for="topupAmount">Top-up amount (USD)</label>
+            <input id="topupAmount" type="number" min="10" max="500" step="0.01" value="20.00" />
+            <div class="field-hint">Minimum $10.00. You can choose any amount within configured limits.</div>
+          </div>
+          <div class="cta-row">
+            <button id="createCheckout" class="btn btn-primary" type="button">Create checkout</button>
+            <button id="chargeSaved" class="btn" type="button">Use saved card</button>
+            <button id="manageSavedCard" class="btn" type="button">Manage card</button>
+            <a class="btn" href="/ui/subscription">Go to subscription</a>
+            <a class="btn" href="/ui/balance">Open balance</a>
+          </div>
+          <p id="checkoutMeta" class="text-mono-sm" style="margin-top:.8rem;">No checkout yet.</p>
+          <p id="savedCardMeta" class="text-mono-sm" style="margin-top:.4rem;">Checking saved card status...</p>
+          <a id="checkoutUrl" class="checkout-link text-mono-sm" href="#" target="_blank" rel="noreferrer" hidden></a>
+          <div id="checkoutQrWrap" class="qr-wrap" hidden>
+            <div class="text-mono-xs" style="margin: 8px 0;">Scan QR to pay</div>
+            <img id="checkoutQrImage" class="qr" alt="Top-up checkout QR" hidden />
+          </div>
+        </article>
+      </section>
+    </main>
+
+    <script type="module">
+      import {money} from '/ui/assets/currency.js';
+      import { renderTopNav, renderFounderLinks, installAssetGuard, byId } from "/ui/assets/site.js?v=20261028";
+      import { apiFetch, apiJson, authProbe, getLoginHref, showSignedOutPanel, showAuthedContent } from "/ui/assets/page-auth.js?v=20260330";
+
+      installAssetGuard();
+      renderTopNav("siteNav");
+      renderFounderLinks("founderLinks");
+
+      const loginLink = byId("loginLink");
+      if (loginLink) loginLink.href = getLoginHref("/ui/topup-checkout");
+
+      try {
+        const probe = await authProbe();
+        if (!probe.ok) {
+          showSignedOutPanel();
+        } else {
+          showAuthedContent();
+          const MIN_BILLING_USD = 10;
+
+          byId("createCheckout")?.addEventListener("click", async () => {
+            const out = byId("checkoutMeta");
+            const link = byId("checkoutUrl");
+            const qrWrap = byId("checkoutQrWrap");
+            const qrImage = byId("checkoutQrImage");
+            const amountInput = byId("topupAmount");
+            const rawAmount = String(amountInput?.value || "20.00").trim();
+            // Open an immediate same-origin pending page in click context to avoid popup blockers/blank tabs.
+            const checkoutTab = window.open("/ui/checkout-pending", "_blank");
+            if (checkoutTab && !checkoutTab.closed) {
+              try { checkoutTab.focus(); } catch {}
+            }
+            out.textContent = "creating...";
+            if (qrWrap) qrWrap.hidden = true;
+            if (qrImage) qrImage.hidden = true;
+            try {
+              const parsed = Number(rawAmount);
+              if (!Number.isFinite(parsed) || parsed < MIN_BILLING_USD) {
+                throw new Error(`Minimum top-up is $${MIN_BILLING_USD.toFixed(2)}.`);
+              }
+              const preview = await apiJson("/billing/topups/preview", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ amount_usd: parsed.toFixed(2) }),
+              });
+              const previewLine = `preview: repay ${money(preview.repay_v)}, net credit ${money(preview.net_credit_v)}`;
+              out.textContent = `${previewLine} · estimate only (final at settlement)`;
+              const data = await apiJson("/billing/topups/checkout", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ amount_usd: parsed.toFixed(2) }),
+              });
+              out.textContent = `topup_id=${data.topup_id} status=${data.status}`;
+              if (data.checkout_url) {
+                link.hidden = false;
+                link.href = data.checkout_url;
+                link.textContent = data.checkout_url;
+                // Keep this page visible for QR/status context and open checkout in a new tab.
+                if (checkoutTab && !checkoutTab.closed) {
+                  try {
+                    checkoutTab.location.replace(data.checkout_url);
+                    checkoutTab.focus();
+                  } catch {
+                    checkoutTab.location.href = data.checkout_url;
+                  }
+                } else {
+                  out.textContent += " · popup blocked; use the checkout link below";
+                }
+              }
+              if (data.topup_id) {
+                out.insertAdjacentHTML("beforeend", ` · <a class="checkout-link" href="/ui/topup/${data.topup_id}">open status page</a>`);
+                if (qrImage && qrWrap) {
+                  const qrRes = await apiFetch(`/billing/topups/${encodeURIComponent(data.topup_id)}/qr.svg`, {
+                    method: "GET",
+                  });
+                  if (qrRes.ok) {
+                    const svg = await qrRes.text();
+                    if (svg.includes("QR unavailable in this runtime")) {
+                      out.textContent += " · QR unavailable on server runtime";
+                    }
+                    qrImage.hidden = false;
+                    qrWrap.hidden = false;
+                    qrImage.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+                  } else {
+                    const detail = await qrRes.text().catch(() => "");
+                    out.textContent += ` · QR fetch failed (${qrRes.status})${detail ? `: ${detail.slice(0, 120)}` : ""}`;
+                  }
+                }
+              }
+            } catch (err) {
+              if (checkoutTab && !checkoutTab.closed) {
+                try { checkoutTab.close(); } catch {}
+              }
+              out.textContent = String(err);
+            }
+          });
+
+          const savedCardMeta = byId("savedCardMeta");
+          const chargeSavedBtn = byId("chargeSaved");
+          const manageSavedCardBtn = byId("manageSavedCard");
+
+          async function refreshSavedCardStatus() {
+            if (!savedCardMeta) return { available: false };
+            try {
+              const status = await apiJson("/billing/topups/saved-payment-method", { method: "GET" });
+              if (status?.available) {
+                const brand = String(status.brand || "card").toUpperCase();
+                const last4 = String(status.last4 || "****");
+                savedCardMeta.textContent = `Saved card ready: ${brand} ••••${last4}`;
+                if (chargeSavedBtn) chargeSavedBtn.disabled = false;
+              } else {
+                savedCardMeta.textContent = "No saved card on file yet. Complete one checkout to save card details.";
+                if (chargeSavedBtn) chargeSavedBtn.disabled = true;
+              }
+              return status || { available: false };
+            } catch (err) {
+              savedCardMeta.textContent = `Saved card status unavailable: ${String(err)}`;
+              if (chargeSavedBtn) chargeSavedBtn.disabled = true;
+              return { available: false };
+            }
+          }
+
+          await refreshSavedCardStatus();
+
+          chargeSavedBtn?.addEventListener("click", async () => {
+            const out = byId("checkoutMeta");
+            const amountInput = byId("topupAmount");
+            const rawAmount = String(amountInput?.value || "20.00").trim();
+            out.textContent = "charging saved card...";
+            try {
+              const parsed = Number(rawAmount);
+              if (!Number.isFinite(parsed) || parsed < MIN_BILLING_USD) {
+                throw new Error(`Minimum top-up is $${MIN_BILLING_USD.toFixed(2)}.`);
+              }
+              const preview = await apiJson("/billing/topups/preview", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ amount_usd: parsed.toFixed(2) }),
+              });
+              out.textContent = `preview: repay ${money(preview.repay_v)}, net credit ${money(preview.net_credit_v)}`;
+              const charged = await apiJson("/billing/topups/charge-saved", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ amount_usd: parsed.toFixed(2) }),
+              });
+              out.textContent = `saved-card charge complete · topup_id=${charged.topup_id} status=${charged.status}`;
+            } catch (err) {
+              out.textContent = String(err);
+            }
+          });
+
+          manageSavedCardBtn?.addEventListener("click", async () => {
+            const out = byId("checkoutMeta");
+            out.textContent = "opening card management...";
+            try {
+              const portal = await apiJson("/billing/topups/payment-method-portal-session", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+              });
+              if (portal?.url) {
+                const tab = window.open(portal.url, "_blank");
+                if (tab && !tab.closed) {
+                  try { tab.focus(); } catch {}
+                  out.textContent = "Opened card management.";
+                } else {
+                  out.textContent = "Popup blocked. Allow popups and retry.";
+                }
+              } else {
+                out.textContent = "No card management URL returned.";
+              }
+            } catch (err) {
+              out.textContent = String(err);
+            }
+          });
+        }
+      } catch (err) {
+        showSignedOutPanel();
+        const panel = byId("authState");
+        if (panel) panel.insertAdjacentHTML("beforeend", `<p class=\"text-mono-sm c-bad\">${String(err)}</p>`);
+      }
+    </script>
+  <footer class="site-footer"><div><strong>OpenVegas. Agentic Entertainment.</strong><p>A hand. Then back to the build.</p></div><a class="partnership-cta" href="/ui/data-partnerships">Data Partnerships <span aria-hidden="true">&nbsp;↗</span></a><div class="site-footer-links"><a href="/ui/how-to-play">How to Play</a><a href="/ui/arena">Arena · Soon</a><a href="/ui/agents">Agents</a><a href="/ui/faq">FAQ</a><a href="/ui/security">Security</a><a href="/ui/contact">Contact</a></div></footer>
+</body>
+</html>

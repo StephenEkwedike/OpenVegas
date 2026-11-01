@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenVegas | Monthly Subscription</title>
+    <link rel="icon" type="image/svg+xml" href="/ui/assets/brand/favicon.svg" />
+    <link rel="icon" type="image/jpeg" href="/ui/assets/brand/favicon.jpg" />
+    <link rel="apple-touch-icon" href="/ui/assets/brand/openvegas-logo-circle.jpg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@300;400;500;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/ui/assets/theme.css?v=20260330" />
+    <link rel="stylesheet" href="/ui/assets/layout.css?v=20260330" />
+    <script defer src="/ui/assets/theme-fallback.js?v=20260330"></script>
+    <style>
+      .checkout-link { word-break: break-all; color: var(--aqua); }
+      .field-stack { display:flex; flex-direction:column; gap:6px; margin:.8rem 0; }
+      .field-stack input {
+        border: 1px solid var(--line);
+        background: var(--input-bg);
+        color: var(--input-text);
+        border-radius: 8px;
+        padding: .6rem .7rem;
+        font-family: var(--font-mono);
+      }
+      .field-hint { color: var(--grey-light); font-size: 11px; font-family: var(--font-mono); }
+      .qr-wrap { margin-top: 10px; }
+      .qr {
+        width: min(300px, 80vw);
+        background: var(--qr-bg);
+        padding: 8px;
+        border-radius: 8px;
+        border: 1px solid var(--line);
+      }
+    </style>
+  <link rel="stylesheet" href="/ui/assets/home-clarity.css?v=20261028" />
+<link rel="stylesheet" href="/ui/assets/site-clarity.css?v=20261028" />
+</head>
+  <body class="site-clarity">
+    <nav class="top-nav">
+      <a href="/ui" class="brand-link text-mono-sm">[ OPENVEGAS ]</a>
+      <div style="display:flex; align-items:center; gap:14px;">
+        <div id="siteNav" class="nav-links"><a href="/ui/how-it-works">How it works</a><a href="/ui/how-to-play">How to Play</a><a href="/ui/arena">Arena <span class="nav-soon">Soon</span></a><a href="/ui/pricing">Pricing</a><a href="/ui/emotes">Emotes</a><a href="/ui/balance">Balance</a></div>
+        <div id="founderLinks" class="founder-links"></div>
+        <button type="button" id="ov-theme-toggle" class="theme-toggle" role="switch" aria-label="Toggle light and dark mode" aria-checked="false"><span class="theme-toggle__icon" aria-hidden="true">☀</span><span class="theme-toggle__rail" aria-hidden="true"><span class="theme-toggle__thumb"></span></span><span class="theme-toggle__icon" aria-hidden="true">☾</span></button>
+      </div>
+    </nav>
+
+    <main class="container page-shell">
+      <header class="page-hero">
+        <div>
+          <div class="text-mono-xs" style="margin-bottom:1rem">SUBSCRIPTION</div>
+          <h1 class="page-title">Create personal monthly auto top-up.</h1>
+        </div>
+        <p class="text-mono-sm page-lead">Set a monthly recurring amount for your own account. Minimum amount is $10.00.</p>
+      </header>
+
+      <section id="authState" class="auth-state" hidden>
+        <div class="text-mono-xs">AUTH REQUIRED</div>
+        <h2 class="card-title">Sign in to manage subscription</h2>
+        <p class="text-mono-sm">This page is available after authentication.</p>
+        <div class="cta-row"><a id="loginLink" class="btn btn-primary" href="/ui/login?next=%2Fui%2Fsubscription">Sign in/up</a></div>
+      </section>
+
+      <section id="authContent" hidden>
+        <article class="card">
+          <div class="text-mono-xs">CREATE / MANAGE</div>
+          <h2 class="card-title">Monthly subscription controls</h2>
+          <div class="field-stack">
+            <label class="text-mono-xs" for="monthlyAmount">Monthly amount (USD)</label>
+            <input id="monthlyAmount" type="number" min="10" max="500" step="0.01" value="20.00" />
+            <div class="field-hint">Minimum $10.00. This creates a recurring monthly Stripe subscription for your own account.</div>
+          </div>
+          <div class="cta-row">
+            <button id="createUserSub" class="btn btn-primary" type="button">Start monthly subscription</button>
+            <button id="manageUserSub" class="btn" type="button">Manage billing</button>
+            <button id="cancelUserSub" class="btn" type="button">Cancel subscription</button>
+          </div>
+          <p id="userSubMeta" class="text-mono-sm" style="margin-top:.8rem;">Ready.</p>
+          <a id="userSubUrl" class="checkout-link text-mono-sm" href="#" target="_blank" rel="noreferrer" hidden></a>
+          <div id="userSubQrWrap" class="qr-wrap" hidden>
+            <div class="text-mono-xs" style="margin: 8px 0;">Scan QR to subscribe</div>
+            <img id="userSubQrImage" class="qr" alt="Subscription checkout QR" hidden />
+          </div>
+          <div class="cta-row" style="margin-top:10px;">
+            <a class="btn" href="/ui/topup-checkout">Go to top-up</a>
+            <a class="btn" href="/ui/balance">Open balance</a>
+          </div>
+        </article>
+      </section>
+    </main>
+
+    <script type="module">
+      import { renderTopNav, renderFounderLinks, installAssetGuard, byId } from "/ui/assets/site.js?v=20261028";
+      import { apiFetch, apiJson, authProbe, getLoginHref, showSignedOutPanel, showAuthedContent } from "/ui/assets/page-auth.js?v=20260330";
+
+      installAssetGuard();
+      renderTopNav("siteNav");
+      renderFounderLinks("founderLinks");
+
+      const loginLink = byId("loginLink");
+      if (loginLink) loginLink.href = getLoginHref("/ui/subscription");
+
+      try {
+        const probe = await authProbe();
+        if (!probe.ok) {
+          showSignedOutPanel();
+        } else {
+          showAuthedContent();
+          const MIN_BILLING_USD = 10;
+
+          byId("createUserSub")?.addEventListener("click", async () => {
+            const out = byId("userSubMeta");
+            const link = byId("userSubUrl");
+            const qrWrap = byId("userSubQrWrap");
+            const qrImage = byId("userSubQrImage");
+            const amountInput = byId("monthlyAmount");
+            const rawAmount = String(amountInput?.value || "20.00").trim();
+            const checkoutTab = window.open("/ui/checkout-pending", "_blank");
+            if (checkoutTab && !checkoutTab.closed) {
+              try { checkoutTab.focus(); } catch {}
+            }
+            out.textContent = "creating...";
+            link.hidden = true;
+            if (qrWrap) qrWrap.hidden = true;
+            if (qrImage) qrImage.hidden = true;
+            try {
+              const parsed = Number(rawAmount);
+              if (!Number.isFinite(parsed) || parsed < MIN_BILLING_USD) {
+                throw new Error(`Minimum subscription amount is $${MIN_BILLING_USD.toFixed(2)}.`);
+              }
+              const data = await apiJson("/billing/subscription/checkout", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ monthly_amount_usd: parsed.toFixed(2) }),
+              });
+              out.textContent = `checkout_session_id=${data.checkout_session_id}`;
+              if (data.checkout_url) {
+                link.hidden = false;
+                link.href = data.checkout_url;
+                link.textContent = data.checkout_url;
+                if (checkoutTab && !checkoutTab.closed) {
+                  try {
+                    checkoutTab.location.replace(data.checkout_url);
+                    checkoutTab.focus();
+                  } catch {
+                    checkoutTab.location.href = data.checkout_url;
+                  }
+                } else {
+                  out.textContent += " · popup blocked; use checkout link below";
+                }
+                if (qrImage && qrWrap) {
+                  const qrRes = await apiFetch("/billing/qr.svg", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ value: data.checkout_url }),
+                  });
+                  if (qrRes.ok) {
+                    const svg = await qrRes.text();
+                    qrImage.hidden = false;
+                    qrWrap.hidden = false;
+                    qrImage.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+                    if (svg.includes("QR unavailable in this runtime")) {
+                      out.textContent += " · QR fallback rendered (see reason in image)";
+                    }
+                  } else {
+                    const detail = await qrRes.text().catch(() => "");
+                    out.textContent += ` · QR fetch failed (${qrRes.status})${detail ? `: ${detail.slice(0, 120)}` : ""}`;
+                  }
+                }
+              }
+            } catch (err) {
+              if (checkoutTab && !checkoutTab.closed) {
+                try { checkoutTab.close(); } catch {}
+              }
+              out.textContent = String(err);
+            }
+          });
+
+          byId("manageUserSub")?.addEventListener("click", async () => {
+            const out = byId("userSubMeta");
+            out.textContent = "opening billing portal...";
+            try {
+              const data = await apiJson("/billing/subscription/portal-session", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ flow_type: "payment_method_update" }),
+              });
+              if (data.url) {
+                const tab = window.open(data.url, "_blank");
+                if (tab && !tab.closed) {
+                  try { tab.focus(); } catch {}
+                  out.textContent = "Opened billing portal.";
+                } else {
+                  out.textContent = "Popup blocked. Use the returned portal URL.";
+                }
+              } else {
+                out.textContent = "No portal URL returned.";
+              }
+            } catch (err) {
+              out.textContent = String(err);
+            }
+          });
+
+          byId("cancelUserSub")?.addEventListener("click", async () => {
+            const out = byId("userSubMeta");
+            out.textContent = "opening cancel flow...";
+            try {
+              const status = await apiJson("/billing/subscription/status", { method: "GET" });
+              if (!status?.stripe_subscription_id) {
+                out.textContent = "No active subscription to cancel.";
+                return;
+              }
+              const data = await apiJson("/billing/subscription/portal-session", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ flow_type: "subscription_cancel" }),
+              });
+              if (data.url) {
+                const tab = window.open(data.url, "_blank");
+                if (tab && !tab.closed) {
+                  try { tab.focus(); } catch {}
+                  out.textContent = "Opened cancel subscription flow.";
+                } else {
+                  out.textContent = "Popup blocked. Use the returned portal URL.";
+                }
+              } else {
+                out.textContent = "No portal URL returned.";
+              }
+            } catch (err) {
+              out.textContent = String(err);
+            }
+          });
+        }
+      } catch (err) {
+        showSignedOutPanel();
+        const panel = byId("authState");
+        if (panel) panel.insertAdjacentHTML("beforeend", `<p class=\"text-mono-sm c-bad\">${String(err)}</p>`);
+      }
+    </script>
+  <footer class="site-footer"><div><strong>OpenVegas. Agentic Entertainment.</strong><p>A hand. Then back to the build.</p></div><a class="partnership-cta" href="/ui/data-partnerships">Data Partnerships <span aria-hidden="true">&nbsp;↗</span></a><div class="site-footer-links"><a href="/ui/how-to-play">How to Play</a><a href="/ui/arena">Arena · Soon</a><a href="/ui/agents">Agents</a><a href="/ui/faq">FAQ</a><a href="/ui/security">Security</a><a href="/ui/contact">Contact</a></div></footer>
+</body>
+</html>

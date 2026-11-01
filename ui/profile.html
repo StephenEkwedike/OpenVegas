@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenVegas | Profile</title>
+    <link rel="icon" type="image/svg+xml" href="/ui/assets/brand/favicon.svg" />
+    <link rel="icon" type="image/jpeg" href="/ui/assets/brand/favicon.jpg" />
+    <link rel="apple-touch-icon" href="/ui/assets/brand/openvegas-logo-circle.jpg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@300;400;500;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/ui/assets/theme.css?v=20260330" />
+    <link rel="stylesheet" href="/ui/assets/layout.css?v=20260330" />
+    <script defer src="/ui/assets/theme-fallback.js?v=20260330"></script>
+    <style>
+      .prefs-grid { display:grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 14px; }
+      .field-stack { display:flex; flex-direction:column; gap:8px; margin-top:8px; }
+      .field-label { font-size: 0.9rem; color: var(--muted); letter-spacing: 0.01em; }
+      .field-stack select {
+        border: 1px solid var(--line);
+        background: var(--input-bg);
+        color: var(--input-text);
+        border-radius: 8px;
+        padding: .6rem .7rem;
+        font-family: var(--font-mono);
+      }
+      .preview-row { display:flex; gap:12px; flex-wrap:wrap; }
+      @media (max-width: 920px){ .prefs-grid { grid-template-columns: 1fr; } }
+    </style>
+  <link rel="stylesheet" href="/ui/assets/home-clarity.css?v=20261028" />
+<link rel="stylesheet" href="/ui/assets/site-clarity.css?v=20261028" />
+</head>
+  <body class="site-clarity">
+    <nav class="top-nav">
+      <a href="/ui" class="brand-link text-mono-sm">[ OPENVEGAS ]</a>
+      <div style="display:flex; align-items:center; gap:14px;">
+        <div id="siteNav" class="nav-links"><a href="/ui/how-it-works">How it works</a><a href="/ui/how-to-play">How to Play</a><a href="/ui/arena">Arena <span class="nav-soon">Soon</span></a><a href="/ui/pricing">Pricing</a><a href="/ui/emotes">Emotes</a><a href="/ui/balance">Balance</a></div>
+        <div id="founderLinks" class="founder-links"></div>
+        <button type="button" id="ov-theme-toggle" class="theme-toggle" role="switch" aria-label="Toggle light and dark mode" aria-checked="false"><span class="theme-toggle__icon" aria-hidden="true">☀</span><span class="theme-toggle__rail" aria-hidden="true"><span class="theme-toggle__thumb"></span></span><span class="theme-toggle__icon" aria-hidden="true">☾</span></button>
+      </div>
+    </nav>
+
+    <main class="container page-shell">
+      <header class="page-hero">
+        <div>
+          <div class="text-mono-xs" style="margin-bottom:1rem">PROFILE</div>
+          <h1 class="page-title">Choose your avatar and dealer skin.</h1>
+        </div>
+        <!-- <p class="text-mono-sm page-lead">Preferences persist at account level and apply to web + CLI surfaces.</p> -->
+      </header>
+
+      <section id="authState" class="auth-state" hidden>
+        <div class="text-mono-xs">AUTH REQUIRED</div>
+        <h2 class="card-title">Sign in to edit profile preferences</h2>
+        <p class="text-mono-sm">This page is available after authentication.</p>
+        <div class="cta-row"><a id="loginLink" class="btn btn-primary" href="/ui/login?next=%2Fui%2Fprofile">Sign in/up</a></div>
+      </section>
+
+      <section id="authContent" hidden>
+        <article class="card">
+          <div class="text-mono-xs">CUSTOMIZE</div>
+          <h2 class="card-title">Avatar preferences</h2>
+          <div class="prefs-grid">
+            <div>
+              <div class="field-stack">
+                <label class="field-label" for="avatarId">Your Avatar</label>
+                <select id="avatarId"></select>
+              </div>
+              <div class="field-stack">
+                <label class="field-label" for="avatarPalette">Color Theme</label>
+                <select id="avatarPalette"></select>
+              </div>
+              <div class="field-stack">
+                <label class="field-label" for="dealerSkin">Your Dealer</label>
+                <select id="dealerSkin"></select>
+              </div>
+              <div class="cta-row" style="margin-top:12px;">
+                <button id="savePrefs" class="btn btn-primary" type="button">Save Preferences</button>
+                <a class="btn" href="/ui/balance">Back to Balance</a>
+              </div>
+              <p id="prefMeta" class="text-mono-sm" style="margin-top:10px;">Loading...</p>
+            </div>
+            <div>
+              <div class="text-mono-xs" style="margin-bottom:8px;">PREFERENCES</div>
+              <p class="card-copy">Changes apply to your account and are used by supported surfaces.</p>
+              <div class="text-mono-xs" style="margin-top:1rem; margin-bottom:8px;">PAYMENT METHODS</div>
+              <p class="card-copy" id="cardMeta">Checking saved card status...</p>
+              <div class="cta-row" style="margin-top:10px;">
+                <button id="manageCards" class="btn" type="button">Manage card details</button>
+              </div>
+            </div>
+          </div>
+        </article>
+      </section>
+    </main>
+
+    <script type="module">
+      import { renderTopNav, renderFounderLinks, installAssetGuard, byId } from "/ui/assets/site.js?v=20261028";
+      import { apiJson, authProbe, getLoginHref, showSignedOutPanel, showAuthedContent } from "/ui/assets/page-auth.js?v=20260330";
+      import { loadAvatarManifest } from "/ui/assets/avatar-sprite-loader.js";
+
+      installAssetGuard();
+      renderTopNav("siteNav");
+      renderFounderLinks("founderLinks");
+
+      const loginLink = byId("loginLink");
+      if (loginLink) loginLink.href = getLoginHref("/ui/profile");
+
+      const avatarIdNode = byId("avatarId");
+      const avatarPaletteNode = byId("avatarPalette");
+      const dealerSkinNode = byId("dealerSkin");
+      const prefMeta = byId("prefMeta");
+      const cardMeta = byId("cardMeta");
+      const FALLBACK_DISPLAY = {
+        ov_user_01: "Classic Player",
+        ov_user_02: "High Roller",
+        default: "House Standard",
+        warm: "Golden Hour",
+        cool: "Midnight Blue",
+        neon: "Neon Pulse",
+        mono: "Monochrome",
+        ov_dealer_female_tux_v1: "Victoria - Classic Tuxedo",
+        ov_dealer_female_tux_blonde_v1: "Victoria - Blonde",
+      };
+
+      function buildNameMap(manifest, key) {
+        const map = new Map();
+        const rows = Array.isArray(manifest?.[key]) ? manifest[key] : [];
+        rows.forEach((row) => {
+          const id = String(row?.id || "").trim();
+          if (!id) return;
+          const name = String(row?.name || "").trim();
+          map.set(id, name || FALLBACK_DISPLAY[id] || id);
+        });
+        return map;
+      }
+
+      function setSelectOptions(select, values, selected, labelFor) {
+        if (!select) return;
+        select.innerHTML = "";
+        (values || []).forEach((token) => {
+          const id = String(token || "");
+          const o = document.createElement("option");
+          o.value = id;
+          o.textContent = String(labelFor?.(id) || FALLBACK_DISPLAY[id] || id);
+          if (id === String(selected || "")) o.selected = true;
+          select.appendChild(o);
+        });
+      }
+
+      async function init() {
+        const manifest = await loadAvatarManifest();
+        const prefs = await apiJson("/ui/profile/preferences", { method: "GET" });
+        let savedCardStatus = {};
+        try {
+          savedCardStatus = await apiJson("/billing/topups/saved-payment-method", { method: "GET" });
+        } catch {
+          savedCardStatus = {};
+        }
+
+        const users = Array.isArray(manifest?.users) ? manifest.users : [];
+        const dealers = Array.isArray(manifest?.dealer) ? manifest.dealer : [];
+        const avatarNameMap = buildNameMap(manifest, "users");
+        const dealerNameMap = buildNameMap(manifest, "dealer");
+        const paletteNameMap = buildNameMap(manifest, "palettes");
+        const selectedAvatar = String(prefs?.avatar_id || "ov_user_01");
+        const selectedPalette = String(prefs?.avatar_palette || "default");
+        const selectedDealer = String(prefs?.dealer_skin_id || "ov_dealer_female_tux_v1");
+
+        const userIds = users.map((u) => String(u?.id || "")).filter(Boolean);
+        const dealerIds = dealers.map((d) => String(d?.id || "")).filter(Boolean);
+
+        const avatarLabel = (id) => avatarNameMap.get(id) || FALLBACK_DISPLAY[id] || id;
+        const dealerLabel = (id) => dealerNameMap.get(id) || FALLBACK_DISPLAY[id] || id;
+        const paletteLabel = (id) => paletteNameMap.get(id) || FALLBACK_DISPLAY[id] || id;
+
+        setSelectOptions(avatarIdNode, userIds.length ? userIds : [selectedAvatar], selectedAvatar, avatarLabel);
+        setSelectOptions(dealerSkinNode, dealerIds.length ? dealerIds : [selectedDealer], selectedDealer, dealerLabel);
+
+        function palettesForAvatar(avatarId) {
+          const row = users.find((u) => String(u?.id || "") === String(avatarId || ""));
+          const palettes = Array.isArray(row?.palettes) ? row.palettes.map(String).filter(Boolean) : ["default"];
+          return palettes.length ? palettes : ["default"];
+        }
+
+        const initialPalettes = palettesForAvatar(selectedAvatar);
+        setSelectOptions(avatarPaletteNode, initialPalettes, selectedPalette, paletteLabel);
+
+        avatarIdNode?.addEventListener("change", () => {
+          const palettes = palettesForAvatar(String(avatarIdNode.value || ""));
+          const keep = palettes.includes(String(avatarPaletteNode.value || "")) ? avatarPaletteNode.value : palettes[0];
+          setSelectOptions(avatarPaletteNode, palettes, keep, paletteLabel);
+        });
+
+        byId("savePrefs")?.addEventListener("click", async () => {
+          prefMeta.textContent = "Saving...";
+          try {
+            const body = {
+              avatar_id: String(avatarIdNode?.value || "").trim(),
+              avatar_palette: String(avatarPaletteNode?.value || "").trim(),
+              dealer_skin_id: String(dealerSkinNode?.value || "").trim(),
+            };
+            const updated = await apiJson("/ui/profile/preferences", {
+              method: "PATCH",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(body),
+            });
+            prefMeta.textContent = `Saved avatar=${updated.avatar_id} palette=${updated.avatar_palette} dealer=${updated.dealer_skin_id}`;
+            window.location.reload();
+          } catch (err) {
+            prefMeta.textContent = String(err);
+          }
+        });
+
+        byId("manageCards")?.addEventListener("click", async () => {
+          if (cardMeta) cardMeta.textContent = "Opening Stripe card management...";
+          try {
+            const data = await apiJson("/billing/topups/payment-method-portal-session", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+            });
+            if (data?.url) {
+              const tab = window.open(data.url, "_blank");
+              if (tab && !tab.closed) {
+                try { tab.focus(); } catch {}
+                if (cardMeta) cardMeta.textContent = "Opened Stripe card management.";
+              } else if (cardMeta) {
+                cardMeta.textContent = "Popup blocked. Allow popups and retry.";
+              }
+            } else if (cardMeta) {
+              cardMeta.textContent = "No portal URL returned.";
+            }
+          } catch (err) {
+            if (cardMeta) cardMeta.textContent = String(err);
+          }
+        });
+
+        if (cardMeta) {
+          if (savedCardStatus?.available) {
+            const brand = String(savedCardStatus.brand || "card").toUpperCase();
+            const last4 = String(savedCardStatus.last4 || "****");
+            cardMeta.textContent = `Saved card on file: ${brand} ••••${last4}`;
+          } else {
+            cardMeta.textContent = "No saved card detected yet. Use top-up checkout once to save a card.";
+          }
+        }
+
+        prefMeta.textContent = "Ready.";
+      }
+
+      try {
+        const probe = await authProbe();
+        if (!probe.ok) {
+          showSignedOutPanel();
+        } else {
+          showAuthedContent();
+          await init();
+        }
+      } catch (err) {
+        showSignedOutPanel();
+        const panel = byId("authState");
+        if (panel) panel.insertAdjacentHTML("beforeend", `<p class=\"text-mono-sm c-bad\">${String(err)}</p>`);
+      }
+    </script>
+  <footer class="site-footer"><div><strong>OpenVegas. Agentic Entertainment.</strong><p>A hand. Then back to the build.</p></div><a class="partnership-cta" href="/ui/data-partnerships">Data Partnerships <span aria-hidden="true">&nbsp;↗</span></a><div class="site-footer-links"><a href="/ui/how-to-play">How to Play</a><a href="/ui/arena">Arena · Soon</a><a href="/ui/agents">Agents</a><a href="/ui/faq">FAQ</a><a href="/ui/security">Security</a><a href="/ui/contact">Contact</a></div></footer>
+</body>
+</html>

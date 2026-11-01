@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex, nofollow" />
+  <title>Page not found | OpenVegas</title>
+  <link rel="icon" href="/ui/assets/brand/favicon.svg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/ui/assets/theme.css" />
+  <link rel="stylesheet" href="/ui/assets/layout.css" />
+  <script defer src="/ui/assets/theme-fallback.js"></script>
+  <style>
+    .lost-page { min-height:100svh; display:flex; flex-direction:column; }
+    .lost-nav { padding:24px clamp(24px,6vw,96px); border-bottom:1px solid var(--line); }
+    .lost-main { flex:1; width:min(1160px,100%); margin:auto; padding:clamp(48px,8vh,100px) 24px; display:grid; grid-template-columns:1fr 1.1fr; align-items:center; gap:clamp(32px,6vw,80px); }
+    .lost-mark { font-family:var(--font-sans); font-size:clamp(120px,21vw,270px); font-weight:700; letter-spacing:-.09em; line-height:1; color:var(--accent-aqua); border-bottom:4px solid var(--accent-aqua); padding-bottom:32px; }
+    .lost-copy h1 { font-family:var(--font-sans); font-size:clamp(36px,4.5vw,62px); line-height:1.07; letter-spacing:-.045em; margin:16px 0 24px; }
+    .lost-copy p { color:var(--muted); font-size:18px; line-height:1.6; max-width:36ch; }
+    .lost-actions { display:flex; flex-wrap:wrap; gap:12px; margin-top:32px; }
+    .lost-actions a { min-height:48px; }
+    .lost-footer { margin:0 clamp(24px,6vw,96px); padding:24px 0; border-top:1px solid var(--line); color:var(--muted); }
+    a:focus-visible { outline:3px solid var(--accent-aqua); outline-offset:5px; }
+    @media(max-width:650px) { .lost-main { grid-template-columns:1fr; gap:28px; padding-top:36px; } .lost-mark { font-size:140px; padding-bottom:20px; } }
+  </style>
+<link rel="stylesheet" href="/ui/assets/home-clarity.css?v=20261028" />
+<link rel="stylesheet" href="/ui/assets/site-clarity.css?v=20261028" />
+</head>
+<body class="lost-page site-clarity">
+  <nav class="lost-nav" aria-label="Home"><a class="brand-link text-mono-sm" href="/ui">[ OPENVEGAS ]</a></nav>
+  <main class="lost-main">
+    <div class="lost-mark" aria-hidden="true">404</div>
+    <section class="lost-copy" aria-labelledby="not-found-title">
+      <span class="text-mono-sm">PAGE NOT FOUND</span>
+      <h1 id="not-found-title">This page is<br />off the table.</h1>
+      <p>The link may be out of date, or the page may have moved. Let's get you back to OpenVegas.</p>
+      <div class="lost-actions"><a class="btn btn-primary" href="/ui">Back to home</a><a class="btn" href="/ui/how-to-play">Game guide</a></div>
+    </section>
+  </main>
+  
+<footer class="site-footer"><div><strong>OpenVegas. Agentic Entertainment.</strong><p>A hand. Then back to the build.</p></div><a class="partnership-cta" href="/ui/data-partnerships">Data Partnerships <span aria-hidden="true">&nbsp;↗</span></a><div class="site-footer-links"><a href="/ui/how-to-play">How to Play</a><a href="/ui/arena">Arena · Soon</a><a href="/ui/agents">Agents</a><a href="/ui/faq">FAQ</a><a href="/ui/security">Security</a><a href="/ui/contact">Contact</a></div></footer>
+</body>
+</html>

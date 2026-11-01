@@ -1,0 +1,107 @@
+.slide-root {
+  min-height: 100vh;
+  padding: 2rem;
+  background:
+    radial-gradient(circle at 88% 5%, var(--bg-glow-aqua), transparent 32%),
+    radial-gradient(circle at 12% 90%, var(--bg-glow-lime), transparent 32%),
+    var(--bg-main);
+  color: var(--text-main);
+  display: grid;
+  grid-template-rows: auto auto 1fr auto;
+  gap: 1rem;
+}
+
+.slide-kicker {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--grey-mid);
+}
+
+.slide-title {
+  font-size: clamp(2.2rem, 6vw, 5.2rem);
+  line-height: 0.94;
+  letter-spacing: -0.03em;
+  font-weight: 400;
+  max-width: 12ch;
+}
+
+.slide-sub {
+  max-width: 74ch;
+  color: var(--grey-light);
+  line-height: 1.65;
+}
+
+.slide-body {
+  border: 1px solid var(--line);
+  background: var(--card-bg);
+  padding: 1.2rem;
+  display: grid;
+  align-content: start;
+  gap: 0.75rem;
+}
+
+.slide-body ul {
+  padding-left: 1.1rem;
+  line-height: 1.55;
+  color: var(--text-main);
+}
+
+.placeholder-list {
+  border: 1px dashed var(--grey-mid);
+  padding: 0.8rem;
+}
+
+.placeholder-list > div {
+  padding: 0.45rem 0;
+  border-bottom: 1px solid var(--line);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--grey-light);
+}
+
+.placeholder-list > div:last-child {
+  border-bottom: none;
+}
+
+.citation {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--grey-light);
+}
+
+.deck-footer {
+  margin-top: 0.3rem;
+  padding-top: 0.85rem;
+  border-top: 1px solid var(--line);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+
+.deck-footer a {
+  text-decoration: none;
+  color: var(--aqua);
+}
+
+.deck-footer a:hover {
+  color: var(--text-main);
+}
+
+@media (max-width: 800px) {
+  .slide-root {
+    padding: 1rem;
+  }
+
+  .slide-title {
+    max-width: none;
+  }
+}

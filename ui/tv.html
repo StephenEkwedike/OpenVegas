@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" /><meta name="viewport" content="width=device-width,initial-scale=1" />
+  <meta name="referrer" content="no-referrer" />
+  <title>OpenVegas TV | Agentic Entertainment</title>
+  <link rel="icon" href="/ui/assets/brand/favicon.svg" />
+  <link rel="stylesheet" href="/ui/assets/theme.css" />
+  <link rel="stylesheet" href="/ui/assets/layout.css" />
+  <link rel="stylesheet" href="/ui/assets/tv.css" />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet" />
+  <script defer src="/ui/assets/theme-fallback.js"></script>
+<link rel="stylesheet" href="/ui/assets/home-clarity.css?v=20261028" />
+<link rel="stylesheet" href="/ui/assets/site-clarity.css?v=20261028" />
+</head>
+<body class="site-clarity">
+  <nav class="top-nav" aria-label="Main navigation">
+    <a class="brand-link" href="/ui">[ OPENVEGAS ]</a>
+    <div id="siteNav" class="nav-links"><a href="/ui/how-it-works">How it works</a><a href="/ui/how-to-play">How to Play</a><a href="/ui/arena">Arena <span class="nav-soon">Soon</span></a><a href="/ui/pricing">Pricing</a><a href="/ui/emotes">Emotes</a><a href="/ui/balance">Balance</a></div>
+  </nav>
+  <main class="tv-shell">
+    <header class="tv-heading"><div><p class="eyebrow">AGENTIC ENTERTAINMENT / OPENVEGAS TV</p><h1>Stay tuned.<br /><span>To somewhere else.</span></h1></div><p>A little television. A very strange universe.<br />Original shorts, right in your terminal.</p></header>
+    <p id="status" role="status" class="notice">Connecting to the local TV preview...</p>
+    <section class="tv-console" aria-label="Television preview">
+      <aside class="channel-guide"><div class="section-label">THE DIAL <span>12 SLOTS</span></div><div id="channels" role="group" aria-label="Choose a channel"></div></aside>
+      <div class="receiver" id="receiver">
+        <div class="receiver-bar"><span id="station">OPENVEGAS / TV</span><span class="pilot-badge">PRIVATE STORYBOARD</span></div>
+        <div class="picture"><canvas id="screen" width="960" height="540" aria-label="Original captioned TV animatic"></canvas><div id="off-air" hidden><strong>Off the air. For now.</strong><p>This slot is open for original shows.<br />No stream and no charge.</p><a id="studio-link" href="#studio">Pitch your show</a></div></div>
+        <div class="captions" id="captions" aria-live="off">Press Play to watch. Captions are always on.</div>
+        <div class="transport"><button id="play" type="button" disabled>Play</button><button id="restart" type="button" disabled>Restart</button><output id="clock">00:00 / 00:00</output><button id="expand" type="button" aria-expanded="false">Expand</button></div>
+        <div class="episode-copy"><p class="eyebrow" id="episode-kind">ORIGINAL PILOT</p><h2 id="episode-title">A different kind of channel surfing.</h2><p id="episode-description">A local storyboard preview. Finished shows and paid streaming are not available yet.</p><p id="scene-description" class="subtle"></p></div>
+      </div>
+    </section>
+    <section class="tv-onramp"><div><p class="eyebrow">THE BEST SEAT IS YOUR TERMINAL</p><h2>Small screen.<br />Big weird.</h2></div><div class="command-box"><code>ov tv watch</code><p>Click Expand / Contract, pick a channel, pause or quit. The player owns its own terminal screen; your shell returns when you exit.</p><p class="subtle">Local checkout: <code>./dev/openvegas tv watch</code>. This is not an overlay inside Claude or Codex.</p></div></section>
+    <section class="pricing-note"><p class="eyebrow">ONE WALLET. YOUR CHOICE.</p><h2>$V by the hour. Or a monthly pass.</h2><p>Approved pricing: US$0.75/hour pay-as-you-go or US$20/month for unlimited viewing across all channels. Billing and purchasing are not enabled; launch and renewal terms remain pending. This preview never spends your $V.</p></section>
+    <section class="tv-access" aria-labelledby="tv-access-heading">
+      <h2 id="tv-access-heading">Your viewing access</h2>
+      <p>PAYG uses the equivalent $V from your existing wallet at the server's current conversion rate. A monthly TV pass is a separate US$20 recurring subscription, not a wallet top-up. Web and terminal use the same account entitlement.</p>
+      <p id="tv-access-status" role="status">Final paid shows and verified delivery are not available. The animatic is free; opening this page never charges you.</p>
+      <button id="tv-access-refresh" type="button">Check TV access</button>
+      <p id="tv-access-price" class="subtle">PAYG never falls back to your saved card. Unused viewing reservations are released; there is no automatic PAYG overage on a pass.</p>
+      <label class="check"><input id="tv-monthly-consent" type="checkbox" />I choose US$20/month unlimited TV, recurring until canceled. Continue to Stripe to explicitly confirm payment using my saved payment method or another eligible card.</label>
+      <button id="tv-monthly-checkout" type="button" disabled>Review monthly TV checkout</button>
+      <button id="tv-monthly-manage" type="button" disabled>Review TV cancellation</button>
+      <p class="subtle">A checkout return URL is not proof of payment. Access waits for a verified paid invoice. Existing wallet-funding subscriptions do not grant TV access.</p>
+    </section>
+    <section id="studio" class="studio-grid" tabindex="-1">
+      <div><p class="eyebrow">OPENVEGAS STUDIO / CREATOR DESK</p><h2>Your universe.<br />Our dial.</h2><p>Pitch an original show, build a timed animatic and check that it reads on the smallest screen. Export a draft before submitting. A shortlist is not publication or a payout promise.</p>
+        <details open><summary>Delivery guidelines</summary><ul><li>16:9 master, 1920 x 1080; 24 or 30 fps for final media.</li><li>Animatics use the bounded 320 x 180 vector canvas. JSON only, no executable code or remote files.</li><li>Keep important action inside a 10% safe area. Test at 60 x 18 terminal cells and expanded view.</li><li>Short captions below the frame; readable without sound. No flashing cuts.</li><li>Original or licensed artwork, music and voices. Clearly label simulated sports and synthetic footage.</li><li>Pitch and review first; final MP4 ingestion and distribution are not enabled in this prototype.</li></ul></details>
+        <button id="template" type="button" disabled>Download animatic starter</button>
+        <label class="file-label" for="storyboard">Preview your animatic JSON<input id="storyboard" type="file" accept="application/json,.json" /></label><button id="clear-storyboard" type="button" disabled>Remove animatic</button><p id="validation" class="subtle" role="status">Files are validated locally by this backend; never auto-published.</p>
+      </div>
+      <form id="pitch-form" class="pitch-form"><h3>Pitch a show</h3><label>Show title<input id="pitch-title" required minlength="3" maxlength="100" placeholder="The Bureau of Impossible Channels" /></label><label>Channel<select id="pitch-channel" required></select></label><label>The premise<textarea id="pitch-text" required minlength="30" maxlength="4000" rows="5" placeholder="The rule of your world, who lives there, and what goes wrong..."></textarea></label><label class="check"><input id="rights" type="checkbox" required />I own or have permission to use the submitted material.</label><p id="intake-status" class="subtle">Creator intake is not open. Exporting a draft does not submit it.</p><div class="form-actions"><button id="export-pitch" type="submit">Export pitch</button><button id="submit-pitch" type="button" disabled>Submit for review</button></div><p id="pitch-status" role="status"></p><a href="/ui/login?next=%2Fui%2Ftv">Sign in/up</a><button id="my-applications" type="button" disabled>My applications</button><ul id="application-list"></ul></form>
+    </section>
+    
+  </main>
+  <script type="module" src="/ui/assets/tv.js?v=20261029"></script>
+  <script type="module">
+    import {renderTopNav} from "/ui/assets/site.js?v=20261028";
+    renderTopNav();
+  </script>
+<footer class="site-footer"><div><strong>OpenVegas. Agentic Entertainment.</strong><p>A hand. Then back to the build.</p></div><a class="partnership-cta" href="/ui/data-partnerships">Data Partnerships <span aria-hidden="true">&nbsp;↗</span></a><div class="site-footer-links"><a href="/ui/how-to-play">How to Play</a><a href="/ui/arena">Arena · Soon</a><a href="/ui/agents">Agents</a><a href="/ui/faq">FAQ</a><a href="/ui/security">Security</a><a href="/ui/contact">Contact</a></div></footer>
+</body>
+</html>

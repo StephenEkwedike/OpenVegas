@@ -1,0 +1,112 @@
+name: Frozen emote candidates (never publish)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['codex/emotes-release-verification-*']
+
+permissions:
+  contents: read
+
+jobs:
+  frozen:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: linux-x64
+          - runner: ubuntu-24.04-arm
+            target: linux-arm64
+          - runner: macos-15
+            target: darwin-arm64
+          - runner: macos-15-intel
+            target: darwin-x64
+          - runner: windows-2022
+            target: win32-x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Linux audio runtime
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libportaudio2
+      - name: Export identical public-only source on every platform
+        run: |
+          git -c core.autocrlf=false checkout-index --force --all
+          python scripts/prepare_public_release.py --output dist/public-source
+      - name: Install candidate build dependencies
+        working-directory: dist/public-source
+        env:
+          OPENSSL_STATIC: '1'
+        run: python -m pip install --no-cache-dir -c requirements.lock ".[audio]" "pyinstaller==6.22.3"
+      - name: Record exact source inputs for cross-platform diagnosis
+        working-directory: dist/public-source
+        run: >-
+          python -c "import hashlib,json,pathlib; root=pathlib.Path('.'); files={p.as_posix():hashlib.sha256(p.read_bytes()).hexdigest() for p in root.rglob('*') if p.is_file() and (p.parts[0]=='openvegas' or p.as_posix() in ('pyproject.toml','requirements.lock','scripts/frozen_entry.py','scripts/build_cli_candidate.py')) and p.suffix in ('.py','.json','.png','.js','.md','.toml','.lock')}; pathlib.Path('../source-inputs.json').write_text(json.dumps(files,sort_keys=True))"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: source-inputs-${{ matrix.target }}
+          path: dist/source-inputs.json
+          retention-days: 7
+      - name: Reject dynamically linked macOS cryptography
+        if: runner.os == 'macOS'
+        run: |
+          python -c "import cryptography.hazmat.bindings._rust as r, subprocess; result=subprocess.check_output(['otool','-L',r.__file__],text=True); print(result); assert not any(name in result for name in ('libssl.', 'libcrypto.')), 'cryptography must statically link OpenSSL before freezing'"
+      - name: Build native executable and npm tarball, verify empty-home startup
+        working-directory: dist/public-source
+        run: python scripts/build_cli_candidate.py --output ../native-candidate
+      - name: Verify runner matches the requested target
+        env:
+          EXPECTED_TARGET: ${{ matrix.target }}
+        run: >-
+          python -c "import json,os; r=json.load(open('dist/native-candidate/candidate.json'));
+          assert r['os']+'-'+r['arch']==os.environ['EXPECTED_TARGET']"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: unsigned-native-candidate-${{ matrix.target }}
+          retention-days: 7
+          path: |
+            dist/native-candidate/candidate.json
+            dist/native-candidate/bin/*
+            dist/native-candidate/*.txt
+            dist/native-candidate/npm/*.tgz
+
+  assemble:
+    needs: frozen
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: unsigned-native-candidate-*
+          path: dist/candidates
+      - name: Verify the complete matrix and assemble (no publication)
+        run: >-
+          python scripts/assemble_npm_release.py
+          --candidate dist/candidates/unsigned-native-candidate-darwin-arm64
+          --candidate dist/candidates/unsigned-native-candidate-darwin-x64
+          --candidate dist/candidates/unsigned-native-candidate-linux-arm64
+          --candidate dist/candidates/unsigned-native-candidate-linux-x64
+          --candidate dist/candidates/unsigned-native-candidate-win32-x64
+          --output dist/npm-release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: unpublished-openvegas-ai-matrix
+          retention-days: 7
+          path: dist/npm-release

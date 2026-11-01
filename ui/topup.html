@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenVegas | Top-up</title>
+    <link rel="icon" type="image/svg+xml" href="/ui/assets/brand/favicon.svg" />
+    <link rel="icon" type="image/jpeg" href="/ui/assets/brand/favicon.jpg" />
+    <link rel="apple-touch-icon" href="/ui/assets/brand/openvegas-logo-circle.jpg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@300;400;500;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/ui/assets/theme.css?v=20260330" />
+    <link rel="stylesheet" href="/ui/assets/layout.css?v=20260330" />
+    <script defer src="/ui/assets/theme-fallback.js?v=20260330"></script>
+    <style>
+      .topup-root { padding: 2rem 0 3rem; }
+      .topup-header { padding: 1.4rem; margin-bottom: 1rem; }
+      .topup-grid { display: grid; grid-template-columns: 1fr 320px; gap: 1rem; }
+      .checkout-link { display:inline-block; margin-top:.5rem; word-break: break-all; color: var(--aqua); }
+      .qr { width: min(300px, 80vw); background: var(--qr-bg); padding:8px; border-radius:8px; }
+      .state-copy { margin-top: .7rem; color: var(--grey-light); font-family: var(--font-mono); font-size: 11px; line-height: 1.5; }
+      .failure { margin-top: .8rem; color: var(--bad); font-family: var(--font-mono); font-size: 11px; }
+      @media (max-width: 900px){ .topup-grid { grid-template-columns: 1fr; } }
+    </style>
+  <link rel="stylesheet" href="/ui/assets/home-clarity.css?v=20261028" />
+<link rel="stylesheet" href="/ui/assets/site-clarity.css?v=20261028" />
+</head>
+  <body class="site-clarity">
+    <nav class="top-nav">
+      <a href="/ui" class="brand-link text-mono-sm">[ OPENVEGAS ]</a>
+      <div style="display:flex; align-items:center; gap:14px;">
+        <div id="siteNav" class="nav-links"><a href="/ui/how-it-works">How it works</a><a href="/ui/how-to-play">How to Play</a><a href="/ui/arena">Arena <span class="nav-soon">Soon</span></a><a href="/ui/pricing">Pricing</a><a href="/ui/emotes">Emotes</a><a href="/ui/balance">Balance</a></div>
+        <div id="founderLinks" class="founder-links"></div>
+        <button type="button" id="ov-theme-toggle" class="theme-toggle" role="switch" aria-label="Toggle light and dark mode" aria-checked="false"><span class="theme-toggle__icon" aria-hidden="true">☀</span><span class="theme-toggle__rail" aria-hidden="true"><span class="theme-toggle__thumb"></span></span><span class="theme-toggle__icon" aria-hidden="true">☾</span></button>
+      </div>
+    </nav>
+
+    <main class="container topup-root">
+      <section class="card topup-header">
+        <div class="text-mono-xs">BILLING · TOP-UP</div>
+        <h1 class="card-title" style="margin-bottom:.3rem;">Checkout status</h1>
+        <p id="meta" class="text-mono-sm">Loading top-up details...</p>
+        <div id="statusPill" class="status-pill">unknown</div>
+      </section>
+
+      <section class="topup-grid">
+        <article class="card" style="padding:1rem; min-height:260px;">
+          <div class="text-mono-xs">COMPLETE FUNDING</div>
+          <p class="card-copy">Use this secure checkout to fund your OpenVegas balance.</p>
+          <a id="checkoutLink" class="checkout-link" href="#" target="_blank" rel="noreferrer" hidden></a>
+          <p id="stateCopy" class="state-copy">Payment created. Complete checkout to finish funding.</p>
+          <p id="failureReason" class="failure" hidden></p>
+          <div class="cta-row" style="margin-top:1rem;">
+            <a id="loginLink" class="btn btn-primary" href="/ui/login">Sign in/up</a>
+            <a id="balanceLink" class="btn" href="/ui/topup-checkout">Create another top-up</a>
+          </div>
+        </article>
+
+        <article class="card" style="padding:1rem; min-height:260px;">
+          <div class="text-mono-xs">SCAN TO CONTINUE</div>
+          <img id="qrImage" class="qr" alt="Top-up checkout QR" hidden />
+        </article>
+      </section>
+    </main>
+
+    <script type="module">
+      import { renderTopNav, renderFounderLinks, installAssetGuard } from "/ui/assets/site.js?v=20261028";
+      import { loadTopup } from "/ui/assets/topup.js";
+      installAssetGuard();
+      renderTopNav("siteNav");
+      renderFounderLinks("founderLinks");
+      loadTopup();
+    </script>
+  <footer class="site-footer"><div><strong>OpenVegas. Agentic Entertainment.</strong><p>A hand. Then back to the build.</p></div><a class="partnership-cta" href="/ui/data-partnerships">Data Partnerships <span aria-hidden="true">&nbsp;↗</span></a><div class="site-footer-links"><a href="/ui/how-to-play">How to Play</a><a href="/ui/arena">Arena · Soon</a><a href="/ui/agents">Agents</a><a href="/ui/faq">FAQ</a><a href="/ui/security">Security</a><a href="/ui/contact">Contact</a></div></footer>
+</body>
+</html>

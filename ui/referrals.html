@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="referrer" content="no-referrer" />
+  <meta name="robots" content="noindex" />
+  <title>Invite Friends | OpenVegas</title>
+  <link rel="icon" type="image/svg+xml" href="/ui/assets/brand/favicon.svg" />
+  <link rel="icon" type="image/jpeg" href="/ui/assets/brand/favicon.jpg" />
+  <link rel="apple-touch-icon" href="/ui/assets/brand/openvegas-logo-circle.jpg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@300;400;500;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/ui/assets/theme.css?v=20260330" />
+  <link rel="stylesheet" href="/ui/assets/layout.css?v=20260330" />
+  <link rel="stylesheet" href="/ui/assets/referrals.css?v=20261020" />
+  <script defer src="/ui/assets/theme-fallback.js?v=20260330"></script>
+<link rel="stylesheet" href="/ui/assets/home-clarity.css?v=20261028" />
+<link rel="stylesheet" href="/ui/assets/site-clarity.css?v=20261028" />
+</head>
+<body class="site-clarity">
+  <nav class="top-nav" aria-label="Main navigation">
+    <a href="/ui" class="brand-link text-mono-sm">[ OPENVEGAS ]</a>
+    <div id="siteNav" class="nav-links"><a href="/ui/how-it-works">How it works</a><a href="/ui/how-to-play">How to Play</a><a href="/ui/arena">Arena <span class="nav-soon">Soon</span></a><a href="/ui/pricing">Pricing</a><a href="/ui/emotes">Emotes</a><a href="/ui/balance">Balance</a></div>
+    <div id="founderLinks" class="founder-links"></div>
+  </nav>
+  <main class="container page-shell referral-page">
+    <header class="referral-hero">
+      <p class="text-mono-sm c-aqua">BETTER WITH COMPANY</p>
+      <h1>Five friends.<br />One emote, yours.</h1>
+      <p>Invite five new friends. Once each has a verified account and completes a first genuine session, choose one eligible emote. Each invited friend can choose one seven-day emote trial.</p>
+      <p class="referral-note">Cosmetics only. No cash, AI credits or coding-activity payouts. This promotion is not active unless explicitly enabled.</p>
+    </header>
+    <p id="referral-status" class="referral-status" role="status" aria-live="polite">Checking promotion availability...</p>
+    <noscript><p>JavaScript is required to check availability. No referral or emote claim has been made.</p></noscript>
+    <div id="referral-login" hidden>
+      <p id="invite-notice">Sign in to view your invite link.</p>
+      <a id="login-link" class="btn btn-primary" href="/ui/login?next=%2Fui%2Freferrals">Sign in/up</a>
+    </div>
+    <section id="referral-account" hidden aria-labelledby="invite-title">
+      <h2 id="invite-title">Your invitation</h2>
+      <label for="invite-link">Share this link with new friends</label>
+      <div class="referral-link-row"><input id="invite-link" readonly type="text" /><button id="copy-invite" class="btn" type="button">Copy link</button></div>
+      <p id="referral-progress"></p>
+      <progress id="referral-meter" value="0" max="5" aria-label="Verified friends with a first genuine session"></progress>
+      <button id="refresh-progress" class="btn" type="button">Refresh progress</button>
+      <div class="referral-choices">
+        <section aria-labelledby="trial-title">
+          <h2 id="trial-title">Your seven-day trial</h2>
+          <p>For verified new invitees. Starts when you choose an emote, lasts 168 hours and does not renew automatically.</p>
+          <label for="trial-item">Trial emote</label><select id="trial-item" disabled></select>
+          <button id="claim-trial" class="btn btn-primary" type="button" disabled>Start my trial</button>
+          <p id="trial-state" class="referral-note"></p>
+        </section>
+        <section aria-labelledby="reward-title">
+          <h2 id="reward-title">Your referral emote</h2>
+          <p>One choice after five verified new friends each complete their first genuine session. Not one reward per group of five.</p>
+          <label for="reward-item">Reward emote</label><select id="reward-item" disabled></select>
+          <button id="claim-reward" class="btn btn-primary" type="button" disabled>Choose my emote</button>
+          <p id="reward-state" class="referral-note"></p>
+        </section>
+      </div>
+      <a class="referral-library" href="/ui/emotes">Open your emote library &rarr;</a>
+    </section>
+    <section class="referral-rules" aria-labelledby="rules-title">
+      <h2 id="rules-title">What counts?</h2>
+      <p>A friend must open your invitation before creating their account, then verify their email and complete a successful session that OpenVegas can verify on its backend. Existing accounts, self-referrals and duplicate verified email identities do not count.</p>
+      <p>Local activity callbacks and a browser's "completed" message are not proof. Native-only host sessions that OpenVegas cannot independently verify do not count. The server decides eligibility, trial expiry and ownership.</p>
+      <p>Only approved, available emotes on the promotion's eligible list can be chosen. Trials stop authorizing access when they expire; claims do not enable store sales or change your AI subscription.</p>
+    </section>
+  </main>
+  <script type="module" src="/ui/assets/referrals.js?v=20261029-auth"></script>
+<footer class="site-footer"><div><strong>OpenVegas. Agentic Entertainment.</strong><p>A hand. Then back to the build.</p></div><a class="partnership-cta" href="/ui/data-partnerships">Data Partnerships <span aria-hidden="true">&nbsp;↗</span></a><div class="site-footer-links"><a href="/ui/how-to-play">How to Play</a><a href="/ui/arena">Arena · Soon</a><a href="/ui/agents">Agents</a><a href="/ui/faq">FAQ</a><a href="/ui/security">Security</a><a href="/ui/contact">Contact</a></div></footer>
+</body>
+</html>

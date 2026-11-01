@@ -1,0 +1,1283 @@
+"""Inference routes — AI gateway."""
+
+from __future__ import annotations
+
+import os
+import base64
+import io
+import json
+import subprocess
+import tempfile
+import time
+import uuid
+from dataclasses import dataclass
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from typing import Any
+
+from fastapi import APIRouter, Depends
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, Field, model_validator
+
+from openvegas.capabilities import ReasoningEffort, resolve_capability
+from openvegas.gateway.providers import get_model_review, validate_reasoning_effort
+from openvegas.contracts.errors import APIErrorCode, ContractError
+from openvegas.contracts.native_handoff import NativeHandoffRef
+from openvegas.contracts.native_scope import NativeContinuationRef, NativeInferenceScope
+from openvegas.events import mk_event
+from openvegas.security.policy import (
+    contains_obvious_secret,
+    enforce_before_tool_call,
+    filter_trusted_sources,
+)
+from openvegas.telemetry import emit_metric, emit_run_metrics
+from server.middleware.auth import get_current_user
+from server.middleware.private_validation import PrivateInferenceRoute
+from server.services.dependencies import (
+    get_catalog,
+    get_file_upload_service,
+    get_fraud_engine,
+    get_gateway,
+    get_inference_replay_service,
+    get_llm_mode_service,
+    get_provider_thread_service,
+)
+from server.services.file_uploads import FileUploadError
+from openvegas.gateway.catalog import ModelDisabled
+from openvegas.gateway.inference import InferenceRequest
+from openvegas.wallet.ledger import InsufficientBalance
+
+router = APIRouter(route_class=PrivateInferenceRoute)
+
+
+@dataclass
+class _PreparedAskContext:
+    req: "AskRequest"
+    started: float
+    run_id: str
+    gateway: Any
+    thread_svc: Any
+    thread_ctx: Any
+    mode_payload: dict[str, Any]
+    context_enabled: bool
+    inference_request: InferenceRequest
+    web_search_requested: bool
+    web_search_effective: bool
+    attachments_requested: bool
+    attachments_effective: bool
+    attachments_used: bool
+    response_warnings: list[str]
+    history_messages_loaded: int
+    history_messages_skipped: int
+    history_messages_used: int
+    history_messages_dropped: int
+    did_prune: bool
+    attachment_refs: list[dict[str, str]] | None = None
+    replay_service: Any = None
+    replay_claim: Any = None
+
+
+def _model_context_tokens(model_id: str) -> int:
+    # Env override is authoritative; model-based values below are heuristics only.
+    raw = os.getenv("OPENVEGAS_CONTEXT_MODEL_WINDOW_TOKENS", "").strip()
+    if raw:
+        try:
+            return max(4000, int(raw))
+        except Exception:
+            pass
+
+    normalized = (model_id or "").lower()
+    if normalized.startswith("gpt-5"):
+        return 128000
+    if "4o" in normalized:
+        return 128000
+    return 32000
+
+
+def _prune_history_by_char_budget(
+    history_messages: list[dict[str, str]],
+    *,
+    model_context_tokens: int,
+) -> tuple[list[dict[str, str]], int]:
+    try:
+        fraction = float(os.getenv("OPENVEGAS_CONTEXT_HISTORY_BUDGET_FRACTION", "0.60"))
+    except Exception:
+        fraction = 0.60
+    if fraction <= 0:
+        fraction = 0.60
+    if fraction > 0.90:
+        fraction = 0.90
+
+    max_history_chars = int(max(4000, model_context_tokens) * fraction * 4)
+    if max_history_chars < 1:
+        return [], len(history_messages)
+
+    messages = list(history_messages)
+    total_chars = sum(len(str(msg.get("content") or "")) for msg in messages)
+    dropped = 0
+    while total_chars > max_history_chars and messages:
+        removed = messages.pop(0)
+        total_chars -= len(str(removed.get("content") or ""))
+        dropped += 1
+    return messages, dropped
+
+
+def _web_sources_max_from_env() -> int:
+    raw = str(os.getenv("OPENVEGAS_CHAT_WEB_SEARCH_SOURCES_MAX", "8")).strip()
+    try:
+        return max(1, min(50, int(raw)))
+    except Exception:
+        return 8
+
+
+def _normalize_source_urls(urls: list[str], *, max_sources: int) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+
+    for raw in urls:
+        token = str(raw or "").strip()
+        if not token:
+            continue
+        try:
+            parts = urlsplit(token)
+        except Exception:
+            continue
+        if parts.scheme not in {"http", "https"}:
+            continue
+
+        query_pairs = [
+            (k, v) for k, v in parse_qsl(parts.query, keep_blank_values=False)
+            if not k.lower().startswith("utm_")
+        ]
+        normalized = urlunsplit(
+            (parts.scheme.lower(), parts.netloc.lower(), parts.path, urlencode(query_pairs, doseq=True), "")
+        )
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        out.append(normalized)
+        if len(out) >= max_sources:
+            break
+
+    return out
+
+
+def _is_real_estate_prompt(prompt: str) -> bool:
+    text = str(prompt or "").strip().lower()
+    if not text:
+        return False
+    markers = (
+        "zillow",
+        "realtor",
+        "redfin",
+        "homes.com",
+        "home for sale",
+        "property",
+        "listing",
+        "house",
+        "condo",
+        "beds",
+        "baths",
+    )
+    return any(token in text for token in markers)
+
+
+def _rank_and_filter_web_sources(
+    *,
+    prompt: str,
+    sources: list[str],
+    source_scores: list[dict[str, object]],
+    max_sources: int,
+) -> tuple[list[str], list[dict[str, object]]]:
+    trust_by_url: dict[str, float] = {}
+    for row in source_scores:
+        url = str((row or {}).get("url") or "").strip()
+        try:
+            score = float((row or {}).get("score") or 0.0)
+        except Exception:
+            score = 0.0
+        if url:
+            trust_by_url[url] = score
+
+    real_estate = _is_real_estate_prompt(prompt)
+    ranking: list[dict[str, object]] = []
+    for url in sources:
+        token = str(url or "").strip()
+        if not token:
+            continue
+        parts = urlsplit(token)
+        host = str(parts.netloc or "").lower()
+        path = str(parts.path or "").lower()
+        trust = float(trust_by_url.get(token, 0.0))
+        score = trust
+        reasons: list[str] = []
+
+        if path and path.count("/") >= 2:
+            score += 0.05
+            reasons.append("specific_path")
+
+        if real_estate:
+            listing_patterns = ("/homedetails/", "/listing/", "/property/", "/mls/")
+            landing_patterns = ("/under-", "/search", "/homes-for-sale", "/map", "/austin-", "/for-sale")
+            stale_patterns = ("/sold/", "off-market", "/pending/")
+            is_listing = any(p in path for p in listing_patterns) or ("zpid" in path and "zillow.com" in host)
+            is_landing = any(p in path for p in landing_patterns)
+            if is_listing:
+                score += 0.30
+                reasons.append("listing_page")
+            if is_landing and not is_listing:
+                score -= 0.20
+                reasons.append("landing_page")
+            if any(p in path for p in stale_patterns):
+                score -= 0.10
+                reasons.append("stale_hint")
+
+        ranking.append(
+            {
+                "url": token,
+                "host": host,
+                "score": round(score, 4),
+                "trust_score": round(trust, 4),
+                "reasons": reasons,
+            }
+        )
+
+    ranking.sort(key=lambda row: float(row.get("score") or 0.0), reverse=True)
+
+    listing_only = str(os.getenv("OPENVEGAS_WEB_SEARCH_LISTING_ONLY_REAL_ESTATE", "1")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if real_estate and listing_only:
+        listing_rows = [r for r in ranking if "listing_page" in list(r.get("reasons") or [])]
+        if listing_rows:
+            ranking = listing_rows
+
+    ranking = ranking[: max(1, int(max_sources))]
+    ranked_sources = [str(r.get("url") or "") for r in ranking if str(r.get("url") or "").strip()]
+    return ranked_sources, ranking
+
+
+class AskRequest(BaseModel):
+    reasoning_effort: ReasoningEffort | None = None
+    prompt: str
+    provider: str
+    model: str
+    idempotency_key: str | None = None
+    thread_id: str | None = None
+    conversation_mode: str | None = None
+    persist_context: bool = True
+    enable_tools: bool = False
+    enable_web_search: bool = False
+    attachments: list[str] = Field(default_factory=list)
+    native_scope: NativeInferenceScope | None = None
+    native_history: bool = Field(default=False, strict=True)
+    native_continuation: NativeContinuationRef | None = None
+    native_user_text: str | None = Field(default=None, strict=True, repr=False)
+    native_handoff: NativeHandoffRef | None = None
+    max_tokens: int | None = Field(default=None, strict=True, ge=1, le=1_000_000)
+
+    @model_validator(mode="before")
+    @classmethod
+    def literal_handoff_flags(cls, value):
+        if isinstance(value, dict) and value.get("native_handoff") is not None:
+            for name in ("enable_tools", "enable_web_search", "persist_context"):
+                if name in value and type(value[name]) is not bool:
+                    raise ValueError("Confirmed handoff options require literal boolean values.")
+        return value
+
+    @model_validator(mode="after")
+    def validate_native_generation(self):
+        if self.native_handoff is not None:
+            if not self.native_history or self.max_tokens is None:
+                raise ValueError("A confirmed handoff requires native history and its exact output budget.")
+            if self.native_continuation is None and self.native_user_text is None:
+                raise ValueError("A handoff destination requires verified original user input.")
+        elif self.max_tokens is not None:
+            raise ValueError("An explicit output budget requires a confirmed native handoff.")
+        if self.native_user_text is not None:
+            from openvegas.contracts.native_scope import validate_native_user_text
+
+            validate_native_user_text(self.native_user_text)
+            if not self.native_history or self.native_continuation is not None:
+                raise ValueError("Original user input is accepted only on the first native history generation.")
+        if self.native_history and self.native_scope is None:
+            raise ValueError("Native history requires an owned scope.")
+        if self.native_continuation is not None and not self.native_history:
+            raise ValueError("Native continuation requires explicit native history.")
+        if self.native_scope is not None:
+            from server.services.inference_replay import _key
+            try:
+                _key(self.idempotency_key)
+            except ContractError as exc:
+                raise ValueError("Native scope requires an explicit valid idempotency key.") from exc
+            if (self.provider != "openrouter" or self.enable_tools is not True
+                    or self.persist_context is not False or self.thread_id is not None
+                    or self.conversation_mode != "ephemeral"):
+                raise ValueError("Native ownership requires OpenRouter tools, ephemeral mode and no thread/persistence.")
+        return self
+
+
+class ModeUpdateRequest(BaseModel):
+    llm_mode: str | None = None
+    conversation_mode: str | None = None
+
+
+def _attachment_text_max_chars() -> int:
+    raw = str(os.getenv("OPENVEGAS_CHAT_ATTACHMENT_PREVIEW_MAX_CHARS", "6000")).strip()
+    try:
+        return max(512, min(100000, int(raw)))
+    except Exception:
+        return 6000
+
+
+def _decode_attachment_text(content: bytes, *, mime_type: str) -> str:
+    mime = str(mime_type or "").strip().lower()
+    if mime == "application/pdf":
+        try:
+            from pypdf import PdfReader  # type: ignore
+        except Exception:
+            PdfReader = None  # type: ignore
+        if PdfReader is not None:
+            try:
+                reader = PdfReader(io.BytesIO(content))
+                pages: list[str] = []
+                for page in list(getattr(reader, "pages", []) or []):
+                    try:
+                        txt = str(page.extract_text() or "").strip()
+                    except Exception:
+                        txt = ""
+                    if txt:
+                        pages.append(txt)
+                joined = "\n\n".join(pages).strip()
+                if joined:
+                    return joined
+            except Exception:
+                pass
+        tmp_path = ""
+        try:
+            with tempfile.NamedTemporaryFile(prefix="ov_pdf_", suffix=".pdf", delete=False) as tmp:
+                tmp.write(content)
+                tmp_path = tmp.name
+            proc = subprocess.run(
+                ["pdftotext", "-enc", "UTF-8", "-q", tmp_path, "-"],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=8.0,
+            )
+            if proc.returncode == 0:
+                return str(proc.stdout or "").strip()
+        except Exception:
+            return ""
+        finally:
+            if tmp_path:
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+        return ""
+    likely_text = mime.startswith("text/") or mime in {
+        "application/json",
+        "application/xml",
+        "application/javascript",
+        "application/x-yaml",
+        "text/markdown",
+    }
+    if not likely_text:
+        return ""
+    try:
+        return content.decode("utf-8")
+    except Exception:
+        try:
+            return content.decode("latin-1")
+        except Exception:
+            return ""
+
+
+def _build_openai_user_parts(
+    *,
+    prompt: str,
+    attachments: list[dict[str, Any]],
+    image_input_effective: bool,
+) -> list[dict[str, Any]]:
+    parts: list[dict[str, Any]] = [{"type": "input_text", "text": str(prompt or "")}]
+    max_chars = _attachment_text_max_chars()
+
+    for item in attachments:
+        filename = str(item.get("filename") or "attachment")
+        mime_type = str(item.get("mime_type") or "application/octet-stream")
+        content = item.get("content_bytes")
+        if not isinstance(content, (bytes, bytearray, memoryview)):
+            continue
+        payload = bytes(content)
+        if mime_type.startswith("image/") and image_input_effective:
+            mime_clean = str(mime_type.split(";", 1)[0] or "").strip() or "image/png"
+            data_url = f"data:{mime_clean};base64,{base64.b64encode(payload).decode('ascii')}"
+            parts.append(
+                {
+                    "type": "input_image",
+                    "image_url": data_url,
+                }
+            )
+            continue
+
+        text = _decode_attachment_text(payload, mime_type=mime_type)
+        if text:
+            text = text[:max_chars]
+        else:
+            text = "[Binary attachment content not inline-decodable]"
+        parts.append(
+            {
+                "type": "input_text",
+                "text": f"Attachment [{filename}] (mime={mime_type}, bytes={len(payload)})\n{text}",
+            }
+        )
+    return parts
+
+
+def _build_attachment_fallback_text(attachments: list[dict[str, Any]]) -> str:
+    if not attachments:
+        return ""
+    max_chars = _attachment_text_max_chars()
+    blocks: list[str] = []
+    for item in attachments:
+        filename = str(item.get("filename") or "attachment")
+        mime_type = str(item.get("mime_type") or "application/octet-stream")
+        content = item.get("content_bytes")
+        payload = bytes(content) if isinstance(content, (bytes, bytearray, memoryview)) else b""
+        text = _decode_attachment_text(payload, mime_type=mime_type)
+        if text:
+            text = text[:max_chars]
+        else:
+            text = "[Binary attachment content not inline-decodable]"
+        blocks.append(f"Attachment [{filename}] (mime={mime_type}, bytes={len(payload)})\n{text}")
+    return "\n\n---\n\n".join(blocks)
+
+
+@router.get("/mode")
+async def get_mode(user: dict = Depends(get_current_user)):
+    mode_svc = get_llm_mode_service()
+    resolved = await mode_svc.resolve_for_user(user_id=user["user_id"])
+    return resolved.as_dict()
+
+
+@router.post("/mode")
+async def set_mode(req: ModeUpdateRequest, user: dict = Depends(get_current_user)):
+    mode_svc = get_llm_mode_service()
+    resolved = await mode_svc.resolve_for_user(
+        user_id=user["user_id"],
+        requested_mode=req.llm_mode,
+        requested_conversation_mode=req.conversation_mode,
+    )
+    return resolved.as_dict()
+
+
+async def _prepare_ask_context(
+    req: AskRequest,
+    *,
+    user: dict,
+    run_id: str,
+    started: float,
+) -> _PreparedAskContext | JSONResponse | dict[str, Any]:
+    fraud = get_fraud_engine()
+    try:
+        await fraud.check_inference(user["user_id"])
+    except Exception as e:
+        return JSONResponse(
+            status_code=429,
+            content={"error": "rate_limited", "detail": str(e)},
+        )
+    replay = claim = None
+    if req.provider == "openrouter" and req.idempotency_key is not None:
+        replay = get_inference_replay_service()
+        try:
+            claim = await replay.begin(
+                user_id=str(user["user_id"]), idempotency_key=req.idempotency_key,
+                command=req.model_dump(mode="json", exclude={"idempotency_key"}),
+                **({"allow_native_dispatch": os.getenv("OPENVEGAS_NATIVE_GENERATION_SCOPE", "0") == "1"}
+                   if req.native_scope is not None else {}),
+                **({"allow_native_history": os.getenv("OPENVEGAS_NATIVE_GENERATION_HISTORY", "0") == "1"}
+                   if req.native_history else {}),
+                **({"allow_native_handoff": os.getenv("OPENVEGAS_NATIVE_TASK_HANDOFF", "0") == "1"}
+                   if req.native_handoff is not None else {}),
+            )
+        except ContractError as exc:
+            return JSONResponse(status_code=409, content={"error": exc.code.value, "detail": exc.detail})
+        if claim.response is not None:
+            return claim.response
+    try:
+        if claim is not None and claim.native_claim is not None:
+            from openvegas.agent.native_continuation import restore_request
+            req = restore_request(req, claim.native_claim)
+        prepared = await _prepare_authorized_ask_context(
+            req, user=user, run_id=run_id, started=started,
+            gateway_key=claim.gateway_idempotency_key if claim is not None else req.idempotency_key,
+        )
+        if isinstance(prepared, _PreparedAskContext) and req.native_scope is not None:
+            if claim is None or claim.native_claim is None:
+                raise ContractError(APIErrorCode.INVALID_TRANSITION, "Native generation ownership was not reserved.")
+            from openvegas.agent.native_continuation import apply_request_history
+            prepared.inference_request._native_generation_claim = claim.native_claim
+            await apply_request_history(prepared, claim.native_claim)
+            if req.native_handoff is not None:
+                if claim.native_claim.previous_request_id is None:
+                    from server.services.native_handoff_dispatch import prepare_first_dispatch
+                    prepared.inference_request = await prepare_first_dispatch(
+                        replay.db, request=prepared.inference_request,
+                        handoff_id=req.native_handoff.handoff_id,
+                        handoff_sha256=req.native_handoff.handoff_sha256,
+                    )
+                else:
+                    from server.services.native_handoff_continuation import prepare_continuation
+                    continuation = await prepare_continuation(replay.db, request=prepared.inference_request)
+                    prepared.inference_request = continuation.request
+    except ContractError as exc:
+        if claim is not None:
+            await replay.abandon_before_dispatch(claim)
+        return JSONResponse(status_code=400, content={"error": exc.code.value, "detail": exc.detail})
+    except BaseException:
+        if claim is not None:
+            await replay.abandon_before_dispatch(claim)
+        raise
+    if not isinstance(prepared, _PreparedAskContext):
+        if claim is not None:
+            await replay.abandon_before_dispatch(claim)
+        return prepared
+    prepared.replay_service, prepared.replay_claim = replay, claim
+    return prepared
+
+
+async def _prepare_authorized_ask_context(
+    req: AskRequest, *, user: dict, run_id: str, started: float, gateway_key: str | None,
+) -> _PreparedAskContext | JSONResponse | dict[str, Any]:
+    mode_svc = get_llm_mode_service()
+    mode_state = await mode_svc.resolve_for_user(user_id=user["user_id"])
+    mode_payload = mode_state.as_dict() if hasattr(mode_state, "as_dict") else dict(mode_state)
+    if mode_payload.get("effective_mode") == "byok":
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": APIErrorCode.BYOK_NOT_ALLOWED.value,
+                "detail": "BYOK inference mode is not enabled for /inference/ask yet.",
+                **mode_payload,
+            },
+        )
+
+    try:
+        validate_reasoning_effort(req.provider, req.model, req.reasoning_effort)
+        if req.reasoning_effort is not None and not resolve_capability(
+            req.provider, req.model, "reasoning_controls", user_id=user["user_id"],
+        ):
+            raise ContractError(
+                APIErrorCode.INVALID_TRANSITION,
+                "Reasoning controls are disabled for this account; no request was sent.",
+            )
+    except ContractError as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"error": exc.code.value, "detail": exc.detail, "run_id": run_id},
+        )
+
+    if (req.provider == "openrouter" and req.attachments
+            and not get_model_review(req.provider, req.model).get("attachments")):
+        return JSONResponse(
+            status_code=400,
+            content={"error": APIErrorCode.INVALID_TRANSITION.value,
+                     "detail": "Attachments are not reviewed for this OpenVegas model/endpoint. Choose a file-capable model; no file was sent.",
+                     "run_id": run_id, **mode_payload},
+        )
+
+    if req.provider == "gemini" and (req.enable_tools or req.enable_web_search or req.attachments):
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": APIErrorCode.INVALID_TRANSITION.value,
+                "detail": "Gemini supports text only in this adapter. Remove tools, web search and attachments; nothing was flattened or sent.",
+                "run_id": run_id,
+                **mode_payload,
+            },
+        )
+
+    thread_svc = get_provider_thread_service()
+    context_enabled = bool(thread_svc.context_enabled()) and req.native_scope is None
+    web_search_requested = bool(req.enable_web_search)
+    attachments_requested = bool(req.attachments)
+    web_search_effective = bool(
+        web_search_requested and req.provider in {"openai", "openrouter"} and resolve_capability(
+            req.provider,
+            req.model,
+            "web_search",
+            user_id=user["user_id"],
+        )
+    )
+    file_upload_effective = bool(
+        attachments_requested and resolve_capability(
+            req.provider,
+            req.model,
+            "file_upload",
+            user_id=user["user_id"],
+        )
+    )
+    attachments_gateway_effective = bool(req.provider == "openai" and file_upload_effective)
+    image_input_effective = bool(
+        attachments_requested and resolve_capability(
+            req.provider,
+            req.model,
+            "image_input",
+            user_id=user["user_id"],
+        )
+    )
+    response_warnings: list[str] = []
+    if contains_obvious_secret(req.prompt):
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": "policy.secret_like_input_blocked",
+                "detail": "Input appears to contain a secret/token. Remove secrets before sending.",
+                "run_id": run_id,
+                "context_enabled": context_enabled,
+                **mode_payload,
+            },
+        )
+    policy = enforce_before_tool_call(
+        str(user["user_id"]),
+        "web_search" if web_search_requested else "inference",
+        {"prompt": req.prompt, "provider": req.provider, "model": req.model},
+    )
+    if not policy.allow:
+        emit_metric("policy_decision_total", {"capability": "web_search", "allow": "0", "code": policy.code})
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": policy.code,
+                "detail": policy.reason,
+                "run_id": run_id,
+                "context_enabled": context_enabled,
+                **mode_payload,
+            },
+        )
+    emit_metric(
+        "policy_decision_total",
+        {"capability": "web_search" if web_search_requested else "inference", "allow": "1", "code": policy.code},
+    )
+    if web_search_requested and not web_search_effective:
+        if req.provider == "openrouter":
+            return JSONResponse(
+                status_code=400,
+                content={"error": APIErrorCode.INVALID_TRANSITION.value,
+                         "detail": "Web search is not available for this reviewed model. Choose a web-capable model; no request was sent.",
+                         "run_id": run_id, **mode_payload},
+            )
+        response_warnings.append("capability_unavailable:web_search")
+    if attachments_requested and not attachments_gateway_effective:
+        response_warnings.append("capability_unavailable:file_upload")
+    try:
+        # Validate before creating/updating a provider thread; no capability opt-in for text.
+        selected_model = await get_catalog().validate_selection(req.provider, req.model)
+        if req.max_tokens is not None and req.max_tokens > selected_model.get("max_tokens", 0):
+            raise ContractError(APIErrorCode.HANDOFF_BLOCKED,
+                                "The reviewed output budget is no longer supported; nothing was sent.")
+        thread_ctx = await thread_svc.prepare_thread(
+            user_id=user["user_id"],
+            provider=req.provider,
+            model_id=req.model,
+            thread_id=req.thread_id,
+            conversation_mode=req.conversation_mode or mode_payload.get("conversation_mode"),
+        )
+    except ContractError as e:
+        status = 503 if e.code == APIErrorCode.PROVIDER_UNAVAILABLE else 400
+        return JSONResponse(
+            status_code=status,
+            content={"error": e.code.value, "detail": e.detail, "run_id": run_id, "context_enabled": context_enabled, **mode_payload},
+        )
+    gateway = get_gateway()
+    history_messages: list[dict[str, str]] = []
+    history_messages_loaded = 0
+    history_messages_skipped = 0
+    history_messages_dropped = 0
+    did_prune = False
+    if thread_ctx.thread_id and thread_ctx.thread_status != "disabled":
+        try:
+            (history_messages, history_messages_loaded, history_messages_skipped) = (
+                await thread_svc.get_recent_messages_with_stats(
+                    thread_id=thread_ctx.thread_id,
+                    limit=int(os.getenv("OPENVEGAS_CONTEXT_MAX_MESSAGES", "200")),
+                )
+            )
+        except ContractError as exc:
+            return JSONResponse(status_code=400, content={"error": exc.code.value, "detail": exc.detail})
+        if not any("attachment_refs" in msg for msg in history_messages):
+            history_messages, history_messages_dropped = _prune_history_by_char_budget(
+                history_messages,
+                model_context_tokens=_model_context_tokens(req.model),
+            )
+        did_prune = history_messages_dropped > 0
+
+    outbound_messages: list[dict[str, Any]] = list(history_messages)
+    resolved_attachments: list[dict[str, Any]] = []
+    managed_attachments = None
+    attachment_refs = None
+    retained_files = any("attachment_refs" in msg for msg in history_messages)
+    if req.provider == "openrouter" and (attachments_requested or retained_files):
+        from server.services.openrouter_attachment_request import prepare_attachment_request
+        from server.services.openrouter_attachments import AttachmentError
+        try:
+            if not resolve_capability(req.provider, req.model, "file_upload", user_id=user["user_id"]):
+                raise ContractError(APIErrorCode.INVALID_TRANSITION, "File input is disabled or unreviewed for this model.")
+            outbound_messages, managed_attachments, attachment_refs = await prepare_attachment_request(
+                history=history_messages, prompt=req.prompt, file_ids=req.attachments,
+                user_id=str(user["user_id"]), model_id=req.model, model_config=selected_model,
+                upload_service=get_file_upload_service(),
+            )
+            # Prepared blocks include both current and reauthorized retained images.
+            if (
+                any(block["type"] == "image_url" for block in managed_attachments.prepared.blocks)
+                and not resolve_capability(
+                    req.provider, req.model, "image_input", user_id=user["user_id"],
+                )
+            ):
+                raise ContractError(
+                    APIErrorCode.INVALID_TRANSITION,
+                    "Image input is disabled for this account; no request was sent.",
+                )
+            attachments_gateway_effective = True
+            response_warnings = [w for w in response_warnings if w != "capability_unavailable:file_upload"]
+        except (AttachmentError, ContractError) as exc:
+            return JSONResponse(status_code=getattr(exc, "status_code", 400), content={
+                "error": exc.code.value if isinstance(exc, ContractError) else exc.code,
+                "detail": exc.detail, "run_id": run_id,
+            })
+    elif retained_files:
+        return JSONResponse(status_code=400, content={"error": "invalid_transition",
+            "detail": "Retained files cannot be silently dropped on a provider change; start fresh explicitly."})
+    elif attachments_requested:
+        file_svc = get_file_upload_service()
+        try:
+            resolved_attachments = await file_svc.resolve_uploaded_for_inference(
+                user_id=str(user["user_id"]),
+                file_ids=list(req.attachments),
+            )
+        except FileUploadError as exc:
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={
+                    "error": exc.code,
+                    "detail": exc.detail,
+                    "context_enabled": context_enabled,
+                    **mode_payload,
+                },
+            )
+    has_image_attachment = any(
+        str(a.get("mime_type") or "").lower().startswith("image/")
+        for a in resolved_attachments
+    )
+    if attachments_requested and has_image_attachment and not image_input_effective:
+        if "capability_unavailable:image_input" not in response_warnings:
+            response_warnings.append("capability_unavailable:image_input")
+        return {
+            "text": "Image input is unavailable for this model/provider. Remove image attachments or switch model.",
+            "completion_status": "incomplete",
+            "v_cost": "0",
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "provider_request_id": None,
+            "tool_calls": [],
+            "thread_id": thread_ctx.thread_id,
+            "run_id": run_id,
+            "thread_status": thread_ctx.thread_status,
+            "context_enabled": context_enabled,
+            "history_messages_loaded": history_messages_loaded,
+            "history_messages_skipped": history_messages_skipped,
+            "history_messages_used": len(history_messages),
+            "history_messages_dropped": history_messages_dropped,
+            "did_prune": did_prune,
+            "web_search_requested": web_search_requested,
+            "web_search_effective": web_search_effective,
+            "web_search_used": False,
+            "web_search_sources": [],
+            "web_search_retry_without_tool": False,
+            "attachments_requested": attachments_requested,
+            "attachments_effective": attachments_gateway_effective,
+            "attachments_used": False,
+            "warning": (response_warnings[0] if response_warnings else None),
+            "warnings": response_warnings,
+            "diagnostics": {
+                "run_id": run_id,
+                "provider": req.provider,
+                "model": req.model,
+                "history_loaded": history_messages_loaded,
+                "history_used": len(history_messages),
+                "history_dropped": history_messages_dropped,
+                "history_skipped": history_messages_skipped,
+                "did_prune": did_prune,
+                "attachments_requested": attachments_requested,
+                "attachments_effective": attachments_gateway_effective,
+            },
+            **mode_payload,
+        }
+
+    attachments_used = managed_attachments is not None
+    if managed_attachments is not None:
+        pass  # The authorized full-content messages above replace preview/fallback handling.
+    elif attachments_requested and resolved_attachments:
+        if attachments_gateway_effective:
+            parts = _build_openai_user_parts(
+                prompt=req.prompt,
+                attachments=resolved_attachments,
+                image_input_effective=image_input_effective,
+            )
+            outbound_messages.append({"role": "user", "content": parts})
+            attachments_used = True
+        else:
+            fallback = _build_attachment_fallback_text(resolved_attachments)
+            merged_prompt = req.prompt
+            if fallback:
+                merged_prompt = f"{req.prompt}\n\nAttached file context:\n\n{fallback}"
+            if not (
+                outbound_messages
+                and outbound_messages[-1].get("role") == "user"
+                and str(outbound_messages[-1].get("content") or "") == merged_prompt
+            ):
+                outbound_messages.append({"role": "user", "content": merged_prompt})
+                attachments_used = True
+    elif not (
+        outbound_messages
+        and outbound_messages[-1].get("role") == "user"
+        and str(outbound_messages[-1].get("content") or "") == req.prompt
+    ):
+        outbound_messages.append({"role": "user", "content": req.prompt})
+    inference_request = InferenceRequest(
+        account_id=f"user:{user['user_id']}", provider=req.provider, model=req.model,
+        messages=outbound_messages, idempotency_key=gateway_key,
+        max_tokens=(req.max_tokens if req.native_handoff is not None
+                    else min(1024, selected_model.get("max_tokens", 1024))),
+        enable_tools=bool(req.enable_tools), enable_web_search=web_search_effective,
+        reasoning_effort=req.reasoning_effort,
+    )
+    inference_request._managed_attachment_context = managed_attachments
+    if managed_attachments is not None or (req.provider == "openrouter" and web_search_effective):
+        from openvegas.gateway.openrouter import build_payload
+        from openvegas.gateway.providers import model_capabilities
+        try:
+            build_payload(inference_request, selected_model, model_capabilities(req.provider, req.model))
+        except ContractError as exc:
+            return JSONResponse(status_code=400, content={"error": exc.code.value, "detail": exc.detail})
+    return _PreparedAskContext(
+        req=req,
+        started=started,
+        run_id=run_id,
+        gateway=gateway,
+        thread_svc=thread_svc,
+        thread_ctx=thread_ctx,
+        mode_payload=mode_payload,
+        context_enabled=context_enabled,
+        inference_request=inference_request,
+        web_search_requested=web_search_requested,
+        web_search_effective=web_search_effective,
+        attachments_requested=attachments_requested,
+        attachments_effective=attachments_gateway_effective,
+        attachments_used=attachments_used,
+        response_warnings=response_warnings,
+        history_messages_loaded=history_messages_loaded,
+        history_messages_skipped=history_messages_skipped,
+        history_messages_used=len(history_messages),
+        history_messages_dropped=history_messages_dropped,
+        did_prune=did_prune,
+        attachment_refs=attachment_refs,
+    )
+
+
+def _native_tool_references(result: Any, *, provider: str) -> list[dict]:
+    """Expose a settled internal request ID, never trust provider-supplied refs."""
+    request_id = getattr(result, "inference_request_id", None)
+    try:
+        valid = isinstance(request_id, str) and str(uuid.UUID(request_id)) == request_id
+    except ValueError:
+        valid = False
+    calls = []
+    for raw in result.tool_calls or []:
+        call = {k: v for k, v in raw.items() if k != "native_inference_request_id"}
+        if provider == "openrouter" and valid and isinstance(call.get("provider_call_id"), str):
+            call["native_inference_request_id"] = request_id
+        calls.append(call)
+    return calls
+
+
+def _public_completion_status(value: Any) -> str:
+    """Fresh responses must not turn unknown status into legacy success."""
+    return value if type(value) is str and value in {"complete", "incomplete"} else "incomplete"
+
+
+async def _finalize_ask_result(
+    prepared: _PreparedAskContext,
+    *,
+    result: Any,
+) -> dict[str, Any]:
+    req = prepared.req
+
+    async def append(tx=None):
+        await prepared.thread_svc.append_exchange(
+            thread_ctx=prepared.thread_ctx, prompt=req.prompt, response_text=result.text,
+            input_tokens=result.input_tokens, output_tokens=result.output_tokens,
+            persist_context=req.persist_context,
+            **({"attachment_refs": prepared.attachment_refs} if prepared.attachment_refs is not None else {}),
+            **({"assistant_kind": "native_tool_request" if result.tool_calls else "visible_text"}
+               if prepared.inference_request._managed_attachment_context is not None else {}),
+            **({"tx": tx} if tx is not None else {}),
+        )
+    web_sources_max = _web_sources_max_from_env()
+    normalized_sources = _normalize_source_urls(
+        list(getattr(result, "web_search_sources", None) or []),
+        max_sources=web_sources_max,
+    )
+    trusted_sources, source_scores = filter_trusted_sources(normalized_sources)
+    ranked_sources, source_ranking = _rank_and_filter_web_sources(
+        prompt=req.prompt,
+        sources=trusted_sources,
+        source_scores=source_scores,
+        max_sources=web_sources_max,
+    )
+    latency_ms = max(0.0, (time.monotonic() - prepared.started) * 1000.0)
+    emit_run_metrics(
+        run_id=prepared.run_id,
+        data={
+            "provider": req.provider,
+            "model": req.model,
+            "turn_latency_ms": round(latency_ms, 3),
+            "input_tokens": int(result.input_tokens),
+            "output_tokens": int(result.output_tokens),
+            "tool_calls": len(result.tool_calls or []),
+            "tool_failures": 0,
+            "fallbacks": 1 if prepared.response_warnings else 0,
+            "cost_usd": float(getattr(result, "actual_cost_usd", 0) or 0),
+        },
+    )
+    payload = {
+        "text": result.text,
+        "completion_status": _public_completion_status(getattr(result, "completion_status", None)),
+        "v_cost": str(result.v_cost),
+        "input_tokens": result.input_tokens,
+        "output_tokens": result.output_tokens,
+        "provider_request_id": result.provider_request_id,
+        "tool_calls": _native_tool_references(result, provider=req.provider),
+        "thread_id": prepared.thread_ctx.thread_id,
+        "run_id": prepared.run_id,
+        "thread_status": prepared.thread_ctx.thread_status,
+        "context_enabled": prepared.context_enabled,
+        "history_messages_loaded": prepared.history_messages_loaded,
+        "history_messages_skipped": prepared.history_messages_skipped,
+        "history_messages_used": prepared.history_messages_used,
+        "history_messages_dropped": prepared.history_messages_dropped,
+        "did_prune": prepared.did_prune,
+        "web_search_requested": prepared.web_search_requested,
+        "web_search_effective": prepared.web_search_effective,
+        "web_search_used": bool(getattr(result, "web_search_used", False)),
+        "web_search_sources": ranked_sources,
+        "web_search_source_scores": source_scores,
+        "web_search_source_ranking": source_ranking,
+        "web_search_retry_without_tool": bool(getattr(result, "web_search_retry_without_tool", False)),
+        "attachments_requested": prepared.attachments_requested,
+        "attachments_effective": prepared.attachments_effective,
+        "attachments_used": prepared.attachments_used,
+        "warning": (prepared.response_warnings[0] if prepared.response_warnings else None),
+        "warnings": prepared.response_warnings,
+        "diagnostics": {
+            "run_id": prepared.run_id,
+            "provider": req.provider,
+            "model": req.model,
+            "history_loaded": prepared.history_messages_loaded,
+            "history_used": prepared.history_messages_used,
+            "history_dropped": prepared.history_messages_dropped,
+            "history_skipped": prepared.history_messages_skipped,
+            "did_prune": prepared.did_prune,
+            "attachments_requested": prepared.attachments_requested,
+            "attachments_effective": prepared.attachments_effective,
+            "web_search_requested": prepared.web_search_requested,
+            "web_search_effective": prepared.web_search_effective,
+            "web_search_used": bool(getattr(result, "web_search_used", False)),
+            "web_search_sources_ranked": len(ranked_sources),
+        },
+        **prepared.mode_payload,
+    }
+    if prepared.replay_claim is not None:
+        if req.native_scope is not None:
+            payload["completion_status"] = result.completion_status
+            payload["native_generation"] = {
+                "scope_version": 1, "run_id": req.native_scope.run_id,
+                "runtime_session_id": req.native_scope.runtime_session_id,
+                "inference_request_id": result.inference_request_id,
+                "original_turn_scope_verified": True, "continuation_supported": False,
+            }
+        return await prepared.replay_service.complete(
+            prepared.replay_claim,
+            gateway_request_id=getattr(result, "inference_request_id", None),
+            response=payload, append=append,
+        )
+    await append()
+    return payload
+
+
+async def _execute_ask(prepared: _PreparedAskContext) -> dict[str, Any]:
+    result = await prepared.gateway.infer(prepared.inference_request)
+    return await _finalize_ask_result(prepared, result=result)
+
+
+def _json_response_body(response: JSONResponse) -> dict[str, Any]:
+    try:
+        return json.loads((response.body or b"{}").decode("utf-8"))
+    except Exception:
+        return {"error": "stream_bridge_error", "detail": "Failed to parse route error payload"}
+
+
+def _stream_error_completion_payload(body: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "status": "error",
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "v_cost": "0",
+        "thread_id": body.get("thread_id"),
+        "thread_status": body.get("thread_status"),
+        "context_enabled": body.get("context_enabled"),
+        "warning": body.get("warning"),
+        "warnings": list(body.get("warnings") or []),
+        "web_search_requested": bool(body.get("web_search_requested", False)),
+        "web_search_effective": bool(body.get("web_search_effective", False)),
+        "web_search_used": False,
+        "web_search_sources": [],
+        "web_search_source_ranking": [],
+    }
+
+
+@router.post("/ask")
+async def ask(
+    req: AskRequest,
+    user: dict = Depends(get_current_user),
+):
+    started = time.monotonic()
+    run_id = str(uuid.uuid4())
+    prepared = await _prepare_ask_context(req, user=user, run_id=run_id, started=started)
+    if not isinstance(prepared, _PreparedAskContext):
+        return prepared
+    try:
+        return await _execute_ask(prepared)
+    except ContractError as e:
+        status = 503 if e.code == APIErrorCode.PROVIDER_UNAVAILABLE else 400
+        return JSONResponse(
+            status_code=status,
+            content={"error": e.code.value, "detail": e.detail, "run_id": run_id, "context_enabled": prepared.context_enabled, **prepared.mode_payload},
+        )
+    except ModelDisabled as e:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "model_disabled", "detail": str(e), "run_id": run_id, "context_enabled": prepared.context_enabled, **prepared.mode_payload},
+        )
+    except InsufficientBalance as e:
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": APIErrorCode.INSUFFICIENT_BALANCE.value,
+                "detail": str(e),
+                "run_id": run_id,
+                "context_enabled": prepared.context_enabled,
+                **prepared.mode_payload,
+            },
+        )
+
+
+def _chunk_text(value: str, *, chunk_size: int = 600) -> list[str]:
+    text = str(value or "")
+    if not text:
+        return []
+    if chunk_size < 1:
+        return [text]
+    return [text[idx: idx + chunk_size] for idx in range(0, len(text), chunk_size)]
+
+
+def _sse_encode(event_name: str, payload: dict[str, Any]) -> str:
+    return f"event: {event_name}\ndata: {json.dumps(payload, separators=(',', ':'))}\n\n"
+
+
+@router.post("/stream")
+async def ask_stream(
+    req: AskRequest,
+    user: dict = Depends(get_current_user),
+):
+    started = time.monotonic()
+    run_id = str(uuid.uuid4())
+    turn_id = str(uuid.uuid4())
+
+    async def _gen():
+        seq = 0
+
+        def _emit(event_name: str, payload: dict[str, Any]) -> str:
+            nonlocal seq
+            seq += 1
+            envelope = mk_event(
+                run_id=run_id,
+                turn_id=turn_id,
+                sequence_no=seq,
+                event_type=event_name,  # type: ignore[arg-type]
+                payload=payload,
+            )
+            return _sse_encode(event_name, envelope.to_dict())
+
+        yield _emit(
+            "response.started",
+            {"provider": req.provider, "model": req.model},
+        )
+        yield _emit(
+            "stream_start",
+            {"provider": req.provider, "model": req.model},
+        )
+        prepared = await _prepare_ask_context(req, user=user, run_id=run_id, started=started)
+        if isinstance(prepared, JSONResponse):
+            body = _json_response_body(prepared)
+            yield _emit("response.error", body)
+            yield _emit(
+                "stream_end",
+                {
+                    "status": "error",
+                },
+            )
+            yield _emit(
+                "response.completed",
+                _stream_error_completion_payload(body),
+            )
+            return
+        if not isinstance(prepared, _PreparedAskContext):
+            result_payload = prepared
+            streamed_direct = False
+        else:
+            streamed_direct = False
+            try:
+                # OpenRouter currently returns a buffered reply. Complete its
+                # history/replay transaction before delivering any answer bytes.
+                if req.provider != "openrouter" and hasattr(prepared.gateway, "stream_infer"):
+                    streamed_direct = True
+                    streamed_result = None
+                    async for event in prepared.gateway.stream_infer(prepared.inference_request):
+                        event_type = str(event.get("type") or "").strip().lower()
+                        if event_type == "text_delta":
+                            chunk = str(event.get("text") or "")
+                            if chunk:
+                                yield _emit("response.delta", {"text": chunk})
+                                yield _emit("stream_delta", {"chars": len(chunk)})
+                            continue
+                        candidate = event.get("result")
+                        if candidate is not None:
+                            streamed_result = candidate
+                    if streamed_result is None:
+                        raise ContractError(
+                            APIErrorCode.PROVIDER_UNAVAILABLE,
+                            "Streaming completed without a final inference result.",
+                        )
+                    result_payload = await _finalize_ask_result(prepared, result=streamed_result)
+                else:
+                    result_payload = await _execute_ask(prepared)
+            except ContractError as e:
+                body = {
+                    "error": e.code.value,
+                    "detail": e.detail,
+                    "run_id": run_id,
+                    "context_enabled": prepared.context_enabled,
+                    **prepared.mode_payload,
+                }
+                yield _emit("response.error", body)
+                yield _emit("stream_end", {"status": "error"})
+                yield _emit(
+                    "response.completed",
+                    _stream_error_completion_payload(body),
+                )
+                return
+            except ModelDisabled as e:
+                body = {
+                    "error": "model_disabled",
+                    "detail": str(e),
+                    "run_id": run_id,
+                    "context_enabled": prepared.context_enabled,
+                    **prepared.mode_payload,
+                }
+                yield _emit("response.error", body)
+                yield _emit("stream_end", {"status": "error"})
+                yield _emit(
+                    "response.completed",
+                    _stream_error_completion_payload(body),
+                )
+                return
+            except InsufficientBalance as e:
+                body = {
+                    "error": APIErrorCode.INSUFFICIENT_BALANCE.value,
+                    "detail": str(e),
+                    "run_id": run_id,
+                    "context_enabled": prepared.context_enabled,
+                    **prepared.mode_payload,
+                }
+                yield _emit("response.error", body)
+                yield _emit("stream_end", {"status": "error"})
+                yield _emit(
+                    "response.completed",
+                    _stream_error_completion_payload(body),
+                )
+                return
+
+        streamed_tool_calls = list(result_payload.get("tool_calls") or [])
+        if streamed_direct and streamed_tool_calls:
+            for tool in streamed_tool_calls:
+                yield _emit("tool_start", {"tool": tool})
+                yield _emit("tool_progress", {"tool": tool, "phase": "executing"})
+                yield _emit("tool.call", {"tool": tool})
+                yield _emit("tool_result", {"tool": tool, "status": "emitted"})
+                yield _emit("tool.result", {"tool": tool, "status": "emitted"})
+
+        if not streamed_direct:
+            for tool in streamed_tool_calls:
+                yield _emit("tool_start", {"tool": tool})
+                yield _emit("tool_progress", {"tool": tool, "phase": "executing"})
+                yield _emit("tool.call", {"tool": tool})
+                yield _emit("tool_result", {"tool": tool, "status": "emitted"})
+                yield _emit("tool.result", {"tool": tool, "status": "emitted"})
+
+            for chunk in _chunk_text(str(result_payload.get("text") or "")):
+                yield _emit("response.delta", {"text": chunk})
+                yield _emit("stream_delta", {"chars": len(chunk)})
+
+        yield _emit("stream_end", {"status": "ok"})
+        yield _emit(
+            "response.completed",
+            {
+                "status": "ok",
+                "text": str(result_payload.get("text", "") or ""),
+                "v_cost": str(result_payload.get("v_cost", "0") or "0"),
+                "thread_id": result_payload.get("thread_id"),
+                "thread_status": result_payload.get("thread_status"),
+                "context_enabled": result_payload.get("context_enabled"),
+                "warning": result_payload.get("warning"),
+                "input_tokens": int(result_payload.get("input_tokens", 0) or 0),
+                "output_tokens": int(result_payload.get("output_tokens", 0) or 0),
+                "total_tokens": int(result_payload.get("total_tokens", 0) or 0),
+                "web_search_requested": bool(result_payload.get("web_search_requested", False)),
+                "web_search_effective": bool(result_payload.get("web_search_effective", False)),
+                "web_search_used": bool(result_payload.get("web_search_used", False)),
+                "web_search_retry_without_tool": bool(result_payload.get("web_search_retry_without_tool", False)),
+                "web_search_sources": list(result_payload.get("web_search_sources") or []),
+                "web_search_source_scores": list(result_payload.get("web_search_source_scores") or []),
+                "web_search_source_ranking": list(result_payload.get("web_search_source_ranking") or []),
+                "tool_calls": streamed_tool_calls,
+                "warnings": list(result_payload.get("warnings") or []),
+                **({"native_generation": result_payload["native_generation"],
+                    "completion_status": result_payload["completion_status"],
+                    "provider_request_id": result_payload.get("provider_request_id")}
+                   if "native_generation" in result_payload else
+                   {"completion_status": _public_completion_status(result_payload["completion_status"])}
+                   if "completion_status" in result_payload else {}),
+            },
+        )
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache"},
+    )

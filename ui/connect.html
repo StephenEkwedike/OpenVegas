@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="referrer" content="no-referrer" />
+  <title>Connect your terminal | OpenVegas</title>
+  <link rel="icon" type="image/svg+xml" href="/ui/assets/brand/favicon.svg" />
+  <link rel="stylesheet" href="/ui/assets/theme.css?v=20260330" />
+  <link rel="stylesheet" href="/ui/assets/layout.css?v=20260330" />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet" />
+  <script defer src="/ui/assets/theme-fallback.js?v=20260330"></script>
+  <style>
+    .connect-card { max-width:680px; margin:8vh auto; padding:clamp(24px,6vw,56px); }
+    .connect-code { font-family:'IBM Plex Mono',monospace; font-size:clamp(22px,5vw,36px); letter-spacing:.12em; padding:24px 0; }
+    .connect-actions { display:flex; gap:12px; flex-wrap:wrap; margin-top:28px; }
+    .connect-card p { line-height:1.6; }
+    .connect-actions [hidden] { display:none !important; }
+  </style>
+<link rel="stylesheet" href="/ui/assets/home-clarity.css?v=20261028" />
+<link rel="stylesheet" href="/ui/assets/site-clarity.css?v=20261028" />
+</head>
+<body class="site-clarity">
+  <nav class="top-nav"><a class="brand-link text-mono-sm" href="/ui">[ OPENVEGAS ]</a></nav>
+  <main class="container page-shell">
+    <section class="card connect-card" aria-labelledby="title">
+      <div class="text-mono-xs">TERMINAL CONNECTION</div>
+      <h1 id="title">Your account. Your coding tools.</h1>
+      <p>Connect Claude Code and Codex to your existing OpenVegas wallet and cosmetics.</p>
+      <div id="code" class="connect-code" aria-label="Confirmation code"></div>
+      <p>Only approve if you just ran OpenVegas and this code matches your terminal.
+        Never approve a code sent by someone else.</p>
+      <p id="connectionScope">This grants balance and inventory access, cosmetic selection and non-rewarding activity events.
+        It does not place bets or change your Claude or ChatGPT subscription.
+        Using $V for AI requires a separate spending confirmation and limit in OpenVegas.</p>
+      <p id="status" role="status" aria-live="polite">Checking your account...</p>
+      <div class="connect-actions">
+        <button id="approve" class="btn btn-primary" type="button" hidden disabled>Approve connection</button>
+        <button id="deny" class="btn" type="button" hidden disabled>Deny</button>
+        <a id="login" class="btn btn-primary" hidden>Sign in/up</a>
+      </div>
+    </section>
+  </main>
+  <script type="module" src="/ui/assets/connect.js?v=20261031-approval"></script>
+<footer class="site-footer"><div><strong>OpenVegas. Agentic Entertainment.</strong><p>A hand. Then back to the build.</p></div><a class="partnership-cta" href="/ui/data-partnerships">Data Partnerships <span aria-hidden="true">&nbsp;↗</span></a><div class="site-footer-links"><a href="/ui/how-to-play">How to Play</a><a href="/ui/arena">Arena · Soon</a><a href="/ui/agents">Agents</a><a href="/ui/faq">FAQ</a><a href="/ui/security">Security</a><a href="/ui/contact">Contact</a></div></footer>
+</body>
+</html>

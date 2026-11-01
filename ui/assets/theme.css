@@ -1,0 +1,254 @@
+:root {
+  color-scheme: light;
+
+  --bg-main: #f6f7fb;
+  --text-main: #151922;
+  --line: #d3d9e5;
+  --muted: #5e697b;
+  --surface-1: rgba(255, 255, 255, 0.68);
+  --surface-2: rgba(255, 255, 255, 0.9);
+  --nav-bg: rgba(246, 247, 251, 0.9);
+  --card-bg: rgba(255, 255, 255, 0.62);
+  --card-bg-hover: rgba(255, 255, 255, 0.88);
+  --input-bg: #ffffff;
+  --input-text: #151922;
+  --qr-bg: #ffffff;
+  --accent-aqua: #11788a;
+  --accent-lime: #1d8c3a;
+  --bg-glow-aqua: rgba(17, 120, 138, 0.14);
+  --bg-glow-lime: rgba(29, 140, 58, 0.12);
+
+  --black: var(--bg-main);
+  --white: var(--text-main);
+  --grey-dark: var(--line);
+  --grey-mid: var(--muted);
+  --grey-light: #4a5567;
+  --aqua: var(--accent-aqua);
+  --lime: var(--accent-lime);
+  --warn: #9a6f13;
+  --bad: #b3261e;
+  --ok: #1b7a3c;
+  --text: var(--text-main);
+
+  --avatar-border: #bec9dc;
+  --avatar-bg: #dfe7f5;
+  --avatar-glow: rgba(17, 120, 138, 0.2);
+  --avatar-bubble: #edf2fb;
+  --avatar-frame-start: #f9fbff;
+  --avatar-frame-mid: #e8eef9;
+  --avatar-frame-end: #dde6f3;
+  --avatar-canvas-border: rgba(40, 78, 134, 0.4);
+  --avatar-canvas-bg: #eef3fb;
+
+  --font-sans: "Space Grotesk", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", "SFMono-Regular", Menlo, monospace;
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg-main: #040404;
+  --text-main: #f5f5f5;
+  --line: #1a1a1a;
+  --muted: #9a9a9a;
+  --surface-1: rgba(255, 255, 255, 0.02);
+  --surface-2: rgba(255, 255, 255, 0.06);
+  --nav-bg: rgba(4, 4, 4, 0.82);
+  --card-bg: rgba(255, 255, 255, 0.01);
+  --card-bg-hover: rgba(255, 255, 255, 0.03);
+  --input-bg: #0f1524;
+  --input-text: #f5f5f5;
+  --qr-bg: #ffffff;
+  --accent-aqua: #44c6dd;
+  --accent-lime: #7cdf7c;
+  --bg-glow-aqua: rgba(68, 198, 221, 0.08);
+  --bg-glow-lime: rgba(124, 223, 124, 0.06);
+
+  --black: var(--bg-main);
+  --white: var(--text-main);
+  --grey-dark: var(--line);
+  --grey-mid: #4f4f4f;
+  --grey-light: var(--muted);
+  --aqua: var(--accent-aqua);
+  --lime: var(--accent-lime);
+  --warn: #ffd166;
+  --bad: #ff7b7b;
+  --ok: #67d389;
+  --text: var(--text-main);
+
+  --avatar-border: #263247;
+  --avatar-bg: #0c0f14;
+  --avatar-glow: rgba(68, 198, 221, 0.2);
+  --avatar-bubble: #121b2e;
+  --avatar-frame-start: #101a2d;
+  --avatar-frame-mid: #0a111f;
+  --avatar-frame-end: #080d17;
+  --avatar-canvas-border: rgba(43, 74, 120, 0.45);
+  --avatar-canvas-bg: #090d16;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  min-height: 100%;
+}
+
+body {
+  background:
+    radial-gradient(circle at 88% 5%, var(--bg-glow-aqua), transparent 32%),
+    radial-gradient(circle at 12% 90%, var(--bg-glow-lime), transparent 32%),
+    var(--bg-main);
+  color: var(--text-main);
+  font-family: var(--font-sans);
+  overflow-x: hidden;
+}
+
+a {
+  color: inherit;
+}
+
+.text-mono-sm {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--grey-mid);
+}
+
+.text-mono-xs {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.11em;
+  color: var(--grey-mid);
+}
+
+.c-aqua {
+  color: var(--aqua);
+}
+
+.c-lime {
+  color: var(--lime);
+}
+
+.c-warn {
+  color: var(--warn);
+}
+
+.c-bad {
+  color: var(--bad);
+}
+
+.border-b {
+  border-bottom: 1px solid var(--line);
+}
+
+.border-r {
+  border-right: 1px solid var(--line);
+}
+
+.ov-avatar-widget {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ov-avatar-framebox {
+  border: 1px solid var(--avatar-border);
+  border-radius: 14px;
+  background: radial-gradient(circle at 50% 14%, var(--avatar-frame-start) 0%, var(--avatar-frame-mid) 48%, var(--avatar-frame-end) 100%);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.03), 0 0 30px var(--avatar-glow);
+  padding: 10px;
+}
+
+.ov-avatar-canvas {
+  width: 100%;
+  max-width: 150px;
+  height: auto;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  display: block;
+  margin: 0 auto;
+  border-radius: 8px;
+  border: 1px solid var(--avatar-canvas-border);
+  background: var(--avatar-canvas-bg);
+}
+
+.ov-avatar-state {
+  margin-top: 4px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--grey-light);
+  background: var(--avatar-bubble);
+  border: 1px solid var(--avatar-border);
+  border-radius: 8px;
+  padding: 6px 8px;
+}
+
+.theme-toggle {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text-main);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 9px;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  transition: border-color 0.2s ease, transform 0.2s ease, background-color 0.2s ease;
+  flex-shrink: 0;
+}
+
+.theme-toggle:hover {
+  border-color: var(--aqua);
+}
+
+.theme-toggle:focus-visible {
+  outline: 2px solid var(--aqua);
+  outline-offset: 2px;
+}
+
+.theme-toggle__icon {
+  font-size: 12px;
+  line-height: 1;
+  opacity: 0.68;
+  user-select: none;
+}
+
+.theme-toggle__rail {
+  position: relative;
+  width: 42px;
+  height: 20px;
+  border-radius: 999px;
+  background: var(--line);
+}
+
+.theme-toggle__thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--text-main);
+  transition: transform 0.2s ease;
+}
+
+.theme-toggle[aria-checked="true"] .theme-toggle__thumb {
+  transform: translateX(22px);
+}
+
+.theme-toggle--floating {
+  position: fixed;
+  top: 14px;
+  right: 16px;
+  z-index: 120;
+}
