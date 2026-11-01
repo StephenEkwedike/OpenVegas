@@ -80,6 +80,37 @@ class AgentFunding:
     def __init__(self, db, wallet, gateway):
         self.db, self.wallet, self.gateway = db, wallet, gateway
 
+    async def daily_limit(self, tx, agent_id, mode, amount):
+        cap = decimal_amount(
+            os.getenv("OPENVEGAS_AGENT_FUNDING_DAILY_USD", "500"),
+            minimum=Decimal(10), maximum=Decimal(5000),
+        )
+        try:
+            attempts = int(os.getenv("OPENVEGAS_AGENT_FUNDING_DAILY_ATTEMPTS", "10"))
+            if not 1 <= attempts <= 100:
+                raise ValueError
+        except ValueError:
+            raise BillingError("Agent daily funding limit is not configured safely") from None
+        used = await tx.fetchrow(
+            """SELECT COALESCE(sum(amount_usd),0) AS amount, count(*) AS attempts
+            FROM agent_funding_orders WHERE agent_id=$1 AND livemode=$2
+            AND created_at >= date_trunc('day',now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'""",
+            agent_id, mode,
+        )
+        # Failed, refunded and ambiguous attempts still consume the daily limit.
+        if used["amount"] + amount > cap:
+            return "daily_cap"
+        if used["attempts"] >= attempts:
+            return "daily_attempts"
+        return None
+
+    async def lock_funding(self, tx, agent_id):
+        # Manual and automatic funding serialize on the same durable transaction lock.
+        await tx.execute(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1,0))",
+            "agent-funding:" + str(agent_id),
+        )
+
     async def authorize(self, conn, user_id, org_id, agent_id, *, active=True):
         row = await conn.fetchrow(
             """SELECT a.status,o.is_demo FROM agent_accounts a
@@ -141,7 +172,20 @@ class AgentFunding:
                 places=6,
             )
             async with self.db.transaction() as tx:
+                await self.lock_funding(tx, agent_id)
                 await self.authorize(tx, user_id, org_id, agent_id)
+                existing = await tx.fetchrow(
+                    "SELECT * FROM agent_funding_orders WHERE user_id=$1 AND idempotency_key=$2",
+                    user_id, idempotency_key,
+                )
+                if not existing:
+                    if await self.daily_limit(tx, agent_id, mode, amount):
+                        raise BillingError("Daily agent funding limit reached. Try again tomorrow (UTC).")
+                    if await tx.fetchval(
+                        "SELECT EXISTS(SELECT 1 FROM agent_funding_orders WHERE agent_id=$1 AND status IN ('unknown','pending','requires_action','review'))",
+                        agent_id,
+                    ):
+                        raise BillingError("An existing payment needs review before another purchase.")
                 await tx.execute(
                     """INSERT INTO agent_funding_orders
                     (id,org_id,agent_id,user_id,amount_usd,credit_v,livemode,customer_id,source,idempotency_key,payload_hash)
@@ -406,6 +450,7 @@ class AgentFunding:
             )
             if not p or not p["enabled"] or p["livemode"] != mode:
                 return "disabled"
+            await self.lock_funding(tx, agent_id)
             try:
                 await self.authorize(tx, str(p["user_id"]), str(p["org_id"]), str(agent_id))
             except BillingError:
@@ -435,6 +480,9 @@ class AgentFunding:
             )
             if used + p["amount_usd"] > p["monthly_cap_usd"]:
                 return "monthly_cap"
+            daily_limit = await self.daily_limit(tx, agent_id, mode, p["amount_usd"])
+            if daily_limit:
+                return daily_limit
             oid = str(uuid4())
             rate = decimal_amount(
                 os.getenv("V_PER_USD", "100"),

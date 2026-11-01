@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 @router.get("/auth/config")
-async def client_auth_config():
+async def client_auth_config(request: Request):
     """Public client settings only; never publish a server/service-role key."""
     try:
         config = public_auth_config(
@@ -34,7 +34,11 @@ async def client_auth_config():
         )
     except ValueError:
         raise HTTPException(503, "Public authentication configuration is unavailable") from None
-    config["google_enabled"] = bool(os.getenv("OPENVEGAS_GOOGLE_AUTH_REDIRECT_URL", "").strip())
+    try:
+        _google_callback(request)
+        config["google_enabled"] = True
+    except HTTPException:
+        config["google_enabled"] = False
     return JSONResponse(config, headers={"Cache-Control": "no-store"})
 
 RUNTIME_FLAGS = current_flags()  # frozen at process boot via @lru_cache
@@ -69,15 +73,27 @@ def _google_next(value):
 
 
 def _google_callback(request):
-    callback = os.getenv("OPENVEGAS_GOOGLE_AUTH_REDIRECT_URL", "").strip()
-    parsed = urlsplit(callback)
-    if (not callback or parsed.path != "/ui/auth/google/callback" or parsed.query or parsed.fragment
-            or parsed.username or parsed.password or
-            f"{parsed.scheme}://{parsed.netloc}" != _request_origin_base(request) or
-            (parsed.scheme != "https" and not (not _is_production_env() and
-                parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"}))):
-        raise HTTPException(503, "Google sign-in is not configured for this site")
-    return callback
+    # Each origin keeps its own PKCE cookie. Never construct redirects from an
+    # untrusted Host header or redirect a flow to a different cookie origin.
+    callbacks = [os.getenv("OPENVEGAS_GOOGLE_AUTH_REDIRECT_URL", "")]
+    callbacks.extend(os.getenv("OPENVEGAS_GOOGLE_AUTH_REDIRECT_URLS", "").split(","))
+    origin = _request_origin_base(request)
+    for callback in callbacks:
+        callback = callback.strip()
+        try:
+            parsed = urlsplit(callback)
+            valid = (callback and parsed.path == "/ui/auth/google/callback"
+                and not parsed.query and not parsed.fragment
+                and not parsed.username and not parsed.password
+                and not any(ord(c) < 33 for c in callback) and "\\" not in callback
+                and f"{parsed.scheme}://{parsed.netloc}" == origin
+                and (parsed.scheme == "https" or (not _is_production_env()
+                    and parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1", "::1"})))
+        except ValueError:
+            valid = False
+        if valid:
+            return callback
+    raise HTTPException(503, "Google sign-in is not configured for this site")
 
 
 @router.post("/ui/auth/google/start")
