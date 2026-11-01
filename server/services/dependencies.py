@@ -211,7 +211,38 @@ async def request_with_http_client(method: str, url: str, **kwargs) -> httpx.Res
         return await temp_client.request(method, url, **kwargs)
 
 
+@dataclass(frozen=True)
+class _SchemaSnapshot:
+    migrations: frozenset[str]
+    tables: frozenset[str]
+    columns: frozenset[tuple[str, str]]
+
+    @classmethod
+    async def load(cls, db: PostgresDB) -> "_SchemaSnapshot":
+        # One catalog snapshot per check, never cached across readiness requests.
+        rows = await db.fetch("""
+            SELECT 'migration' AS kind, version::text AS name, '' AS detail
+            FROM public.schema_migrations
+            UNION ALL
+            SELECT 'table', table_name, '' FROM information_schema.tables
+            WHERE table_schema = 'public'
+            UNION ALL
+            SELECT 'column', table_name, column_name FROM information_schema.columns
+            WHERE table_schema = 'public'
+        """)
+        return cls(
+            frozenset(row["name"] for row in rows if row["kind"] == "migration"),
+            frozenset(row["name"] for row in rows if row["kind"] == "table"),
+            frozenset((row["name"], row["detail"]) for row in rows if row["kind"] == "column"),
+        )
+
+
 async def require_tables(db: Any, tables: set[str]) -> None:
+    if isinstance(db, _SchemaSnapshot):
+        missing = tables - db.tables
+        if missing:
+            raise RuntimeError(f"Missing required table: {sorted(missing)[0]}")
+        return
     for table in sorted(tables):
         row = await db.fetchrow(
             """
@@ -226,6 +257,12 @@ async def require_tables(db: Any, tables: set[str]) -> None:
 
 
 async def require_columns(db: Any, columns: set[tuple[str, str]]) -> None:
+    if isinstance(db, _SchemaSnapshot):
+        missing = columns - db.columns
+        if missing:
+            table, column = sorted(missing)[0]
+            raise RuntimeError(f"Missing required column: {table}.{column}")
+        return
     for table, column in sorted(columns):
         row = await db.fetchrow(
             """
@@ -241,6 +278,12 @@ async def require_columns(db: Any, columns: set[tuple[str, str]]) -> None:
 
 
 async def require_migration_min(db: Any, version: str) -> None:
+    if isinstance(db, _SchemaSnapshot):
+        if version not in db.migrations:
+            raise RuntimeError(
+                f"Schema migration '{version}' not applied. Run Supabase migrations before startup."
+            )
+        return
     row = await db.fetchrow(
         "SELECT version FROM schema_migrations WHERE version = $1",
         version,
@@ -252,6 +295,8 @@ async def require_migration_min(db: Any, version: str) -> None:
 
 
 async def assert_schema_compatible(db: Any, flags: FeatureFlags) -> None:
+    if isinstance(db, PostgresDB):
+        db = await _SchemaSnapshot.load(db)
     await require_migration_min(db, '059_agent_funding_settlement')
     await require_tables(db, {'agent_funding_orders', 'agent_auto_topups', 'agent_payment_adjustments'})
     await require_columns(db, {('organizations', 'is_demo'), ('agent_funding_orders', 'credited_at')})
@@ -265,8 +310,9 @@ async def assert_schema_compatible(db: Any, flags: FeatureFlags) -> None:
                                   "referral_sessions", "referral_eligible_items", "referral_grants"})
         await require_columns(db, {("cosmetic_entitlements", "source_referral_grant_id")})
     # Enrollment can be off while existing subscriptions still receive webhooks.
-    if os.getenv("OPENVEGAS_TV_BILLING_ENABLED", "0") == "1" or await db.fetchval(
-        "SELECT to_regclass('public.tv_subscriptions') IS NOT NULL"
+    if os.getenv("OPENVEGAS_TV_BILLING_ENABLED", "0") == "1" or (
+        "tv_subscriptions" in db.tables if isinstance(db, _SchemaSnapshot)
+        else await db.fetchval("SELECT to_regclass('public.tv_subscriptions') IS NOT NULL")
     ):
         await require_migration_min(db, "051_tv_billing")
         await require_migration_min(db, "054_tv_event_ordering")

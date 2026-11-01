@@ -363,13 +363,16 @@ async def health_ready():
     human_casino_enabled = bool(flags.human_casino_enabled)
     human_casino_schema_ready = bool(flags.human_casino_enabled)
 
+    phase = "database"
     try:
         await assert_db_ready()
         if os.getenv("OPENVEGAS_TEST_MODE", "0") != "1":
+            phase = "redis"
             await assert_redis_ready()
+        phase = "schema"
         await asyncio.wait_for(assert_schema_compatible(get_db(), flags), timeout=10)
     except Exception as exc:
-        logger.warning("Readiness failed: %s", type(exc).__name__)
+        logger.warning("Readiness failed (%s): %s", phase, type(exc).__name__)
         raise HTTPException(status_code=503, detail="Required application dependencies are not ready") from None
 
     if os.getenv("OPENVEGAS_TEST_MODE", "0") == "1":
