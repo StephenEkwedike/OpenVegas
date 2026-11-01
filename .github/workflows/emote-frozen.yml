@@ -41,8 +41,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libportaudio2
       - name: Export identical public-only source on every platform
         run: |
-          git -c core.autocrlf=false checkout-index --force --all
-          python scripts/prepare_public_release.py --output dist/public-source
+          git archive --format=zip --output ../release-source.zip HEAD
+          python -m zipfile -e ../release-source.zip dist/git-source
+          python dist/git-source/scripts/prepare_public_release.py --output dist/public-source
       - name: Install candidate build dependencies
         working-directory: dist/public-source
         env:
