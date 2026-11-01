@@ -467,8 +467,10 @@ async def reconcile(
 ):
     """Dry-run by default. DB must expose transaction/fetchrow; no costs accepted.
 
-    Production authorization is outside this module. CLI restricts its target to
-    explicit local disposable DBs. transport is an offline HTTP testing seam.
+    Production authorization is outside this module. The business console route
+    requires admin MFA and an exact plan confirmation; it permits only offline
+    direct receipts. CLI remains restricted to explicit local disposable DBs.
+    transport is an offline HTTP testing seam.
     """
     user, request = identifier(user_id), identifier(request_id)
     if apply:

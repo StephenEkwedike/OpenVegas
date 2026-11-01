@@ -31,7 +31,7 @@ from server.middleware.admin import (
     verify_admin_token,
 )
 from server.routes.ui_auth import _set_refresh_cookie
-from server.services.dependencies import get_db
+from server.services.dependencies import get_db, get_redis
 
 _requests = deque()
 _inflight = 0
@@ -97,6 +97,57 @@ class BoundedAdminRoute(APIRoute):
 router = APIRouter(prefix="/business", tags=["business"], route_class=BoundedAdminRoute)
 AdminIdentity = Annotated[dict, Depends(get_admin_identity)]
 VerifiedAdmin = Annotated[dict, Depends(require_admin)]
+
+
+class NativeRecoveryPlan(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    user_id: UUID
+    request_id: UUID
+
+
+class NativeRecoveryApply(NativeRecoveryPlan):
+    confirm_request: UUID
+    confirm_plan: str = Field(pattern=r'^[a-f0-9]{64}$')
+
+
+async def _native_recovery(body, identity, *, apply=False):
+    from openvegas.gateway.native_recovery import RecoveryError, reconcile
+    import httpx
+
+    if apply and body.confirm_request != body.request_id:
+        raise HTTPException(400, 'Confirm the exact request shown in the recovery plan')
+    db = get_db()
+    rows = await db.fetch(
+        'SELECT provider FROM inference_preauthorizations WHERE request_id=$1 AND user_id=$2 LIMIT 2',
+        str(body.request_id), str(body.user_id))
+    if len(rows) != 1 or rows[0]['provider'] not in {'openai', 'anthropic'}:
+        raise HTTPException(409, 'A single recorded direct-provider reservation is required')
+
+    def no_supplier_request(_):
+        raise RecoveryError('OFFLINE_DIRECT_RECEIPT_REQUIRED')
+
+    try:
+        return await reconcile(db, user_id=str(body.user_id), request_id=str(body.request_id),
+            redis=get_redis(), apply=apply,
+            operator_id=identity['user_id'] if apply else None,
+            expected_plan=body.confirm_plan if apply else None,
+            transport=httpx.MockTransport(no_supplier_request))
+    except RecoveryError as error:
+        reason = str(error)
+        if not re.fullmatch(r'[A-Z0-9_]{1,100}', reason):
+            reason = 'RECEIPT_NOT_VERIFIED'
+        raise HTTPException(409, {'reason': reason,
+            'message': 'No new inference or automatic refund. Inspect the original request.'}) from None
+
+
+@router.post('/native-recovery/plan')
+async def native_recovery_plan(body: NativeRecoveryPlan, identity: VerifiedAdmin):
+    return await _native_recovery(body, identity)
+
+
+@router.post('/native-recovery/apply')
+async def native_recovery_apply(body: NativeRecoveryApply, identity: VerifiedAdmin):
+    return await _native_recovery(body, identity, apply=True)
 
 
 def _token(request: Request) -> str:
