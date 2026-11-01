@@ -36,6 +36,10 @@ def quote(model, provider="openrouter"):
             "messages" if provider == "anthropic" else "responses") + "_direct_v1",
             policy="reviewed_direct_token_cost_plus_markup_v1",
             direct_metering=review(provider, model["model_id"], model))
+        if provider == 'openai' and 'cache_write_30m_usd_per_million' in pricing['direct_metering']:
+            # Request validation enforces one lifetime; freeze it for receipts
+            # whose provider reports a write total without a duration breakdown.
+            pricing['direct_cache_default_ttl'] = '30m'
         media = get_model_review(provider, model["model_id"]).get("native_media")
         if media is not None:
             if (type(media) is not dict or media.get("pricing") != "input_tokens_only"

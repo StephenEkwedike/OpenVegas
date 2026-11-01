@@ -8,6 +8,7 @@ ENDPOINTS = {
     "anthropic": ("messages", "https://api.anthropic.com/v1/messages"),
     "openai": ("responses", "https://api.openai.com/v1/responses"),
 }
+OPENAI_WRITE_RATES = {"cache_write_30m_usd_per_million", "cache_write_12h_usd_per_million"}
 
 
 def review(provider, model, config):
@@ -34,6 +35,8 @@ def review(provider, model, config):
     keys = {"cached_input_usd_per_million"}
     if provider == "anthropic":
         keys |= {"cache_write_5m_usd_per_million", "cache_write_1h_usd_per_million"}
+    elif type(rates) is dict and OPENAI_WRITE_RATES & rates.keys():
+        keys |= OPENAI_WRITE_RATES
     if type(rates) is not dict or set(rates) != keys:
         raise ValueError("Direct cache pricing requires explicit review")
     normalized = {key: str(amount(rates[key])) for key in sorted(keys)}
@@ -44,6 +47,12 @@ def review(provider, model, config):
         amount(rates[key]) > incoming * 2 for key in keys if key.startswith("cache_write")
     ):
         raise ValueError("Cache write price exceeds reservation")
+    if provider == "openai" and OPENAI_WRITE_RATES <= keys and (
+        incoming <= 0
+        or amount(rates["cache_write_30m_usd_per_million"]) != incoming * Decimal("1.25")
+        or amount(rates["cache_write_12h_usd_per_million"]) != incoming * Decimal("2.5")
+    ):
+        raise ValueError("OpenAI cache write prices require the reviewed lifetime contract")
     return normalized
 
 
@@ -52,6 +61,26 @@ def count(usage, key, *, default=None):
     if type(value) is not int or not 0 <= value <= 100_000_000:
         raise ValueError("Missing or invalid direct usage count")
     return value
+
+
+def openai_cache_counts(details, *, reviewed_writes=False, default_ttl=None):
+    if type(details) is not dict:
+        raise ValueError("Invalid direct cache details")
+    cached = count(details, "cached_tokens", default=0)
+    written = count(details, "cache_write_tokens", default=None if reviewed_writes else 0)
+    if reviewed_writes and default_ttl == '30m' and 'cache_write_tokens_details' not in details:
+        return cached, written, 0
+    durations = details.get("cache_write_tokens_details", {})
+    if (type(durations) is not dict
+            or set(durations) - {"ttl_30m_tokens", "ttl_12h_tokens"}):
+        raise ValueError("Unreviewed direct cache write duration")
+    short = count(durations, "ttl_30m_tokens", default=0)
+    long = count(durations, "ttl_12h_tokens", default=0)
+    if not reviewed_writes and (written or short or long):
+        raise ValueError("Unreviewed direct cache write usage")
+    if written != short + long:
+        raise ValueError("Direct cache write duration does not match total")
+    return cached, short, long
 
 
 def metered_cost(provider, usage, pricing, response):
@@ -76,25 +105,18 @@ def metered_cost(provider, usage, pricing, response):
     rates = pricing["direct_metering"]
     cost = Decimal(outputs) * amount(pricing["supplier_output_usd_per_million"])
     if provider == "openai":
-        details = usage.get("input_tokens_details") or {}
-        if type(details) is not dict:
-            raise ValueError("Invalid direct cache details")
-        # Newer models bill writes separately. Never silently price them as
-        # ordinary input under an older cached-read-only review.
-        if count(details, "cache_write_tokens", default=0):
-            raise ValueError("Unreviewed direct cache write usage")
-        writes = details.get("cache_write_tokens_details")
-        if writes is not None and (
-            type(writes) is not dict
-            or any(name not in {"ttl_30m_tokens", "ttl_12h_tokens"}
-                   or type(n) is not int or n != 0 for name, n in writes.items())
-        ):
-            raise ValueError("Unreviewed direct cache write duration")
-        cached = count(details, "cached_tokens", default=0)
-        if cached > inputs:
-            raise ValueError("Cached count exceeds input usage")
-        cost += (inputs - cached) * amount(pricing["supplier_input_usd_per_million"])
+        reviewed_writes = OPENAI_WRITE_RATES <= rates.keys()
+        cached, short, long = openai_cache_counts(
+            usage.get("input_tokens_details", {}), reviewed_writes=reviewed_writes,
+            default_ttl=pricing.get('direct_cache_default_ttl'))
+        if cached + short + long > inputs:
+            raise ValueError("Cache counts exceed input usage")
+        # Write rates replace ordinary input pricing; they are not surcharges.
+        cost += (inputs - cached - short - long) * amount(pricing["supplier_input_usd_per_million"])
         cost += cached * amount(rates["cached_input_usd_per_million"])
+        if reviewed_writes:
+            cost += short * amount(rates["cache_write_30m_usd_per_million"])
+            cost += long * amount(rates["cache_write_12h_usd_per_million"])
     else:
         cached = count(usage, "cache_read_input_tokens", default=0)
         written = count(usage, "cache_creation_input_tokens", default=0)

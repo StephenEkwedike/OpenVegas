@@ -7,9 +7,18 @@ from openvegas.gateway.native_pricing import amount
 def usage_facts(provider, usage):
     facts = {key: count(usage, key) for key in ("input_tokens", "output_tokens")}
     if provider == "openai":
+        details = usage.get("input_tokens_details") or {}
         facts["input_tokens_details"] = {
-            "cached_tokens": count(usage.get("input_tokens_details") or {}, "cached_tokens", default=0)
+            "cached_tokens": count(details, "cached_tokens", default=0)
         }
+        if "cache_write_tokens" in details:
+            facts["input_tokens_details"]["cache_write_tokens"] = count(details, "cache_write_tokens")
+        if "cache_write_tokens_details" in details:
+            facts["input_tokens_details"]["cache_write_tokens_details"] = {
+                key: count(details["cache_write_tokens_details"], key)
+                for key in ("ttl_30m_tokens", "ttl_12h_tokens")
+                if key in details["cache_write_tokens_details"]
+            }
     else:
         for key in ("cache_read_input_tokens", "cache_creation_input_tokens"):
             facts[key] = count(usage, key, default=0)

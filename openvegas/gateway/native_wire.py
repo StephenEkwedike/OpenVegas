@@ -127,6 +127,29 @@ def has_deferred_tools(tools):
                for tool in tools)
 
 
+def cache_reservation_factor(provider, pricing, encoded):
+    from openvegas.gateway.native_direct import OPENAI_WRITE_RATES
+    if provider == "openai" and OPENAI_WRITE_RATES <= pricing.get("direct_metering", {}).keys():
+        # Whole-input upper bound covers implicit writes and per-block 12h TTLs.
+        # Integer scaling keeps the frozen dispatch/recovery format unchanged.
+        return 3
+    return 2 if '"cache_control"' in encoded else 1
+
+
+def validate_cache_lifetime(value, pricing):
+    if isinstance(value, dict):
+        if 'prompt_cache_breakpoint' in value:
+            point = value['prompt_cache_breakpoint']
+            if (pricing.get('direct_cache_default_ttl') != '30m' or type(point) is not dict
+                    or point.get('ttl', '30m') != '30m'):
+                reject('This native quote supports only 30-minute cache writes. Nothing was changed or sent.')
+        for child in value.values():
+            validate_cache_lifetime(child, pricing)
+    elif isinstance(value, list):
+        for child in value:
+            validate_cache_lifetime(child, pricing)
+
+
 def validate_claude_web_history(body):
     """Completed search history is inert; unresolved server calls can resume work."""
     pending, seen = set(), set()
@@ -172,7 +195,21 @@ def prepare_request(session, body, protocol, *, beta=""):
                if protocol == "messages" else
                {"model", "input", "instructions", "max_output_tokens", "stream", "tools", "tool_choice",
                 "reasoning", "text", "parallel_tool_calls", "store", "include", "temperature", "top_p",
-                "truncation", "metadata", "client_metadata", "prompt_cache_key", "previous_response_id", "max_tool_calls"})
+                "truncation", "metadata", "client_metadata", "prompt_cache_key", "prompt_cache_options",
+                "previous_response_id", "max_tool_calls"})
+    if "prompt_cache_options" in body:
+        from openvegas.gateway.native_direct import OPENAI_WRITE_RATES
+        options = body["prompt_cache_options"]
+        if (provider != "openai" or protocol != "responses"
+                or not OPENAI_WRITE_RATES <= session["pricing"].get("direct_metering", {}).keys()
+                or type(options) is not dict or set(options) - {"mode", "ttl"}
+                or type(options.get("mode", "implicit")) is not str
+                or type(options.get("ttl", "30m")) is not str
+                or options.get("mode", "implicit") not in {"implicit", "explicit"}
+                or options.get("ttl", "30m") != '30m'):
+            reject("Prompt cache options require reviewed write pricing and lifetimes.")
+    if protocol == 'responses':
+        validate_cache_lifetime(body, session['pricing'])
     if set(body) - allowed:
         reject("This native request contains unsupported options; nothing was dropped or sent.")
     if body.get("store") is True or body.get("previous_response_id") is not None:
@@ -238,7 +275,7 @@ def prepare_request(session, body, protocol, *, beta=""):
         reject("Native request exceeds its size limit.")
     # UTF-8 bytes are a conservative text/token bound; tool schemas count too.
     # Multimodal payloads use the reviewed full context bound, never an invented
-    # image/PDF token estimate. Cache writes reserve up to 2x normal input cost.
+    # image/PDF token estimate. Cache writes use a reviewed cost upper bound.
     input_bound = len(encoded.encode()) + 2048
     context = model_capabilities(provider, session["model"])["context_window_tokens"]
     if has_media(body) or web_calls:
@@ -246,7 +283,7 @@ def prepare_request(session, body, protocol, *, beta=""):
         # Duplicate detection precedes fresh-work review; no answer is cached.
         input_bound = context - limit if type(context) is int else input_bound
     # Cache-control can increase supplier input charges; reserve it conservatively.
-    cache_factor = 2 if '"cache_control"' in encoded else 1
+    cache_factor = cache_reservation_factor(provider, session["pricing"], encoded)
     input_bound *= cache_factor
     wire = WireRequest(protocol, encoded, canonical(session["pricing"]), input_bound, body.get("stream", False), beta, web_calls)
     key = hashlib.sha256((protocol + "\n" + encoded + "\n" + beta).encode()).hexdigest()
@@ -287,7 +324,7 @@ def validate_preflight(req, model_config):
     context = model_capabilities(req.provider, req.model)["context_window_tokens"]
     if type(context) is not int:
         reject("The selected model needs a current context review.")
-    cache_factor = 2 if '"cache_control"' in wire.encoded else 1
+    cache_factor = cache_reservation_factor(req.provider, wire.pricing, wire.encoded)
     if wire.input_bound // cache_factor + req.max_tokens > context:
         reject("Context exceeds the reviewed model limit; no history was truncated.")
     pricing = wire.pricing
