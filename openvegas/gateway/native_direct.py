@@ -79,6 +79,17 @@ def metered_cost(provider, usage, pricing, response):
         details = usage.get("input_tokens_details") or {}
         if type(details) is not dict:
             raise ValueError("Invalid direct cache details")
+        # Newer models bill writes separately. Never silently price them as
+        # ordinary input under an older cached-read-only review.
+        if count(details, "cache_write_tokens", default=0):
+            raise ValueError("Unreviewed direct cache write usage")
+        writes = details.get("cache_write_tokens_details")
+        if writes is not None and (
+            type(writes) is not dict
+            or any(name not in {"ttl_30m_tokens", "ttl_12h_tokens"}
+                   or type(n) is not int or n != 0 for name, n in writes.items())
+        ):
+            raise ValueError("Unreviewed direct cache write duration")
         cached = count(details, "cached_tokens", default=0)
         if cached > inputs:
             raise ValueError("Cached count exceeds input usage")

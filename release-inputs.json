@@ -1,4 +1,6 @@
 {
+  "certified": false,
+  "deployed": false,
   "files": {
     ".dockerignore": "27f688ab651730135344d6c2d7334457898422f526be382c18d4984cfa625bf8",
     "Dockerfile": "8f6994618a0ea4a53a1eaa3ed868f8a01bf7f178f0631e90ef238fef318f4cf1",
@@ -149,7 +151,7 @@
     "openvegas/gateway/gemini.py": "2073529ffa6a5c8d0b91c7b56a25e2444c389f45f0d1e94d48575c2850b4c86e",
     "openvegas/gateway/inference.py": "a18a47e746b6e1b1aa2d3cacb963cca0e4e0fa80ba450bd2273a8cf45f5b5c30",
     "openvegas/gateway/mistral.py": "7f7e1590416f116bf316ad46bd6c4ea3d4ba3ccbfc9a8f33b2a6d64a02b27323",
-    "openvegas/gateway/native_direct.py": "7a8e79d7cb2900ebe940e95d46e9dd6f06350adea76f58610deb36978b3a1900",
+    "openvegas/gateway/native_direct.py": "d06a515b9e15c76ea2d4d9a6c6611043ce8caf2dc8a0eb530c4a688aef04ac97",
     "openvegas/gateway/native_media.py": "7fbd23fa00fba40450a39e73c011a923b25505986265ef1840b75d648056a100",
     "openvegas/gateway/native_pricing.py": "a0b18cd5edd2af8d8a36c596122c6a8a4f3b1e686ee71fd14de1c2c78f2d50d9",
     "openvegas/gateway/native_receipt.py": "106ce2746acc1c2fce2af195be3964f4d2ec07e34584b86b55e90bdbe3a291e8",
@@ -460,6 +462,8 @@
     "ui/assets/deck.css": "2c3e207ff8ba77d17d45e82a3bc4fbb2c3806411444785b10fafc80407adf5b9",
     "ui/assets/deck.js": "8acf0a2f198df273fe1dcfb671bed3b53a9d34b23a4aa55115a8909459fb6f4f",
     "ui/assets/emote-view.js": "b86154fa9e1d88425dcc9c4b4c78869f24276d7f09d4fe6f20cc22b186768a7b",
+    "ui/assets/emotes.css": "a0b2c12a368624d44bda998ba9913e8ef64173c7d5f08c169cd37c342e54d1c6",
+    "ui/assets/emotes.js": "7b3802550665b9f97d90c9f710eecc9e301beb564d12135693744fdc488ff28c",
     "ui/assets/emotes/beat-maker/contact-dark.png": "cfd079dd1055cbed823ba9213231184e7a952a9274aac29481985956a4ccb0ff",
     "ui/assets/emotes/beat-maker/contact-light.png": "5fc127827bcaae084211e1bed8925222fb6572eb88804b21196bca17242cea79",
     "ui/assets/emotes/beat-maker/dance-dark.gif": "4b30eac852de9803b5199778d202031f143905135b0e75d3caf50769312b78a7",
@@ -509,8 +513,6 @@
     "ui/assets/emotes/visor-explorer/sheet.png": "4adfe850ba28b7a1f0ae3906d70f886eb69817e62b0f32b5fc43a7f58fc06a84",
     "ui/assets/emotes/visor-explorer/terminal-80x24-dark.gif": "6d1e416dc8ce67ad27243f6fdbf7bae773b3c27c20f4911ad64d0c27cc124e8a",
     "ui/assets/emotes/visor-explorer/terminal-80x24-light.gif": "311a69deb0e00d1637edfa5a022a1dcc9be134d06f3c091bd579d970fdb7a1be",
-    "ui/assets/emotes.css": "a0b2c12a368624d44bda998ba9913e8ef64173c7d5f08c169cd37c342e54d1c6",
-    "ui/assets/emotes.js": "7b3802550665b9f97d90c9f710eecc9e301beb564d12135693744fdc488ff28c",
     "ui/assets/growth.css": "606d631a4ed725a2767224e8aa2f3d36c84458dd30a12472de21090b8abb51df",
     "ui/assets/home-clarity.css": "5a0fcc25e893ac539ba204820ab212704e447b499e54c30bbb5fd50680787f47",
     "ui/assets/journey-analytics.js": "3547366404ff2b58dc24dd017d10680a9565e575c628804c95ff764f9cf4592b",
@@ -552,20 +554,18 @@
     "ui/login.html": "707c9a8a13cabf88ddb83f8c6ec9e5fe7afb7b6a6f76bb3a838e6ec1a2142452",
     "ui/payments.html": "5c646d1b393f8951db1f1652196aef37c3e08b3b8bfed7dacfc9389e631eb620",
     "ui/pricing.html": "103a8e6a052214a3b39b5c25be97473e5a4d9ee54c0be7473a26a28359617cd1",
+    "ui/privacy.html": "d97443d8d52cac081b3823e6bf1c9b62fdf84ef96fc61a9b3c60f63d63297134",
     "ui/product.html": "4bab74d78ad4b9afe2ceb82aded596ff6944d95dc627532a760507b91a633971",
     "ui/profile.html": "7749ad6b755481333585e80dbd9cad9c111451a24e9add1a1475894f7a739dba",
     "ui/referrals.html": "092c854dbfd4e0bab7dbeb97221232c3763589e392a89c74cb9407232c692d94",
     "ui/screen.png": "894adb80847de959ccfd8003f2eef566dca4e4af46669e11668f3f575b4e91c8",
     "ui/security.html": "51b25f26e637d0200bad8179da9e2a488c3704a79c7a1dc894f130fe8e6d6c48",
     "ui/subscription.html": "949851e324b52b8b28fe67c8d8ea4afcb8e402beff1703fb5db44e2e62973538",
+    "ui/terms.html": "1d38119f8bdb962e7b9c92aa47a26c704aaaf106ee5260336da6c609af5107b6",
     "ui/topup-checkout.html": "6f64962b3b3ba83f8d7a983a7d0045822c859222a94c91a7cd33669dd4b2546d",
     "ui/topup.html": "e5f5a1bd487b9efe99d22b3b6e35ef02cfbe89aa88e0d37e7ce879ee1176bc7d",
     "ui/transactions.html": "6b469e5929e4effc5ba1eebe6b7698d49d22d466be01d8c46cc33ea4722af027",
-    "ui/tv.html": "d9217e9eca8e020cd60b73f1663992e18b01c7f8ac1a8b9136317cc26f259941",
-    "ui/privacy.html": "d97443d8d52cac081b3823e6bf1c9b62fdf84ef96fc61a9b3c60f63d63297134",
-    "ui/terms.html": "1d38119f8bdb962e7b9c92aa47a26c704aaaf106ee5260336da6c609af5107b6"
+    "ui/tv.html": "d9217e9eca8e020cd60b73f1663992e18b01c7f8ac1a8b9136317cc26f259941"
   },
-  "private_art_excluded": true,
-  "deployed": false,
-  "certified": false
+  "private_art_excluded": true
 }
