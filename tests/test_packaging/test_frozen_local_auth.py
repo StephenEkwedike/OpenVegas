@@ -3,10 +3,18 @@ import builtins
 import importlib.util
 import json
 import sys
+import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+
+def test_keychain_dependency_is_explicit_without_biometrics():
+    root = Path(__file__).resolve().parents[2]
+    dependencies = tomllib.loads((root / "pyproject.toml").read_text())["project"]["dependencies"]
+    assert any(item.startswith("pyobjc-framework-Security") and "darwin" in item for item in dependencies)
+    assert not any("LocalAuthentication" in item for item in dependencies)
 
 
 @pytest.mark.parametrize("platform", ["darwin", "linux", "win32"])
