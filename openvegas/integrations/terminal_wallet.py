@@ -42,7 +42,7 @@ class WalletCredentials:
 
     def load(self):
         from .game_browser import game_credentials
-        game_token = game_credentials(self.backend).load()
+        game_token = game_credentials(self.backend).load_noninteractive()
         if game_token:
             return game_token
         if any(p.is_symlink() for p in (self.path, *self.path.parents)):
@@ -50,7 +50,7 @@ class WalletCredentials:
         try:
             fd = os.open(self.path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
         except FileNotFoundError:
-            return self.fallback.load()
+            return self.fallback.load_noninteractive()
         try:
             info = os.fstat(fd)
             if (not stat.S_ISREG(info.st_mode) or info.st_size > 1024 * 1024
@@ -76,7 +76,7 @@ class WalletCredentials:
         # Do not show a different integration account after a CLI logout/expiry.
         if 'session' in config:
             return None
-        return self.fallback.load()
+        return self.fallback.load_noninteractive()
 
 
 class CredentialReader:

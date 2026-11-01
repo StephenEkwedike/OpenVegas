@@ -4610,7 +4610,7 @@ def doctor_auth():
     _load_openvegas_env_defaults_from_dotenv()
     import sys as _sys
     from openvegas.config import (
-        get_session,
+        get_session_metadata as get_session,
         load_refresh_from_platform_store,
         platform_keychain_available,
     )
@@ -4637,7 +4637,7 @@ def whoami():
     _load_openvegas_env_defaults_from_dotenv()
     import base64
     import json as _json
-    from openvegas.config import get_session
+    from openvegas.config import get_session_metadata as get_session
 
     session = get_session() or {}
     token = str(session.get("access_token", "") or "").strip()
@@ -4819,7 +4819,7 @@ def balance():
     """Show your $V balance."""
     async def _balance():
         from openvegas.client import OpenVegasClient, APIError
-        from openvegas.config import get_session
+        from openvegas.config import get_session_metadata as get_session
         session = get_session() or {}
         if not (session.get("access_token") or session.get("refresh_token") or
                 session.get("refresh_storage") == "platform_credential_store"):

@@ -9,6 +9,7 @@ import stat
 import sys
 from pathlib import Path
 from urllib.parse import urlsplit
+from openvegas.keychain_access import keychain_call
 
 
 class IntegrationError(Exception):
@@ -62,15 +63,20 @@ class Credentials:
             os.chmod(self.path.parent, 0o700)
 
     def load(self) -> str | None:
+        # A file exists only after explicit file-storage consent. Do not unlock
+        # an unrelated/older Keychain item before validating that selected store.
+        if self.path.exists() or self.path.is_symlink():
+            return self._load_file()
         try:
             import keyring
-            value = keyring.get_password("openvegas-integrations", self.identity)
+            value = keychain_call(keyring.get_password, "openvegas-integrations", self.identity)
             if value:
                 return value
         except Exception:  # noqa: BLE001,S110 - third-party keyring backends vary; never log secrets.
             pass
-        if not self.path.exists():
-            return None
+        return None
+
+    def _load_file(self) -> str | None:
         if os.name != "posix":
             raise IntegrationError("An OS credential store is required on Windows.")
         self._directory()
@@ -85,12 +91,25 @@ class Credentials:
         finally:
             os.close(fd)
 
+    def load_noninteractive(self) -> str | None:
+        """HUD polling must never open macOS authorization dialogs."""
+        if self.path.exists() or self.path.is_symlink():
+            return self._load_file()
+        if sys.platform != "darwin":
+            return self.load()
+        try:
+            import keyring
+            return keychain_call(keyring.get_password, "openvegas-integrations", self.identity,
+                                 interactive=False)
+        except Exception:  # No interactive retry or plaintext migration on a denied read.
+            return None
+
     def save(self, token: str, *, allow_file=False):
         self._directory()
         try:
             import keyring
-            keyring.set_password("openvegas-integrations", self.identity, token)
-            if keyring.get_password("openvegas-integrations", self.identity) != token:
+            keychain_call(keyring.set_password, "openvegas-integrations", self.identity, token)
+            if keychain_call(keyring.get_password, "openvegas-integrations", self.identity) != token:
                 raise RuntimeError
             self.path.unlink(missing_ok=True)
             return "OS credential store"
@@ -115,7 +134,7 @@ class Credentials:
     def clear(self):
         try:
             import keyring
-            keyring.delete_password("openvegas-integrations", self.identity)
+            keychain_call(keyring.delete_password, "openvegas-integrations", self.identity)
         except Exception:  # noqa: BLE001,S110 - absent credentials are already cleared.
             pass
         self.path.unlink(missing_ok=True)

@@ -312,7 +312,10 @@ def _matches(actual, root):
 
 def _verified_previous(previous, directory, marketplace, actual):
     fingerprint = previous.get("fingerprint", "")
-    root = directory / fingerprint[:16]
+    bundle_id = previous.get("bundle_id", fingerprint[:16])
+    if not isinstance(bundle_id, str) or not re.fullmatch(r"[a-f0-9]{16}", bundle_id):
+        raise IntegrationError("Invalid integration bundle identity; settings preserved.")
+    root = directory / bundle_id
     if (not re.fullmatch(r"[a-f0-9]{64}", fingerprint)
             or previous.get("marketplace") != marketplace or previous.get("path") != str(root)
             or not _matches(actual, root)
@@ -326,6 +329,38 @@ def _verified_previous(previous, directory, marketplace, actual):
     if hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest() != fingerprint:
         raise IntegrationError("Existing bundle was modified; refusing to replace it.")
     return root
+
+
+def _refresh_codex_runtime(info, files, old_root, previous, summary, fd, raw):
+    """Keep hook source paths stable for a runtime-only update, not a hook change."""
+    if info['host'] != 'codex' or os.name != 'posix':
+        return None
+    old_files = {p.relative_to(old_root).as_posix(): p.read_text(encoding='utf-8')
+                 for p in old_root.rglob('*') if p.is_file()}
+    runtime = 'plugins/openvegas/.mcp.json'
+    if old_files.keys() != files.keys() or {
+            name for name in files if files[name] != old_files[name]} != {runtime}:
+        return None
+    from openvegas.emotes.spool import private_directory, atomic_write
+    fingerprint = hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()
+    result = {**summary, 'path': str(old_root), 'commands': [],
+              'fingerprint': fingerprint, 'bundle_id': old_root.name}
+    # Do not remove/re-add the plugin or edit Codex's approval store. The exact
+    # reviewed hook bytes remain unchanged; only the pinned MCP runtime moves.
+    plugin_dir = old_root / 'plugins/openvegas'
+    if plugin_dir.stat().st_uid != os.getuid():
+        raise IntegrationError('Plugin directory owner changed; settings preserved.')
+    plugin_dir.chmod(0o700)
+    with private_directory(plugin_dir) as plugin_fd:
+        atomic_write(fd, 'previous.json', raw)
+        try:
+            atomic_write(plugin_fd, '.mcp.json', files[runtime].encode())
+            atomic_write(fd, 'installed.json', json.dumps(result).encode())
+        except (OSError, IntegrationError):
+            atomic_write(plugin_fd, '.mcp.json', old_files[runtime].encode())
+            raise
+    return {**result, 'installed': True, 'updated': True,
+            'hooks_unchanged': True, 'reload': 'Restart Codex to load the updated runtime.'}
 
 
 def _remove_registration(info, marketplace, actual, *, env=None):
@@ -422,6 +457,8 @@ def install(host, *, dry_run=False, upgrade=False, env=None):
         previous = json.loads(raw) if raw else None
         actual = registration(info, marketplace, env=env)
         if previous and previous.get("fingerprint") == fingerprint:
+            root = _verified_previous(previous, directory, marketplace, actual)
+            summary['path'] = str(root)
             if _matches(actual, root) and all(actual[k] for k in ("registered", "installed", "enabled")):
                 return {**summary, "installed": True, "unchanged": True}
             raise IntegrationError("Host integration was removed, disabled or changed outside OpenVegas. "
@@ -431,6 +468,9 @@ def install(host, *, dry_run=False, upgrade=False, env=None):
             if not upgrade:
                 raise IntegrationError("An older OpenVegas plugin is installed. Run openvegas go to review "
                                        "and approve its update; existing files were preserved.")
+            refreshed = _refresh_codex_runtime(info, files, old_root, previous, summary, fd, raw)
+            if refreshed:
+                return refreshed
         if not previous and (actual["registered"] or actual["installed"]):
             raise IntegrationError("This integration name already exists without an OpenVegas install receipt. "
                                    "Existing host settings were preserved; inspect them before setup.")

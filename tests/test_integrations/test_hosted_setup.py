@@ -95,7 +95,7 @@ async def test_hosted_setup_does_not_read_legacy_cli_credentials(monkeypatch):
     from openvegas import config
     from openvegas.integrations.broker import Broker
     monkeypatch.setenv('OPENVEGAS_HOSTED_LAUNCH', '1')
-    monkeypatch.setattr(config, 'get_session', lambda: pytest.fail('legacy account was read'))
+    monkeypatch.setattr(config, 'get_session_metadata', lambda: pytest.fail('legacy account was read'))
     broker = Broker(backend='https://app.openvegas.ai')
     monkeypatch.setattr(broker.credentials, 'load', lambda: 'ov-device-fixture')
     monkeypatch.setattr(broker, 'account', AsyncMock(return_value={'user_id': 'fixture'}))

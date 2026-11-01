@@ -26,7 +26,7 @@ from openvegas.config import (
     clear_session_claim_cache,
     get_backend_url,
     get_bearer_token,
-    get_session,
+    get_session_metadata as get_session,
     invalidate_session_cache,
     token_expires_soon,
 )
@@ -171,7 +171,7 @@ class OpenVegasClient:
     async def _refresh_once(self, trigger: str) -> str:
         self._session_snapshot = get_session()
         refresh_value = str(self._session_snapshot.get("refresh_token", "") or "").strip()
-        if not refresh_value:
+        if not refresh_value and self._session_snapshot.get("refresh_storage") != "platform_credential_store":
             emit_metric(
                 "auth_refresh_attempt_total",
                 {
@@ -275,7 +275,9 @@ class OpenVegasClient:
         self._session_snapshot = get_session()
         self.token = get_bearer_token()
 
-        has_refresh = bool(str(self._session_snapshot.get("refresh_token", "") or "").strip())
+        has_refresh = bool(str(self._session_snapshot.get("refresh_token", "") or "").strip()) or (
+            self._session_snapshot.get("refresh_storage") == "platform_credential_store"
+        )
         if not self.token and not has_refresh:
             raise APIError(401, "Session expired. Run: openvegas login")
 

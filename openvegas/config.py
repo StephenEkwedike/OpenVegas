@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from openvegas.keychain_access import keychain_call
 import logging
 import os
 import tempfile
@@ -225,17 +226,17 @@ def save_refresh_to_platform_store(refresh_token: str) -> None:
         raise RuntimeError("keyring_unavailable")
     token = str(refresh_token or "")
     try:
-        keyring.set_password(_PLATFORM_STORE_SERVICE, _PLATFORM_STORE_ACCOUNT, token)
+        keychain_call(keyring.set_password, _PLATFORM_STORE_SERVICE, _PLATFORM_STORE_ACCOUNT, token)
         return
     except Exception as e:
         if not _is_keychain_owner_mismatch_error(e):
             raise
     # Self-heal migrated/stale keychain entries that reject updates (OSStatus -25244).
     try:
-        keyring.delete_password(_PLATFORM_STORE_SERVICE, _PLATFORM_STORE_ACCOUNT)
+        keychain_call(keyring.delete_password, _PLATFORM_STORE_SERVICE, _PLATFORM_STORE_ACCOUNT)
     except Exception:
         pass
-    keyring.set_password(_PLATFORM_STORE_SERVICE, _PLATFORM_STORE_ACCOUNT, token)
+    keychain_call(keyring.set_password, _PLATFORM_STORE_SERVICE, _PLATFORM_STORE_ACCOUNT, token)
 
 
 def load_refresh_from_platform_store() -> str:
@@ -243,7 +244,7 @@ def load_refresh_from_platform_store() -> str:
     if keyring is None:
         return ""
     try:
-        token = keyring.get_password(_PLATFORM_STORE_SERVICE, _PLATFORM_STORE_ACCOUNT)
+        token = keychain_call(keyring.get_password, _PLATFORM_STORE_SERVICE, _PLATFORM_STORE_ACCOUNT)
     except Exception:
         return ""
     return str(token or "").strip()
@@ -254,7 +255,7 @@ def _clear_platform_refresh_token_only() -> None:
     if keyring is None:
         return
     try:
-        keyring.delete_password(_PLATFORM_STORE_SERVICE, _PLATFORM_STORE_ACCOUNT)
+        keychain_call(keyring.delete_password, _PLATFORM_STORE_SERVICE, _PLATFORM_STORE_ACCOUNT)
     except Exception:
         # Key may not exist; treat as already cleared.
         pass
@@ -286,9 +287,14 @@ def set_provider_key(provider: str, api_key: str) -> None:
     save_config(config)
 
 
-def get_session() -> dict:
+def get_session_metadata() -> dict:
+    """Read session state without unlocking the protected refresh credential."""
     config = load_config()
-    session = dict(config.get("session", {}))
+    return dict(config.get("session", {}))
+
+
+def get_session() -> dict:
+    session = get_session_metadata()
     if session.get("refresh_storage") == "platform_credential_store":
         session["refresh_token"] = load_refresh_from_platform_store()
     return session
@@ -431,13 +437,13 @@ def get_default_model(provider: str) -> str:
 
 
 def get_bearer_token() -> str | None:
-    session = get_session()
+    session = get_session_metadata()
     token = str(session.get("access_token", "")).strip()
     return token or None
 
 
 def token_expires_soon(session: dict | None = None, leeway_sec: int = 300) -> bool:
-    sess = dict(session or get_session() or {})
+    sess = dict(session if session is not None else get_session_metadata())
     token = str(sess.get("access_token", "")).strip()
     if not token:
         return True

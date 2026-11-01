@@ -68,7 +68,7 @@ class Broker:
         return None
 
     async def authorize(self, *, allow_file=False, emit=print, open_browser=webbrowser.open):
-        from openvegas.config import get_session
+        from openvegas.config import get_session_metadata as get_session
         # Public setup uses backend-bound browser credentials, never a legacy
         # CLI session inherited from a different development server.
         session = {} if os.getenv("OPENVEGAS_HOSTED_LAUNCH") == "1" else get_session() or {}
