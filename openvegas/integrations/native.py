@@ -6,8 +6,6 @@ is installed. The server must enforce the quoted model, token cap and budget.
 """
 from __future__ import annotations
 
-from openvegas.integrations.game_result import amount as format_v
-
 import asyncio
 import json
 import os
@@ -15,6 +13,8 @@ import re
 from decimal import Decimal, InvalidOperation
 
 import click
+
+from openvegas.integrations.game_result import amount as format_v
 
 from .broker import Broker
 from .credentials import IntegrationError, backend_url
@@ -194,7 +194,7 @@ def child_environment(host, backend, model, max_tokens, token):
         'ANTHROPIC_AWS', 'ANTHROPIC_GOOGLE_CLOUD', 'BEDROCK', 'CCR_V', 'FOUNDRY',
         'GATEWAY', 'MANTLE', 'VERTEX')}
     for key in list(env):
-        if _server_secret(key) or key.startswith(prefixes) or key in routes or key in {'CODEX_API_KEY', 'CODEX_BASE_URL', 'CODEX_MODEL',
+        if _server_secret(key) or key.startswith(prefixes) or key in routes or key in {'CODEX_API_KEY', 'CODEX_ACCESS_TOKEN', 'CODEX_BASE_URL', 'CODEX_MODEL',
                                              'CODEX_MODEL_PROVIDER', 'CLAUDE_CODE_SIMPLE'}:
             env.pop(key)
     if host == 'claude':
@@ -212,7 +212,19 @@ def child_environment(host, backend, model, max_tokens, token):
     return env
 
 
-def host_argv(executable, host, backend, model, host_args, *, local_tools_only=False, hosted_web=False):
+def codex_resume_argv(executable, endpoint, model, host_args):
+    # Only suppress a known promotional model migration for this invocation.
+    # A different model needs a fresh priced grant, not a silent native upgrade.
+    notices = ({'gpt-5.6-luna': 'gpt-6-luna'} if model == 'gpt-5.6-luna' else {})
+    controls = []
+    if notices:
+        table = '{' + ','.join(json.dumps(k) + '=' + json.dumps(v) for k, v in notices.items()) + '}'
+        controls = ['-c', 'notice.model_migrations=' + table]
+    return [executable, *controls, *host_args, '--remote', endpoint, '--model', model]
+
+
+def host_argv(executable, host, backend, model, host_args, *, local_tools_only=False, hosted_web=False,
+              provider_identity='openvegas_v'):
     index = validate_host_args(host, host_args)
     if host == 'claude':
         if model == 'anthropic/claude-haiku-4.5':
@@ -231,7 +243,12 @@ def host_argv(executable, host, backend, model, host_args, *, local_tools_only=F
     # A complete table, not individual leaf merges with a stale provider's auth
     # settings. Dedicated flags take precedence without rewriting user config.
     table = '{' + ','.join(key + '=' + json.dumps(value) for key, value in provider.items()) + '}'
-    controls = ['-c', 'model_provider="openvegas_v"', '-c', 'model_providers.openvegas_v=' + table,
+    if not isinstance(provider_identity, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', provider_identity):
+        raise IntegrationError('Invalid native provider identity.')
+    if provider_identity in {'openai', 'ollama', 'lmstudio'}:
+        raise IntegrationError('Built-in providers require the native proxy connection, not a custom provider override.')
+    controls = ['-c', 'model_provider=' + json.dumps(provider_identity), '-c',
+                'model_providers.' + provider_identity + '=' + table,
                 '-c', 'model=' + json.dumps(model), '-c', 'review_model=' + json.dumps(model)]
     if model == 'openai/gpt-4.1-nano':
         controls += ['-c', 'model_supports_reasoning_summaries=false', '-c', 'model_reasoning_summary="none"']
@@ -270,7 +287,8 @@ async def run_host(argv, env):
 
 async def launch(host, model, limit_v, max_output_tokens=2048, *, yes=False, dry_run=False,
                  host_args=(), broker=None, emit=click.echo, confirm=None, local_tools_only=False,
-                 provider='openrouter', runner=None):
+                 provider='openrouter', runner=None, resume_provider=None, compact=False,
+                 control_environment=None):
     """Return the host exit code. Injection points are for bounded offline tests."""
     if host not in {'claude', 'codex'} or not isinstance(model, str) or not _MODEL.fullmatch(model):
         raise IntegrationError('Choose a supported host and an exact model identifier.')
@@ -280,6 +298,10 @@ async def launch(host, model, limit_v, max_output_tokens=2048, *, yes=False, dry
     if type(max_output_tokens) is not int or max_output_tokens < 1:
         raise IntegrationError('max-output-tokens must be a positive integer.')
     validate_host_args(host, host_args)
+    control_environment = control_environment or {}
+    if (set(control_environment) - {'OPENVEGAS_SWITCH_SOCKET', 'OPENVEGAS_SWITCH_TOKEN'}
+            or any(not isinstance(value, str) or '\x00' in value for value in control_environment.values())):
+        raise IntegrationError('Invalid local billing control connection.')
     if local_tools_only and host != 'codex':
         raise IntegrationError('--local-tools-only is the explicit Codex web-search compatibility option.')
     if local_tools_only and '--search' in host_args:
@@ -322,20 +344,25 @@ async def launch(host, model, limit_v, max_output_tokens=2048, *, yes=False, dry
             unit_prices = [_decimal(pricing.get(field), allow_zero=True) for field in unit_fields]
         if 'v_per_supplier_usd' in pricing and _decimal(pricing['v_per_supplier_usd']) != rate * multiplier:
             raise IntegrationError('Native quote contains inconsistent conversion prices; no host was launched.')
-        emit(f'OpenVegas $V inference: {host}; exact model {model}; output cap {max_output_tokens}.')
-        emit(f'Session budget ceiling: {format_v(limit_v)}. Server pricing: {format_v(rate)}/USD x {multiplier} '
+        if compact:
+            emit(f'Model: {model}. Use your wallet up to {format_v(limit_v)}; no purchases or automatic top-ups.')
+            emit('Return with openvegas use host. Requests stop if available funds are insufficient.')
+        detail = (lambda *args: None) if compact else emit
+        detail(f'OpenVegas $V inference: {host}; exact model {model}; output cap {max_output_tokens}.')
+        detail(f'Session budget ceiling: {format_v(limit_v)}. Server pricing: {format_v(rate)}/USD x {multiplier} '
              f'(markup {(multiplier - 1) * 100}%).')
         if unit_prices is not None:
             incoming, outgoing = unit_prices
-            emit(f'Quoted supplier USD per million tokens: input {incoming:f}; output {outgoing:f}.')
-            emit(f'Converted retail $V per million tokens: input {format_v(incoming * rate * multiplier)}; '
+            detail(f'Quoted supplier USD per million tokens: input {incoming:f}; output {outgoing:f}.')
+            price_label = 'Price' if compact else 'Converted retail $V'
+            emit(f'{price_label} per million tokens: input {format_v(incoming * rate * multiplier)}; '
                  f'output {format_v(outgoing * rate * multiplier)}.')
         else:
-            emit('Model input/output unit prices were not supplied in this quote.')
-        emit('This invocation spends OpenVegas credits, not subscription quota. Native tools, history, cwd and permissions remain with the host.')
-        emit('Ordinary claude/codex launches are unchanged. No automatic subscription-exhaustion fallback or model switching.')
+            detail('Model input/output unit prices were not supplied in this quote.')
+        detail('This invocation spends OpenVegas credits, not subscription quota. Native tools, history, cwd and permissions remain with the host.')
+        detail('Ordinary claude/codex launches are unchanged. No automatic subscription-exhaustion fallback or model switching.')
         media = pricing.get('native_media', {}).get('modalities', [])
-        emit('Reviewed native attachments: ' + (', '.join(media) if media else 'none') +
+        detail('Reviewed native attachments: ' + (', '.join(media) if media else 'none') +
              '. Computer/container tools and deferred tool search are not enabled on this route.')
         if web and not local_tools_only:
             from openvegas.gateway.native_pricing import web_fee
@@ -346,11 +373,12 @@ async def launch(host, model, limit_v, max_output_tokens=2048, *, yes=False, dry
             emit(f'Hosted LIVE web search: at most one search per request; supplier US${fee} plus model tokens, '
                  f'with the same {multiplier}x markup. Two model rounds are reserved conservatively.')
         if local_tools_only:
-            emit('Explicit local-tools-only mode: hosted web search is DISABLED for this invocation. Local tools and MCP remain host-owned.')
+            emit('Local tools and MCP stay available; hosted web search is unavailable on this route.')
         if host == 'claude':
-            emit('Saved subscription credentials are preserved; cached-subscription coexistence is not yet verified.')
+            detail('Saved subscription credentials are preserved; cached-subscription coexistence is not yet verified.')
         if not yes:
-            accepted = confirm() if confirm else click.confirm('Authorize this quoted $V session?', default=False)
+            accepted = confirm() if confirm else click.confirm(
+                f'Use $V with {model}?' if compact else 'Authorize this quoted $V session?', default=False)
             if not accepted:
                 emit('Spending not authorized; no session opened.')
                 return 0
@@ -375,10 +403,18 @@ async def launch(host, model, limit_v, max_output_tokens=2048, *, yes=False, dry
                 or any(key in status and status[key] != value for key, value in selection.items())
                 or ('session_id' in status and status['session_id'] != result['session_id'])):
             raise IntegrationError('Native spending session is not active or changed; no host was launched.')
-        argv = host_argv(info['executable'], host, backend, model, list(host_args),
-                         local_tools_only=local_tools_only, hosted_web=bool(web) and not local_tools_only)
         env = child_environment(host, backend, model, max_output_tokens, session_token)
-        emit(f'Session authorized for up to {result["expires_in"]} seconds; closing it when the native host exits.')
+        env.update(control_environment)
+        detail(f'Session authorized for up to {result["expires_in"]} seconds; closing it when the native host exits.')
+        if host == 'codex' and resume_provider == 'openai':
+            from .codex_billing_route import route
+            async with route(info['executable'], backend, model, env,
+                             local_tools_only=local_tools_only) as endpoint:
+                argv = codex_resume_argv(info['executable'], endpoint, model, host_args)
+                return await (runner or run_host)(argv, env)
+        argv = host_argv(info['executable'], host, backend, model, list(host_args),
+                         local_tools_only=local_tools_only, hosted_web=bool(web) and not local_tools_only,
+                         provider_identity=resume_provider or 'openvegas_v')
         return await (runner or run_host)(argv, env)
     except (IntegrationError, click.Abort, asyncio.CancelledError):
         raise

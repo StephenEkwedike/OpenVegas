@@ -1,32 +1,35 @@
 #!/usr/bin/env node
 import {createHash} from 'node:crypto';
-import {readFileSync} from 'node:fs';
+import {createReadStream, readFileSync} from 'node:fs';
 import {createRequire} from 'node:module';
 import {dirname, join} from 'node:path';
 import {spawn} from 'node:child_process';
 
 const require = createRequire(import.meta.url);
-const release = JSON.parse(readFileSync(new URL('../release.json', import.meta.url), 'utf8'));
-const platform = `${process.platform}-${process.arch}`;
-const artifact = release.platforms[platform];
-function fail(message) {
-  console.error(`OpenVegas: ${message}`);
-  process.exit(1);
+let timer;
+let shown = false;
+let child;
+let interrupted;
+const signals = ['SIGINT', 'SIGTERM'];
+let handlers = [];
+function clearLoading() {
+  clearInterval(timer);
+  if (shown) process.stderr.write('\r\x1b[2K');
+  shown = false;
 }
-if (!artifact) fail(`this release does not support ${platform}. No command was run.`);
-let binary;
-try {
-  const manifestPath = require.resolve(`${artifact.package}/package.json`);
-  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
-  if (manifest.name !== artifact.package || manifest.version !== release.version) {
-    fail('native package version mismatch. Reinstall this exact OpenVegas version.');
+function finish(code, signal) {
+  clearLoading();
+  signals.forEach((name, i) => { if (handlers[i]) process.removeListener(name, handlers[i]); });
+  if (signal) {
+    process.kill(process.pid, signal);
+    return;
   }
-  binary = join(dirname(manifestPath), 'bin', artifact.binary);
-  if (createHash('sha256').update(readFileSync(binary)).digest('hex') !== artifact.sha256) {
-    fail('native package checksum mismatch. No command was run.');
-  }
-} catch {
-  fail('native package is missing or unreadable. Reinstall with optional dependencies enabled.');
+  process.exit(code ?? 1);
+}
+function fail(message) {
+  clearLoading();
+  console.error(`OpenVegas: ${message}`);
+  finish(1);
 }
 const args = process.argv.slice(2);
 // A terminal installed for development can export a localhost account. The
@@ -56,45 +59,80 @@ if (local) {
 env.OPENVEGAS_LOAD_PROJECT_ENV = '0';
 if (!args.length && process.stdin.isTTY && process.stdout.isTTY && !process.env.CI) args.push('go');
 delete env.OPENVEGAS_LAUNCH_NOTIFY_FD;
-const loading = args[0] === 'go' && !args.includes('--dry-run') && process.stderr.isTTY && !process.env.CI;
-let timer;
-let shown = false;
-function clearLoading() {
-  clearInterval(timer);
-  if (shown) process.stderr.write('\r\x1b[2K');
-  shown = false;
-}
+const verbose = args[0] === 'go' && args.includes('--verbose');
+const loading = args[0] === 'go' && !args.includes('--dry-run') && !verbose &&
+  process.stderr.isTTY && !process.env.CI;
+let label = 'Checking OpenVegas runtime...';
+const verificationStart = performance.now();
+if ((loading || verbose) && process.platform !== 'win32') env.OPENVEGAS_LAUNCH_NOTIFY_FD = '3';
 if (loading && process.platform !== 'win32') {
-  env.OPENVEGAS_LAUNCH_NOTIFY_FD = '3';
   let frame = 0;
   const draw = () => {
     shown = true;
-    process.stderr.write(`\r\x1b[34m${['|', '/', '-', '\\'][frame++ % 4]} Starting OpenVegas...\x1b[0m`);
+    process.stderr.write(`\r\x1b[34m${['|', '/', '-', '\\'][frame++ % 4]} ${label}\x1b[0m`);
   };
   draw();
   timer = setInterval(draw, 100);
 } else if (loading) {
   process.stderr.write('Starting OpenVegas...\n');
 }
-const child = spawn(binary, args, {stdio: ['inherit', 'inherit', 'inherit', 'pipe'], shell: false, env});
-child.stdio[3].once('data', () => {
-  clearLoading();
-  child.stdio[3].end('1');
-});
-child.stdio[3].on('error', () => {});
-const signals = ['SIGINT', 'SIGTERM'];
-const handlers = signals.map(signal => {
-  const handler = () => { clearLoading(); child.kill(signal); };
+handlers = signals.map(signal => {
+  const handler = () => {
+    interrupted = signal;
+    clearLoading();
+    if (child) child.kill(signal);
+    else finish(null, signal);
+  };
   process.on(signal, handler);
   return handler;
 });
+let release;
+try {
+  release = JSON.parse(readFileSync(new URL('../release.json', import.meta.url), 'utf8'));
+} catch {
+  fail('release metadata is missing or unreadable. No command was run.');
+}
+const platform = `${process.platform}-${process.arch}`;
+const artifact = release?.platforms?.[platform];
+if (!artifact) fail(`this release does not support ${platform}. No command was run.`);
+let binary;
+try {
+  const manifestPath = require.resolve(`${artifact.package}/package.json`);
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  if (manifest.name !== artifact.package || manifest.version !== release.version) {
+    fail('native package version mismatch. Reinstall this exact OpenVegas version.');
+  }
+  binary = join(dirname(manifestPath), 'bin', artifact.binary);
+  // Stream the large native artifact: synchronous reading/hashing freezes the
+  // animation before PyInstaller has even started its local extraction.
+  const hash = createHash('sha256');
+  for await (const chunk of createReadStream(binary)) hash.update(chunk);
+  if (hash.digest('hex') !== artifact.sha256) {
+    fail('native package checksum mismatch. No command was run.');
+  }
+} catch {
+  fail('native package is missing or unreadable. Reinstall with optional dependencies enabled.');
+}
+label = 'Starting OpenVegas...';
+if (verbose) console.error(`OpenVegas runtime verified (${((performance.now() - verificationStart) / 1000).toFixed(2)}s); starting.`);
+const startupStart = performance.now();
+child = spawn(binary, args, {stdio: ['inherit', 'inherit', 'inherit', 'pipe'], shell: false, env});
+let ready = '';
+let acknowledged = false;
+child.stdio[3].on('data', data => {
+  ready = (ready + data.toString()).slice(0, 64);
+  if (!acknowledged && ready === 'ready\n') {
+    acknowledged = true;
+    clearLoading();
+    if (verbose) console.error(`OpenVegas runtime ready (${((performance.now() - startupStart) / 1000).toFixed(2)}s startup).`);
+    // Hand off to the runtime's setup spinner before it can print consent.
+    child.stdio[3].end('1');
+  }
+});
+child.stdio[3].on('error', () => {});
 child.once('error', () => {
-  clearLoading();
   fail('native runtime could not start. No fallback command was run.');
 });
 child.once('close', (code, signal) => {
-  clearLoading();
-  signals.forEach((name, i) => process.removeListener(name, handlers[i]));
-  if (signal) process.kill(process.pid, signal);
-  process.exit(code ?? 1);
+  finish(code, interrupted || signal);
 });

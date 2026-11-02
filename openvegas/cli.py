@@ -11095,7 +11095,23 @@ from openvegas.integrations.game_command import game as native_game_step
 from openvegas.integrations.native import HostCommand, native
 from openvegas.integrations.use import use as use_native_billing
 from openvegas.integrations.animation_demo import demo as native_animation_demo
-cli.add_command(go)
+
+
+def _integration_install_entry(**options):
+    # Running setup already requests installation, not permission to trust tools.
+    # Keep native approvals unless the caller explicitly chose the --yes opt-in.
+    options["host"] = options["host"] or "both"
+    if not options["yes"]:
+        options["keep_game_approvals"] = True
+    options["yes"] = True
+    result = go.callback(**options)
+    if not options["dry_run"]:
+        click.echo("Review OpenVegas hooks in Claude/Codex with /hooks; installation does not grant hook trust.")
+    return result
+
+
+cli.add_command(click.Command(go.name, callback=_integration_install_entry,
+                              params=go.params, help=go.help))
 cli.add_command(integration)
 cli.add_command(native_game_step)
 cli.add_command(native)

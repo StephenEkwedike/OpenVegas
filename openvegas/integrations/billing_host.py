@@ -22,6 +22,7 @@ import click
 from openvegas.integrations.game_result import amount as format_v
 
 from . import native
+from .billing_choices import model_choices, wallet_ceiling
 from .broker import Broker
 from .credentials import IntegrationError
 from .use import SOCKET, TOKEN
@@ -83,6 +84,7 @@ class Supervisor:
         self.identifier = self.original_model = None
         self.mode, self.pending = 'host', None
         self.v_child_started = False
+        self.v_child_ready = False
         self.token = secrets.token_urlsafe(32)
         self.changed = asyncio.Event()
         self.original_provider = None
@@ -117,6 +119,8 @@ class Supervisor:
                     if not identifier or self.identifier not in (None, identifier):
                         raise ValueError
                     self.identifier = identifier
+                    if self.mode == 'v':
+                        self.v_child_ready = True
                     self.quota.transcript(data.get('transcript_path'), identifier)
                     if self.mode == 'host' and self.original_model is None:
                         model = data.get('model')
@@ -189,7 +193,7 @@ class Supervisor:
             action = await controls(self.mode, game=game, menu=menu, check_v=self.preflight_v)
             if action in ('use_v', 'use_host'):
                 # Selection alone never spends: choose_v still quotes and asks
-                # for a spending limit after safely closing this owned child.
+                # for wallet-spending consent after closing this owned child.
                 resume_args(self.host, self.args, self.identifier)
                 self.pending = action[4:]
                 self.changed.set()
@@ -317,21 +321,31 @@ class Supervisor:
 
     async def choose_v(self):
         self.v_child_started = False
+        self.v_child_ready = False
         broker = Broker()
         try:
             options = await self.v_options(broker)
             models = options['models']
+            choices = model_choices(self.host, models, self.original_model)
             balance = native._decimal(options.get('balance_v'), allow_zero=True)
+            limit = wallet_ceiling(balance)
+            if not limit:
+                raise IntegrationError('Your OpenVegas balance is empty; no spending session opened.')
             self.emit('OPENVEGAS / USE $V\nBalance: ' + format_v(balance))
-            for i, item in enumerate(models, 1):
-                if not isinstance(item.get('model'), str) or not native._MODEL.fullmatch(item['model']):
-                    raise IntegrationError('Invalid model options.')
-                self.emit(f'{i}. {item["model"]} / {options["provider"]} direct')
-            index = click.prompt('Model', type=click.IntRange(1, len(models)), default=1) - 1
-            chosen = models[index]
-            limit = click.prompt('Session limit ($V)', type=native.Budget(), default=str(min(balance, 50)))
-            if limit > balance:
-                raise IntegrationError('Session limit exceeds your current balance; no spending started.')
+            if choices.selected_model:
+                chosen = next(row for row in models if row['model'] == choices.selected_model)
+            else:
+                if choices.unavailable_model:
+                    self.emit(choices.unavailable_model + ' is not enabled for $V on this backend.')
+                if len(models) == 1:
+                    # The single available alternative is named in the spending
+                    # confirmation, not silently substituted for the host model.
+                    chosen = models[0]
+                else:
+                    for i, item in enumerate(models, 1):
+                        self.emit(f'{i}. {item["model"]}')
+                    index = click.prompt('Model', type=click.IntRange(1, len(models))) - 1
+                    chosen = models[index]
             self.mode = 'v'
             launched = False
             async def runner(argv, env):
@@ -342,9 +356,14 @@ class Supervisor:
             code = await native.launch(self.host, chosen['model'], limit, chosen['max_tokens'],
                 provider=options['provider'], broker=broker, emit=self.emit, runner=runner,
                 host_args=resume_args(self.host, self.args, self.identifier),
-                local_tools_only=self.host == 'codex')
+                local_tools_only=self.host == 'codex', resume_provider=self.original_provider,
+                compact=True, control_environment={SOCKET: self.env[SOCKET], TOKEN: self.token})
             if not launched:
                 self.pending = 'host'  # Cancel before activation restores the original host.
+            elif code and not self.v_child_ready:
+                self.emit('The coding host could not resume on $V. Returning to host billing; '
+                          'no prompt will be resubmitted.')
+                self.pending = 'host'
             return code
         finally:
             await broker.close()
@@ -366,7 +385,7 @@ class Supervisor:
                         except (IntegrationError, click.Abort) as exc:
                             self.emit(str(exc) if isinstance(exc, IntegrationError) else 'Billing switch cancelled.')
                             # Never reissue a task or switch after a dispatched V child failure.
-                            if not self.v_child_started:
+                            if not self.v_child_started or not self.v_child_ready:
                                 self.pending = 'host'
                         continue
                     self.mode = 'host'
