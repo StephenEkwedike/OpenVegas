@@ -37,10 +37,20 @@ class Broker:
         if response.status_code in {401, 403}:
             raise IntegrationError("Authorization expired, declined or not permitted. Run openvegas go.", response.status_code)
         if response.status_code == 503:
-            if path.startswith('/native/options?'):
-                raise IntegrationError("$V inference is not available on this server yet. "
-                                       "Host billing is unchanged. No credits spent.", 503)
-            raise IntegrationError("Native integrations are not enabled on this backend yet.")
+            try:
+                detail = response.json().get('detail')
+            except (ValueError, AttributeError):
+                detail = None
+            # Only map known server reasons; never echo an arbitrary error body.
+            if detail == 'Native integration setup is not enabled on this backend.':
+                message = 'OpenVegas account integration is disabled on this server.'
+            elif path.startswith('/native/'):
+                message = ('$V inference is disabled on this server.' if detail ==
+                           '$V-funded native inference is not enabled on this backend.' else
+                           '$V billing is temporarily unavailable. No automatic retry was made.')
+            else:
+                message = 'OpenVegas account services are temporarily unavailable.'
+            raise IntegrationError(message + ' No billing mode was changed.', 503)
         if not response.is_success:
             raise IntegrationError(f"OpenVegas integration request failed (HTTP {response.status_code}).")
         try:

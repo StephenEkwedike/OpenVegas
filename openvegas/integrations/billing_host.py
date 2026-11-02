@@ -5,8 +5,6 @@ it never discovers/kills unrelated processes, edits auth files or injects input.
 """
 from __future__ import annotations
 
-from openvegas.integrations.game_result import amount as format_v
-
 import asyncio
 import json
 import os
@@ -20,6 +18,8 @@ from pathlib import Path
 from uuid import UUID
 
 import click
+
+from openvegas.integrations.game_result import amount as format_v
 
 from . import native
 from .broker import Broker
@@ -89,6 +89,7 @@ class Supervisor:
         self.wallet_credentials = None
         self.local_task = None
         self.local_error = False
+        self.checking_v = False
         from .host_quota import HostQuota
         self.quota = HostQuota(host, env)
         if host == 'codex':
@@ -143,13 +144,16 @@ class Supervisor:
                             self.original_model = model
                     if identifier is not None and identifier != self.identifier:
                         raise ValueError
-                    if not self.identifier or self.pending or (self.local_task and not self.local_task.done()):
+                    if (not self.identifier or self.pending or self.checking_v
+                            or (self.local_task and not self.local_task.done())):
                         raise IntegrationError('Native session is not ready or a switch is already pending.')
                     resume_args(self.host, self.args, self.identifier)
                     target = data['action']
                     if target == self.mode:
                         response = {'ok': True, 'message': 'Already using ' + ('$V.' if target == 'v' else 'host billing.')}
                     else:
+                        if target == 'v':
+                            await self.preflight_v()
                         self.pending = target
                         response = {'ok': True, 'message': 'Opening billing controls in this terminal. No prompt sent.'}
                         # Allow the hook to return its block decision before the
@@ -172,7 +176,7 @@ class Supervisor:
         from .terminal_handoff import SOCKET_ENV, TOKEN_ENV
         if not self.env.get(SOCKET_ENV) or not self.env.get(TOKEN_ENV):
             raise IntegrationError('OpenVegas local controls need the managed terminal. No model request or wager sent.')
-        if (self.child is None or self.child.returncode is not None or self.pending
+        if (self.child is None or self.child.returncode is not None or self.pending or self.checking_v
                 or (self.local_task and not self.local_task.done())):
             raise IntegrationError('A game or billing change is already open. No second action started.')
         self.local_error = False
@@ -182,7 +186,7 @@ class Supervisor:
         from .local_controls import controls
         try:
             await asyncio.sleep(delay)
-            action = await controls(self.mode, game=game, menu=menu)
+            action = await controls(self.mode, game=game, menu=menu, check_v=self.preflight_v)
             if action in ('use_v', 'use_host'):
                 # Selection alone never spends: choose_v still quotes and asks
                 # for a spending limit after safely closing this owned child.
@@ -265,23 +269,59 @@ class Supervisor:
             if attributes is not None:
                 termios.tcsetattr(0, termios.TCSADRAIN, attributes)
 
+    async def v_options(self, broker):
+        device = broker.credentials.load()
+        if not isinstance(device, str) or not device.startswith('ov_device_'):
+            raise IntegrationError('Sign in to OpenVegas first; no provider account is required from you.')
+        options = await broker.request('GET', '/native/options?host=' + self.host, token=device)
+        if (not isinstance(options, dict) or options.get('host') != self.host or
+                options.get('provider') != ('anthropic' if self.host == 'claude' else 'openai')):
+            raise IntegrationError('The backend returned an invalid native route. Billing unchanged.')
+        models = options.get('models')
+        if not isinstance(models, list) or not models:
+            raise IntegrationError('No reviewed direct API model is enabled on this backend. Billing unchanged.')
+        for item in models:
+            if (not isinstance(item, dict) or not isinstance(item.get('model'), str)
+                    or not native._MODEL.fullmatch(item['model'])
+                    or type(item.get('max_tokens')) is not int or not 1 <= item['max_tokens'] <= 128000):
+                raise IntegrationError('Invalid model options. Billing unchanged.')
+        if native._decimal(options.get('balance_v'), allow_zero=True) <= 0:
+            raise IntegrationError('Your OpenVegas balance is empty; no spending session opened.')
+        return options
+
+    async def preflight_v(self):
+        """Read availability while the native process is still alive; never grant spending."""
+        if self.checking_v:
+            raise IntegrationError('A billing availability check is already running. Billing unchanged.')
+        self.checking_v = True
+        child = self.child
+        broker = None
+        try:
+            # Leave time for the hook's three-second socket response deadline.
+            async with asyncio.timeout(2):
+                broker = Broker()
+                await self.v_options(broker)
+        except TimeoutError:
+            raise IntegrationError('The billing availability check timed out. '
+                                   'Your session is unchanged; no credits spent.') from None
+        finally:
+            try:
+                if broker is not None:
+                    await asyncio.wait_for(broker.close(), .25)
+            except (TimeoutError, OSError):
+                pass
+            finally:
+                self.checking_v = False
+        if child is not self.child or child is None or child.returncode is not None:
+            raise IntegrationError('The native session ended during the check. Billing unchanged.')
+
     async def choose_v(self):
         self.v_child_started = False
         broker = Broker()
         try:
-            device = broker.credentials.load()
-            if not isinstance(device, str) or not device.startswith('ov_device_'):
-                raise IntegrationError('Sign in to OpenVegas first; no provider account is required from you.')
-            options = await broker.request('GET', '/native/options?host=' + self.host, token=device)
-            if (options.get('host') != self.host or options.get('provider') !=
-                    ('anthropic' if self.host == 'claude' else 'openai')):
-                raise IntegrationError('The backend returned an invalid native route.')
-            models = options.get('models', [])
-            if not models:
-                raise IntegrationError('No reviewed direct API model is enabled on this backend. Billing unchanged.')
+            options = await self.v_options(broker)
+            models = options['models']
             balance = native._decimal(options.get('balance_v'), allow_zero=True)
-            if balance <= 0:
-                raise IntegrationError('Your OpenVegas balance is empty; no spending session opened.')
             self.emit('OPENVEGAS / USE $V\nBalance: ' + format_v(balance))
             for i, item in enumerate(models, 1):
                 if not isinstance(item.get('model'), str) or not native._MODEL.fullmatch(item['model']):

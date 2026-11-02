@@ -12,18 +12,30 @@ from .native_play import choice_model
 GAMES = {'blackjack', 'roulette', 'poker', 'baccarat', 'slots', 'horse'}
 
 
-async def controls(mode, *, game=None, menu=False):
+async def controls(mode, *, game=None, menu=False, check_v=None):
     action = 'play'
     if menu:
         reader, writer = await connect()
         view = TerminalView(reader, writer)
         try:
-            answer = await asyncio.wait_for(view.ask(
+            description = (
                 'OPENVEGAS / LOCAL CONTROLS\nNo Claude/Codex model request is needed.\n'
                 'Games use your OpenVegas wallet. Switching billing requires your spending limit.\n'
-                'Esc returns to coding.',
-                choice_model('LocalControls', ['play', 'use_host' if mode == 'v' else 'use_v', 'quit'])), 180)
-            action = answer.choice if answer else 'quit'
+                'Esc returns to coding.')
+            error = ''
+            while True:
+                answer = await asyncio.wait_for(view.ask(description + error,
+                    choice_model('LocalControls', ['play', 'use_host' if mode == 'v' else 'use_v', 'quit'])), 180)
+                action = answer.choice if answer else 'quit'
+                if action == 'use_v':
+                    try:
+                        if check_v is None:
+                            raise IntegrationError('Billing availability could not be checked. Billing unchanged.')
+                        await check_v()
+                    except IntegrationError as exc:
+                        error = '\n\n' + str(exc)
+                        continue
+                break
             await view.send(kind='done')
             reply = json.loads(await asyncio.wait_for(reader.readline(), 5))
             if reply.get('closed') is not True:

@@ -14,9 +14,9 @@ async def test_native_disabled_is_not_reported_as_game_backend_disabled():
     broker = Broker(backend='https://example.invalid', transport=httpx.MockTransport(
         lambda _: httpx.Response(503)))
     try:
-        with pytest.raises(IntegrationError, match='Host billing is unchanged'):
+        with pytest.raises(IntegrationError, match=r'\$V billing is temporarily unavailable'):
             await broker.request('GET', '/native/options?host=codex')
-        with pytest.raises(IntegrationError, match='Native integrations'):
+        with pytest.raises(IntegrationError, match='account services are temporarily unavailable'):
             await broker.request('GET', '/account')
     finally:
         await broker.close()

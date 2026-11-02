@@ -57,9 +57,10 @@ def test_unsafe_or_ambiguous_resume_fails_before_switch(args):
 
 
 @pytest.mark.asyncio
-async def test_socket_auth_identity_and_no_double_switch(tmp_path):
+async def test_socket_auth_identity_and_no_double_switch(tmp_path, monkeypatch):
     supervisor = billing_host.Supervisor('codex', '/fixture', [], {'HOME': str(tmp_path)})
     supervisor.child = SimpleNamespace(returncode=None)
+    monkeypatch.setattr(supervisor, 'preflight_v', AsyncMock())
     class Writer:
         def write(self, value): self.reply = json.loads(value)
         async def drain(self): pass
