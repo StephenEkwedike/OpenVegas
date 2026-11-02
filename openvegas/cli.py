@@ -4617,6 +4617,14 @@ def doctor_auth():
 
     session = get_session()
     refresh_storage = str(session.get("refresh_storage", "") or "")
+    from openvegas.keychain_access import private_login_files
+    if private_login_files():
+        from openvegas.integrations.credentials import Credentials, backend_url
+        from openvegas.integrations.game_browser import game_credentials
+        site = backend_url()
+        ready = bool(session.get("refresh_token") or Credentials(site).load() or game_credentials(site).load())
+        console.print(f"doctor-auth: ready={int(ready)} credential_storage=private_file keychain=not_used")
+        return
     has_keychain_token = bool(str(load_refresh_from_platform_store() or "").strip())
     keychain_ok = bool(platform_keychain_available())
     ready = bool(keychain_ok and has_keychain_token)
@@ -4690,6 +4698,9 @@ def doctor_runtime():
     from openvegas.config import get_backend_url, platform_keychain_available
 
     try:
+        from openvegas.keychain_access import private_login_files
+        if private_login_files():
+            raise RuntimeError("macOS uses private credential files")
         import keyring  # type: ignore
 
         keyring_ready = bool(keyring.get_keyring())

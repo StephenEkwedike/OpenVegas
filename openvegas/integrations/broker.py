@@ -14,6 +14,7 @@ from urllib.parse import urlencode
 import httpx
 
 from .credentials import Credentials, IntegrationError, backend_url
+from openvegas.keychain_access import private_login_files
 
 
 class Broker:
@@ -122,7 +123,7 @@ class Broker:
             try:
                 storage = self.credentials.save(result["token"], allow_file=allow_file)
             except IntegrationError:
-                if (allow_file or os.name != 'posix' or confirm_file_storage is None
+                if (private_login_files() or allow_file or os.name != 'posix' or confirm_file_storage is None
                         or confirm_file_storage() is not True):
                     raise
                 storage = self.credentials.save(result["token"], allow_file=True)

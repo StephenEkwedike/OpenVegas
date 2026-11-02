@@ -19,11 +19,12 @@ def test_keychain_dependency_is_explicit_without_biometrics():
 
 @pytest.mark.parametrize("platform", ["darwin", "linux", "win32"])
 @pytest.mark.parametrize("missing", [None, "objc", "Security", "Foundation"])
-def test_bundle_requires_frameworks_on_darwin_only(monkeypatch, capsys, platform, missing):
+def test_bundle_never_imports_mac_keychain_frameworks(monkeypatch, capsys, platform, missing):
     path = Path(__file__).resolve().parents[2] / "scripts/frozen_entry.py"
     spec = importlib.util.spec_from_file_location("frozen_entry_probe", path)
     entry = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(entry)
+    monkeypatch.setattr(entry, "verify_mac_credential_files", lambda: {"keychain_calls": 0})
     # This test isolates framework imports from the checkout's private review
     # inventory. Exact public/private inventories have their own fail-closed test.
     from openvegas.emotes.resources import PackRepository
@@ -55,11 +56,20 @@ def test_bundle_requires_frameworks_on_darwin_only(monkeypatch, capsys, platform
         return original(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", guarded)
-    if platform == "darwin" and missing:
-        with pytest.raises(ImportError, match="Synthetic missing framework"):
-            entry.verify_bundle()
-    else:
-        entry.verify_bundle()
-        report = json.loads(capsys.readouterr().out)
-        assert report["keychain_frameworks_imported"] is (True if platform == "darwin" else None)
-        assert seen == (list(modules) if platform == "darwin" else [])
+    entry.verify_bundle()
+    report = json.loads(capsys.readouterr().out)
+    assert report["keychain_frameworks_imported"] is False
+    assert seen == []
+    if platform == "darwin":
+        assert report["keyring_backend"] == "private_file"
+        assert report["credential_storage_check"]["keychain_calls"] == 0
+
+
+def test_real_mac_storage_probe(monkeypatch):
+    path = Path(__file__).resolve().parents[2] / "scripts/frozen_entry.py"
+    spec = importlib.util.spec_from_file_location("frozen_storage_probe", path)
+    entry = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(entry)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    assert entry.verify_mac_credential_files() == {
+        "private_files": True, "keychain_calls": 0, "synthetic_only": True}

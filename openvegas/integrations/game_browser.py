@@ -1,6 +1,7 @@
 """Browser actions for the owned terminal. Existing secure storage, PKCE and account checks."""
 
 import asyncio
+from contextlib import suppress
 import base64
 import hashlib
 import secrets
@@ -10,6 +11,7 @@ import webbrowser
 from urllib.parse import urlencode, urlsplit
 
 from .credentials import Credentials, IntegrationError
+from openvegas.keychain_access import private_login_files
 
 
 def game_credentials(backend):
@@ -90,7 +92,14 @@ async def browser_action(action, ask, client, broker):
     try:
         credentials.save(result["game_token"])
         broker.credentials.save(result["token"])
-    except IntegrationError:
+    except (IntegrationError, OSError):
+        if private_login_files():
+            try:
+                await broker.request("POST", "/revoke", token=result["token"])
+            finally:
+                with suppress(IntegrationError, OSError):
+                    credentials.clear()
+            raise IntegrationError("Could not save your login. Check your OpenVegas folder permissions and reconnect.") from None
         reply = await ask(
             "Save this login on this Mac? Keychain access was declined. A private file avoids password pop-ups; "
             "it is not encrypted and is readable by programs running as your user.",

@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
-from openvegas.keychain_access import keychain_call
+from openvegas.keychain_access import keychain_call, private_login_files
 import logging
 import os
 import sys
+import stat
 import tempfile
 import time
 from pathlib import Path
@@ -101,7 +102,19 @@ def _persist_migrated_config(config: dict) -> None:
 
 
 def ensure_config_dir() -> None:
+    if private_login_files():
+        for ancestor in [CONFIG_DIR, *CONFIG_DIR.parents]:
+            if ancestor.is_symlink():
+                raise OSError("OpenVegas config directory must not contain symlinks.")
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    if private_login_files():
+        if CONFIG_DIR.stat().st_uid != os.getuid():
+            raise OSError("OpenVegas config directory has a different owner.")
+        if stat.S_IMODE(CONFIG_DIR.stat().st_mode) != 0o700:
+            CONFIG_DIR.chmod(0o700)
+        if CONFIG_FILE.is_symlink():
+            raise OSError("OpenVegas config must not be a symlink.")
+        return
     try:
         CONFIG_DIR.chmod(0o700)
     except Exception:
@@ -113,9 +126,26 @@ def load_config() -> dict:
     # Reading defaults must work before a user has saved any local state.
     # Persistence creates and secures the directory in save_config_atomic().
     current_default_backend_url = _current_default_backend_url()
+    if CONFIG_FILE.is_symlink() and private_login_files():
+        raise OSError("OpenVegas config must not be a symlink.")
     if CONFIG_FILE.exists():
-        with open(CONFIG_FILE, encoding="utf-8") as f:
-            stored = json.loads(f.read())
+        if private_login_files():
+            ensure_config_dir()
+            fd = os.open(CONFIG_FILE, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+                    raise OSError("OpenVegas config must be a regular file owned by you.")
+                # Secure legacy owner-created config before reading its login.
+                if stat.S_IMODE(info.st_mode) != 0o600:
+                    os.fchmod(fd, 0o600)
+                with os.fdopen(fd, encoding="utf-8", closefd=False) as f:
+                    stored = json.load(f)
+            finally:
+                os.close(fd)
+        else:
+            with open(CONFIG_FILE, encoding="utf-8") as f:
+                stored = json.loads(f.read())
         migrated = False
         if _should_migrate_backend_url(stored.get("backend_url")):
             stored["backend_url"] = current_default_backend_url
@@ -188,10 +218,12 @@ def save_config(config: dict) -> None:
 
 
 def _force_config_refresh_storage() -> bool:
-    return str(os.getenv("OPENVEGAS_FORCE_CONFIG_REFRESH_STORAGE", "0")).strip() == "1"
+    return private_login_files() or str(os.getenv("OPENVEGAS_FORCE_CONFIG_REFRESH_STORAGE", "0")).strip() == "1"
 
 
 def _try_import_keyring():
+    if private_login_files():
+        return None
     try:
         import keyring  # type: ignore
 
@@ -302,7 +334,9 @@ def get_session_metadata() -> dict:
 def get_session() -> dict:
     session = get_session_metadata()
     if session.get("refresh_storage") == "platform_credential_store":
-        session["refresh_token"] = load_refresh_from_platform_store()
+        # Do not unlock or migrate old macOS secrets. An expired legacy session
+        # reconnects through the browser and receives a new file-backed token.
+        session["refresh_token"] = "" if private_login_files() else load_refresh_from_platform_store()
     return session
 
 

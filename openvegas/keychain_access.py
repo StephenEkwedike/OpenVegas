@@ -1,24 +1,14 @@
-"""Serialize this process's Keychain access while a background read forbids UI."""
-from threading import RLock
+"""Credential-store policy. OpenVegas never accesses macOS Keychain."""
 import sys
 
-_lock = RLock()
+
+def private_login_files():
+    return sys.platform == "darwin"
 
 
 def keychain_call(operation, *args, interactive=True):
-    if sys.platform != "darwin":
-        return operation(*args)
-    with _lock:
-        if interactive:
-            return operation(*args)
-        import Security
-        status, allowed = Security.SecKeychainGetUserInteractionAllowed(None)
-        if status != 0:
-            raise RuntimeError("Keychain interaction state unavailable")
-        if Security.SecKeychainSetUserInteractionAllowed(False) != 0:
-            raise RuntimeError("Unable to suppress Keychain interaction")
-        try:
-            return operation(*args)
-        finally:
-            if Security.SecKeychainSetUserInteractionAllowed(allowed) != 0:
-                raise RuntimeError("Unable to restore Keychain interaction state")
+    if private_login_files():
+        # Fail before importing a bridge or running any operation, even if a
+        # future caller accidentally asks for interactive access.
+        raise RuntimeError("OpenVegas does not use macOS Keychain. Reconnect in your browser.")
+    return operation(*args)

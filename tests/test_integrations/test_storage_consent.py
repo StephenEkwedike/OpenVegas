@@ -1,3 +1,4 @@
+import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -11,6 +12,7 @@ from openvegas.integrations.credentials import IntegrationError
 @pytest.mark.asyncio
 @pytest.mark.parametrize('consent', [True, False, None])
 async def test_approval_retained_only_for_explicit_storage_consent(monkeypatch, consent):
+    monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr('openvegas.config.get_session_metadata', lambda: {'access_token': 'fixture'})
     monkeypatch.delenv('OPENVEGAS_HOSTED_LAUNCH', raising=False)
     broker = module.Broker(backend='https://example.invalid')
@@ -54,3 +56,23 @@ async def test_cli_noninteractive_never_implies_storage_consent(monkeypatch, int
         assert 'not encrypted' in emitted[0]
         assert ask.call_args.kwargs['default'] is False
     broker.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_mac_storage_failure_revokes_without_consent_retry(monkeypatch):
+    monkeypatch.setattr(sys, 'platform', 'darwin')
+    monkeypatch.setattr('openvegas.config.get_session_metadata', lambda: {'access_token': 'fixture'})
+    monkeypatch.delenv('OPENVEGAS_HOSTED_LAUNCH', raising=False)
+    broker = module.Broker(backend='https://example.invalid')
+    broker._existing_session_request = AsyncMock(return_value={'token': 'ov_device_fixture'})
+    broker.request = AsyncMock()
+    broker.credentials = SimpleNamespace(load=lambda: None, save=Mock(side_effect=IntegrationError('disk denied')))
+    ask = Mock(return_value=True)
+    try:
+        with pytest.raises(IntegrationError, match='disk denied'):
+            await broker.authorize(confirm_file_storage=ask, emit=lambda _: None)
+        assert broker.credentials.save.call_count == 1
+        ask.assert_not_called()
+        broker.request.assert_awaited_once_with('POST', '/revoke', token='ov_device_fixture')
+    finally:
+        await broker.close()

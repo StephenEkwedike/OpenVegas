@@ -9,7 +9,7 @@ import stat
 import sys
 from pathlib import Path
 from urllib.parse import urlsplit
-from openvegas.keychain_access import keychain_call
+from openvegas.keychain_access import keychain_call, private_login_files
 
 
 class IntegrationError(Exception):
@@ -63,10 +63,12 @@ class Credentials:
             os.chmod(self.path.parent, 0o700)
 
     def load(self) -> str | None:
-        # A file exists only after explicit file-storage consent. Do not unlock
-        # an unrelated/older Keychain item before validating that selected store.
+        # macOS uses private files by default; other POSIX hosts require opt-in.
+        # Never probe an older OS-store entry before validating this file.
         if self.path.exists() or self.path.is_symlink():
             return self._load_file()
+        if private_login_files():
+            return None
         try:
             import keyring
             value = keychain_call(keyring.get_password, "openvegas-integrations", self.identity,
@@ -102,6 +104,8 @@ class Credentials:
             # Retain a previously consented store; don't probe an older Keychain item.
             self._load_file()
             return self._save_file(token)
+        if private_login_files():
+            return self._save_file(token)
         try:
             import keyring
             keychain_call(keyring.set_password, "openvegas-integrations", self.identity, token,
@@ -133,6 +137,10 @@ class Credentials:
         return "permission-restricted local file (0600)"
 
     def clear(self):
+        if private_login_files():
+            self._directory()
+            self.path.unlink(missing_ok=True)
+            return
         try:
             import keyring
             keychain_call(keyring.delete_password, "openvegas-integrations", self.identity,

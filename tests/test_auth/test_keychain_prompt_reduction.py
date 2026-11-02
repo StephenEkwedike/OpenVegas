@@ -1,3 +1,4 @@
+import sys
 import time
 
 import pytest
@@ -36,6 +37,7 @@ async def test_valid_client_does_not_unlock(monkeypatch, stored_session):
 
 @pytest.mark.asyncio
 async def test_refresh_reads_keychain_once(monkeypatch, stored_session):
+    monkeypatch.setattr(sys, "platform", "linux")
     from openvegas import client as client_module
     reads = []
     stored_session["access_expires_at"] = 1
@@ -69,6 +71,7 @@ def test_explicit_file_store_never_probes_keychain(monkeypatch, tmp_path):
 
 
 def test_missing_file_uses_protected_store(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, "platform", "linux")
     import keyring
     monkeypatch.setenv("OPENVEGAS_INTEGRATION_PROFILE", str(tmp_path))
     monkeypatch.setattr(keyring, "get_password", lambda *args: "keychain-fixture")
@@ -87,7 +90,7 @@ def test_symlink_file_is_rejected_without_keychain(monkeypatch, tmp_path):
 
 
 @pytest.mark.parametrize('denied', [False, True])
-def test_background_read_suppresses_and_restores_ui(monkeypatch, tmp_path, denied):
+def test_mac_background_read_never_touches_os_store(monkeypatch, tmp_path, denied):
     import sys, keyring
     from types import SimpleNamespace
     monkeypatch.setenv('OPENVEGAS_INTEGRATION_PROFILE', str(tmp_path))
@@ -107,14 +110,14 @@ def test_background_read_suppresses_and_restores_ui(monkeypatch, tmp_path, denie
         return 'fixture'
     monkeypatch.setattr(keyring, 'get_password', read)
     c = Credentials('https://openvegas.ai')
-    assert c.load_noninteractive() == (None if denied else 'fixture')
+    assert c.load_noninteractive() is None
     assert state[0] is True
-    assert transitions == [False, True]
+    assert transitions == []
     assert not c.path.exists()
 
 
 @pytest.mark.parametrize('prior', [True, False])
-def test_keychain_policy_restored_after_exception(monkeypatch, prior):
+def test_mac_keychain_call_rejected_before_operation(monkeypatch, prior):
     import sys
     from types import SimpleNamespace
     from openvegas.keychain_access import keychain_call
@@ -125,9 +128,9 @@ def test_keychain_policy_restored_after_exception(monkeypatch, prior):
     monkeypatch.setattr(sys, 'platform', 'darwin')
     def fail():
         raise ValueError('fixture failure')
-    with pytest.raises(ValueError):
+    with pytest.raises(RuntimeError, match="does not use macOS Keychain"):
         keychain_call(fail, interactive=False)
-    assert calls == [False, prior]
+    assert calls == []
 
 
 def test_failed_ui_suppression_never_runs_keychain_read(monkeypatch):
@@ -138,5 +141,5 @@ def test_failed_ui_suppression_never_runs_keychain_read(monkeypatch):
                           SecKeychainSetUserInteractionAllowed=lambda _: -1)
     monkeypatch.setitem(sys.modules, 'Security', api)
     monkeypatch.setattr(sys, 'platform', 'darwin')
-    with pytest.raises(RuntimeError, match='suppress'):
+    with pytest.raises(RuntimeError, match='does not use macOS Keychain'):
         keychain_call(lambda: pytest.fail('Interactive read executed'), interactive=False)
