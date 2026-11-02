@@ -3,13 +3,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import suppress
 
 from .broker import Broker
 from .credentials import IntegrationError
-from .terminal_handoff import TerminalView, close_writer, connect, play
 from .native_play import choice_model
+from .terminal_handoff import TerminalView, close_writer, connect, play
 
 GAMES = {'blackjack', 'roulette', 'poker', 'baccarat', 'slots', 'horse'}
+BILLING_CHECK_SECONDS = 3
+CLEANUP_SECONDS = .25
 
 
 async def controls(mode, *, game=None, menu=False, check_v=None):
@@ -20,7 +23,8 @@ async def controls(mode, *, game=None, menu=False, check_v=None):
         try:
             description = (
                 'OPENVEGAS / LOCAL CONTROLS\nNo Claude/Codex model request is needed.\n'
-                'Games use your OpenVegas wallet. Switching billing requires your spending limit.\n'
+                'Opening this menu needs no wallet balance or host credits.\n'
+                'Actual game stakes need your OpenVegas wallet; $V billing needs your spending consent.\n'
                 'Esc returns to coding.')
             error = ''
             while True:
@@ -31,27 +35,37 @@ async def controls(mode, *, game=None, menu=False, check_v=None):
                     try:
                         if check_v is None:
                             raise IntegrationError('Billing availability could not be checked. Billing unchanged.')
-                        await check_v()
+                        async with asyncio.timeout(BILLING_CHECK_SECONDS):
+                            await check_v()
                     except IntegrationError as exc:
                         error = '\n\n' + str(exc)
+                        continue
+                    except Exception:  # noqa: BLE001 - Adapter failures must leave the menu usable.
+                        error = ('\n\nBilling availability could not be checked. '
+                                 'Billing unchanged; no spending authorized. Try again or quit.')
                         continue
                 break
             await view.send(kind='done')
             reply = json.loads(await asyncio.wait_for(reader.readline(), 5))
-            if reply.get('closed') is not True:
+            if not isinstance(reply, dict) or reply.get('closed') is not True:
                 raise IntegrationError('Terminal did not acknowledge closing. No action started.')
         finally:
             await close_writer(writer)
     if action != 'play':
         return action
-    broker = Broker()
+    try:
+        broker = Broker()
+    except Exception:  # noqa: BLE001 - Sanitize initialization errors before any game action.
+        raise IntegrationError('OpenVegas game services are unavailable. '
+                               'No game request or new wager was sent; no automatic retry.') from None
     try:
         result = await play(None, broker, requested_game=game)
         if result.get('available') is False:
             raise IntegrationError(result.get('message', 'Game unavailable; no automatic retry.'))
         return 'quit'
     finally:
-        await broker.close()
+        with suppress(Exception):
+            await asyncio.wait_for(broker.close(), CLEANUP_SECONDS)
 
 
 class LocalKeys:

@@ -137,6 +137,14 @@ class Supervisor:
                     if data.get('game') is not None and data['game'] not in GAMES:
                         raise ValueError
                     self.open_controls(game=data.get('game'), delay=.75)
+                    # Hooks can be trusted after SessionStart. A human play
+                    # command carries the same host-owned identity without AI.
+                    if self.identifier is None and identifier is not None:
+                        self.identifier = identifier
+                        self.quota.transcript(data.get('transcript_path'), identifier)
+                        model = data.get('model')
+                        if self.mode == 'host' and isinstance(model, str) and native._MODEL.fullmatch(model):
+                            self.original_model = model
                     response = {'ok': True, 'message': 'Opening OpenVegas. No AI credits used.'}
                 elif data.get('action') in ('v', 'host'):
                     # Codex may trust plugin hooks after SessionStart. The first
@@ -190,7 +198,7 @@ class Supervisor:
         from .local_controls import controls
         try:
             await asyncio.sleep(delay)
-            action = await controls(self.mode, game=game, menu=menu, check_v=self.preflight_v)
+            action = await controls(self.mode, game=game, menu=menu, check_v=self.preflight_local_v)
             if action in ('use_v', 'use_host'):
                 # Selection alone never spends: choose_v still quotes and asks
                 # for wallet-spending consent after closing this owned child.
@@ -212,6 +220,11 @@ class Supervisor:
                 'quota_remaining': self.quota.remaining() if self.mode == 'host' else None}
 
     async def run_child(self, argv, env):
+        env = dict(env)
+        if self.host == 'claude':
+            # Claude can generate a paid title even when UserPromptSubmit stops
+            # a local command. Scope the supported opt-out to this owned child.
+            env.setdefault('CLAUDE_CODE_DISABLE_TERMINAL_TITLE', '1')
         self.changed.clear()
         attributes = termios.tcgetattr(0) if os.isatty(0) else None
         wallet = None
@@ -318,6 +331,15 @@ class Supervisor:
                 self.checking_v = False
         if child is not self.child or child is None or child.returncode is not None:
             raise IntegrationError('The native session ended during the check. Billing unchanged.')
+
+    async def preflight_local_v(self):
+        if not self.identifier:
+            raise IntegrationError(
+                'The coding session is not connected yet. Review OpenVegas in /hooks, '
+                'then restart the host in this same terminal. Games remain available here; '
+                'no AI request or billing change was made.')
+        resume_args(self.host, self.args, self.identifier)
+        await self.preflight_v()
 
     async def choose_v(self):
         self.v_child_started = False

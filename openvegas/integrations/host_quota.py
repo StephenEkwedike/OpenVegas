@@ -42,10 +42,15 @@ class HostQuota:
         path = Path(name)
         root = Path(self.env.get('CODEX_HOME', str(Path(self.env['HOME']) / '.codex'))) / 'sessions'
         # Only the registered host's session file, not arbitrary project JSON.
-        if (path.is_absolute() and path.name.endswith(identifier + '.jsonl')
-                and path.resolve().is_relative_to(root.resolve())
-                and not any(p.is_symlink() for p in (path, *path.parents))):
-            self.path = path
+        try:
+            if (path.is_absolute() and path.name.endswith(identifier + '.jsonl')
+                    and path.resolve().is_relative_to(root.resolve())
+                    and not any(p.is_symlink() for p in (path, *path.parents))):
+                self.path = path
+        except (OSError, ValueError, RuntimeError):
+            # Optional usage metadata must not reject an already dispatched
+            # control or disrupt host startup (invalid paths, symlink loops).
+            return
 
     def observe(self, raw):
         if self.host == 'claude':
@@ -105,9 +110,8 @@ def claude_settings(argv, env):
         candidates.extend([parent / '.claude/settings.json', parent / '.claude/settings.local.json'])
     try:
         for path in candidates:
-            if path.is_file():
-                if path.stat().st_size > 1048576 or json.loads(path.read_text()).get('statusLine'):
-                    return argv
+            if path.is_file() and (path.stat().st_size > 1048576 or json.loads(path.read_text()).get('statusLine')):
+                return argv
     except (OSError, ValueError, AttributeError):
         return argv
     from .installer import helper
@@ -116,8 +120,8 @@ def claude_settings(argv, env):
 
 
 def statusline_main():
-    from .use import request
     from .credentials import IntegrationError
+    from .use import request
     try:
         data = json.loads(sys.stdin.buffer.read(131073))
         raw = data.get('rate_limits')
@@ -129,4 +133,4 @@ def statusline_main():
     except (IntegrationError, ValueError, OSError, AttributeError, TypeError):
         pass
     # The owned relay/HUD renders the warning. No duplicate status line text.
-    print('')
+    print()

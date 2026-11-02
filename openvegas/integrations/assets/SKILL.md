@@ -8,17 +8,27 @@ context and model orchestration. Do not replace its agent loop.
 
 ## Play Dispatch First
 
-Managed-terminal exact `openvegas play` commands are handled by a local pre-model
-hook where the host supports it. Ctrl+], then O opens local OpenVegas controls even if the host
+Managed-terminal exact `openvegas`, `openvegas play [game]`, and
+`openvegas use v` / `openvegas use host` commands are handled by a local pre-model
+hook where the host supports it and the user has trusted the installed hook.
+Codex's `$openvegas` / `$openvegas:openvegas` and Claude's `/openvegas` prefixes
+are supported. A bare exact command opens the lobby, not a paid prompt.
+This does not make arbitrary requests, agent decisions or MCP tool selection free.
+Ctrl+], then lowercase o opens local OpenVegas controls even if the host
 rejects prompts because its allowance is exhausted. It uses the same terminal,
 not a new tab, and does not invoke a model. Hold Control and press ], release,
-then press O. Do not use F8: Codex uses it for voice. To exit Codex voice, type
+then press lowercase o (no Shift). Do not use F8: Codex uses it for voice. To exit Codex voice, type
 `/voice stop` and press Enter. Only use the menu shortcut when the HUD shows it;
 older running terminal relays need a restart, not just a host restart.
 The HUD shows a low-allowance reminder only when host usage
 metadata is available. Do not invent remaining usage from context-window size.
 If this skill reaches the model instead, follow the MCP fallback below; that
 fallback DOES require available host inference. Do not claim it works at zero quota.
+Without a trusted hook or the negotiated managed-terminal shortcut, do not claim
+credit-free access, silently change host trust, or keep retrying an exhausted model.
+An installed explicit command with no local connection must report setup required,
+not fall through into a model request. A failed wallet refresh must not disable
+the local menu; signing in and paid actions keep their separate requirements.
 Local menu entry never places a wager or switches billing automatically.
 `openvegas use v` and `openvegas use host` retain their names and spending consent.
 
@@ -178,8 +188,11 @@ to coding, or reports setup required before any wager. The explicitly enabled
 VS Code game tab described above remains a separate opt-in experiment.
 Keep games in the current host: never require `ov codex`, `ov claude`, a second
 terminal, or a shell game command to use this flow. Do not silently substitute
-`!ov game` if Codex's model allowance prevents the skill from being invoked;
-report that in-session entry is unavailable in that session. Only discuss the
+`!ov game` if Codex's model allowance prevents the skill from being invoked.
+Instead, use the displayed managed-terminal shortcut described above; it opens
+local controls without invoking the model. If that capability is absent, report
+that the current terminal needs activation rather than claiming a menu opened.
+Only discuss the
 separate shell game interface if the user explicitly asks for that alternative.
 These forms reuse the existing full CLI account; browser-only cosmetic
 credentials cannot wager. Do not promise native acceptance before the user has
@@ -200,10 +213,14 @@ form support or the full CLI account is unavailable, report the returned reason
 without a shell workaround, new billing launcher, or cosmetic-grant escalation.
 Claude: `/openvegas play roulette`. Codex: `$openvegas play roulette` (select its namespaced skill
 if needed). Claude's direct Mod command calls the tool without an AI prompt.
-Codex's skill request may use a normal AI request; game moves themselves do not
-call an AI model. Native subscription quota is unchanged.
+Codex's model-mediated skill fallback may use a normal AI request. The trusted
+exact-command hook and managed-terminal shortcut do not; neither do human game
+moves. Native subscription quota is unchanged. Autonomous agent decisions still
+need an available inference route, even though navigation itself is local.
 
-For `hud`, `games`, or a bare OpenVegas request, call `get_game_state` once.
+For `hud`, `games`, or a natural-language OpenVegas overview request that reaches
+the model, call `get_game_state` once. This is distinct from the exact local
+bare command, which opens the lobby before a model is invoked.
 Present a compact **OPENVEGAS / PLAYER DECK** with the actual balance and billing mode,
 equipped companion/completion when available, then the returned `lobby.links`
 as clickable Markdown links. Never invent a balance, ownership or game URL.
@@ -275,8 +292,10 @@ their original host billing. An installed pre-model hook handles these exact
 commands without inference; the host may resume the same conversation to apply
 the route. Never execute these commands through a shell tool, expose keys, or
 invent a hot switch. If this prompt reached the model, report that the pre-model
-connection is missing and ask for a native-host restart in the same configured
-terminal. Do not use `ov codex` or `ov claude` as the normal command flow.
+connection is missing or untrusted. Use the displayed local-menu shortcut if
+available; otherwise review the OpenVegas hook through the host's own trust UI
+and restart in the same configured terminal. Do not auto-trust hooks or use
+`ov codex` or `ov claude` as the normal command flow.
 `get_wallet` reports the active route and budget. Unreviewed direct models remain
 unavailable; there is no automatic provider/subscription fallback.
 This plugin has no inference-spending or purchase tool.

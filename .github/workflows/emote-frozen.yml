@@ -48,7 +48,24 @@ jobs:
         working-directory: dist/public-source
         env:
           OPENSSL_STATIC: '1'
-        run: python -m pip install --no-cache-dir -c requirements.lock ".[audio]" "pyinstaller==6.22.3"
+        run: python -m pip install --no-cache-dir -c requirements.lock ".[audio,dev]" "pyinstaller==6.22.3"
+      - name: Verify POSIX quota-independent controls with synthetic fixtures
+        if: runner.os != 'Windows'
+        working-directory: dist/git-source
+        run: >-
+          python -m pytest -q
+          tests/test_integrations/test_zero_quota_hooks.py
+          tests/test_integrations/test_zero_quota_controls.py
+          tests/test_integrations/test_zero_quota_supervisor.py
+          tests/test_integrations/test_zero_quota_bundle.py
+          tests/test_integrations/test_zero_quota_installed.py
+          tests/test_integrations/test_billing_supervisor.py
+          tests/test_integrations/test_local_controls.py
+          tests/test_integrations/test_local_controls_copy.py
+          tests/test_integrations/test_host_quota.py
+          tests/test_integrations/test_terminal_wallet.py
+          tests/test_integrations/test_use_v.py
+          tests/test_integrations/test_fast_billing_hook.py
       - name: Record exact source inputs for cross-platform diagnosis
         working-directory: dist/public-source
         run: >-

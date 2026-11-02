@@ -6,22 +6,23 @@ row; the relay alone renders the wallet, outside the child's viewport.
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import Future
 import json
+import math
 import os
 import re
 import stat
 import threading
-import math
-from decimal import Decimal
+from concurrent.futures import Future
+from contextlib import suppress
 
 from .broker import Broker
-from .game_result import amount
 from .credentials import IntegrationError
+from .game_result import amount
 from .terminal_handoff import SOCKET_ENV, TOKEN_ENV, validate_socket
 
 REFRESH_SECONDS = 5
 REQUEST_SECONDS = 3
+CLEANUP_SECONDS = .25
 MAX_MESSAGE = 1024
 LOCAL_CONTROL_SHORTCUT = 'ctrl-bracket-o'
 LOCAL_CONTROL_LABEL = 'Ctrl+] then O'
@@ -97,7 +98,7 @@ class CredentialReader:
             def read():
                 try:
                     future.set_result(credentials.load())
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - Deliver adapter failures through the future.
                     future.set_exception(exc)
             # asyncio's default executor waits for keychain threads at shutdown.
             # A daemon is read-only, reused after timeout, and never joined.
@@ -155,12 +156,13 @@ async def monitor(env, billing, *, broker_factory=Broker, interval=REFRESH_SECON
 
     Closing the pipe removes the strip even after a crash. Never authorize,
     refresh a provider, open a browser, place a wager, or print server errors.
+    The ready event signals startup completion, not wallet login or balance.
     """
     if not env.get(SOCKET_ENV) or not env.get(TOKEN_ENV):
         if ready:
             ready.set()
         return
-    writer = broker = receiver = None
+    writer = broker = receiver = account_credentials = None
     credentials = credentials or CredentialReader()
     try:
         async with asyncio.timeout(REQUEST_SECONDS):
@@ -170,16 +172,15 @@ async def monitor(env, billing, *, broker_factory=Broker, interval=REFRESH_SECON
                                      "billing": billing}).encode() + b"\n")
             await writer.drain()
             handshake = json.loads(await reader.readline())
-            if handshake.get("wallet") != 1:
+            if not isinstance(handshake, dict) or handshake.get("wallet") != 1:
                 return  # Older relay: leave its screen and the host untouched.
             controls_supported = handshake.get('controls_shortcut') == LOCAL_CONTROL_SHORTCUT
         if ready:
             ready.set()
-        broker = broker_factory()
-        account_credentials = account_factory(broker)
         def display_status():
             payload = dict(status() if status else {})
-            payload['controls'] = controls_supported and payload.get('controls') is True
+            payload['controls'] = (control is not None and controls_supported
+                                   and payload.get('controls', True) is True)
             payload['controls_shortcut'] = LOCAL_CONTROL_SHORTCUT if payload['controls'] else None
             payload['relay_restart_required'] = control is not None and not controls_supported
             if not controls_supported:
@@ -187,6 +188,10 @@ async def monitor(env, billing, *, broker_factory=Broker, interval=REFRESH_SECON
                 payload.pop('quota_remaining', None)
                 payload.pop('local_error', None)
             return payload
+        async def send(payload):
+            async with asyncio.timeout(REQUEST_SECONDS):
+                writer.write(json.dumps(payload).encode() + b'\n')
+                await writer.drain()
         refresh, disconnected = asyncio.Event(), asyncio.Event()
         async def receive():
             try:
@@ -201,15 +206,18 @@ async def monitor(env, billing, *, broker_factory=Broker, interval=REFRESH_SECON
                 disconnected.set()
                 refresh.set()
         if control:
-            # Input must not wait behind wallet network latency.
+            # The private relay lease, not wallet initialization or balance,
+            # enables input. Keep one receiver even while account reads fail.
             receiver = asyncio.create_task(receive())
-            writer.write(json.dumps({'state': 'loading', 'billing': billing,
-                                     **display_status()}).encode() + b'\n')
-            await writer.drain()
+            await send({'state': 'loading', 'billing': billing, **display_status()})
         while not disconnected.is_set():
             payload = {"state": "unavailable", "billing": billing}
             try:
                 async with asyncio.timeout(REQUEST_SECONDS):
+                    if broker is None:
+                        broker = broker_factory()
+                    if account_credentials is None:
+                        account_credentials = account_factory(broker)
                     # Keychain I/O must not block the native supervisor's loop.
                     token = await credentials.load(account_credentials)
                     if not token:
@@ -220,11 +228,12 @@ async def monitor(env, billing, *, broker_factory=Broker, interval=REFRESH_SECON
                         payload.update(state="ready", balance=account["balance"])
             except IntegrationError as exc:
                 payload["state"] = "login" if exc.status in (401, 403) else "unavailable"
-            except (TimeoutError, OSError, ValueError, TypeError, AttributeError):
+            except Exception:  # noqa: BLE001,S110 - Never log private wallet adapter failures.
+                # Optional wallet adapters may fail during construction too.
+                # Never drop the control lease or expose account error text.
                 pass
             payload.update(display_status())
-            writer.write(json.dumps(payload).encode() + b"\n")
-            await writer.drain()
+            await send(payload)
             # The relay sends a refresh after a game closes. Otherwise poll at
             # a bounded cadence, never in the host's model/tool execution loop.
             try:
@@ -250,13 +259,12 @@ async def monitor(env, billing, *, broker_factory=Broker, interval=REFRESH_SECON
             receiver.cancel()
             await asyncio.gather(receiver, return_exceptions=True)
         if writer:
-            writer.close()
-            try:
-                await writer.wait_closed()
-            except OSError:
-                pass
+            with suppress(Exception):
+                writer.close()
+                await asyncio.wait_for(writer.wait_closed(), CLEANUP_SECONDS)
         if broker:
-            await broker.close()
+            with suppress(Exception):
+                await asyncio.wait_for(broker.close(), CLEANUP_SECONDS)
 
 
 class WalletScreen:
