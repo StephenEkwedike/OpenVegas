@@ -70,7 +70,8 @@ class Broker:
             await client._http_client.aclose()
         return None
 
-    async def authorize(self, *, allow_file=False, emit=print, open_browser=webbrowser.open):
+    async def authorize(self, *, allow_file=False, emit=print, open_browser=webbrowser.open,
+                        confirm_file_storage=None):
         from openvegas.config import get_session_metadata as get_session
         # Public setup uses backend-bound browser credentials, never a legacy
         # CLI session inherited from a different development server.
@@ -118,7 +119,13 @@ class Broker:
             else:
                 raise IntegrationError("Browser approval expired. No host integrations were installed.")
         try:
-            storage = self.credentials.save(result["token"], allow_file=allow_file)
+            try:
+                storage = self.credentials.save(result["token"], allow_file=allow_file)
+            except IntegrationError:
+                if (allow_file or os.name != 'posix' or confirm_file_storage is None
+                        or confirm_file_storage() is not True):
+                    raise
+                storage = self.credentials.save(result["token"], allow_file=True)
         except Exception:
             await self.request("POST", "/revoke", token=result["token"])
             raise

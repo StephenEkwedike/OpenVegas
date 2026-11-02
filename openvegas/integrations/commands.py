@@ -58,9 +58,17 @@ def _offer_default_terminal():
 
 
 async def browser_login(*, allow_file=False, emit=click.echo):
+    def confirm_file_storage():
+        if not _interactive_terminal():
+            return False
+        emit("Keychain access was declined. A private login file avoids password pop-ups, "
+             "but is not encrypted and is readable by programs running as your user.")
+        return click.confirm(click.style("Save this login in a private file?", fg="blue"), default=False)
+
     broker = Broker()
     try:
-        return await broker.authorize(allow_file=allow_file, emit=emit)
+        return await broker.authorize(allow_file=allow_file, emit=emit,
+                                      confirm_file_storage=confirm_file_storage)
     finally:
         await broker.close()
 
