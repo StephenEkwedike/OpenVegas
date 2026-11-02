@@ -51,6 +51,11 @@ _VALUE_OPTIONS = {
     'codex': {'--cd', '-C', '--add-dir', '--sandbox', '-s', '--ask-for-approval', '-a',
               '--image', '-i', '--output-last-message', '-o', '--output-schema', '--color'},
 }
+_CODEX_REMOTE_PERMISSION_OPTIONS = {
+    '--sandbox', '-s', '--ask-for-approval', '-a', '--add-dir',
+    '--approve-for-me', '--full-auto', '--dangerously-bypass-approvals-and-sandbox',
+    '--yolo', '--permissions', '--dangerously-bypass-hook-trust',
+}
 _SERVER_SECRET_PREFIXES = (
     'STRIPE_', 'SUPABASE_', 'DATABASE_', 'DB_', 'REDIS_', 'POSTGRES_', 'PG',
     'MYSQL_', 'MONGO_', 'UPSTASH_', 'NEON_', 'SMTP_', 'RESEND_', 'SENDGRID_',
@@ -212,7 +217,38 @@ def child_environment(host, backend, model, max_tokens, token):
     return env
 
 
+def validate_codex_remote_args(host_args):
+    """Reject unsupported policy transfer, without weakening or editing argv."""
+    validate_host_args('codex', host_args)
+    args = iter(host_args)
+    for arg in args:
+        if arg == '--':
+            break
+        key = arg.partition('=')[0]
+        if (key in _CODEX_REMOTE_PERMISSION_OPTIONS or (key.startswith('--') and any(
+                option.startswith(key) for option in _CODEX_REMOTE_PERMISSION_OPTIONS
+                if option.startswith('--')))):
+            raise IntegrationError(
+                'Codex remote resume cannot safely apply invocation-specific permission overrides. '
+                'Use host billing until server-side policy transfer is verified; '
+                'original arguments and saved permissions are unchanged.')
+        if arg.startswith('--no-daemon='):
+            raise IntegrationError('Ambiguous local transport option.')
+        if arg in _VALUE_OPTIONS['codex']:
+            next(args)  # validate_host_args already checked the value.
+
+
+def validate_codex_wallet_handoff(host_args, resume_provider):
+    """Preflight for the supervisor before stopping its current coding host."""
+    validate_codex_remote_args(host_args)
+    if resume_provider != 'openai':
+        raise IntegrationError(
+            'Codex wallet handoff requires the original built-in openai provider. '
+            'Custom-provider model catalogs are not verified; host billing is unchanged.')
+
+
 def codex_resume_argv(executable, endpoint, model, host_args):
+    validate_codex_remote_args(host_args)
     # Only suppress a known promotional model migration for this invocation.
     # A different model needs a fresh priced grant, not a silent native upgrade.
     notices = ({'gpt-5.6-luna': 'gpt-6-luna'} if model == 'gpt-5.6-luna' else {})
@@ -220,7 +256,20 @@ def codex_resume_argv(executable, endpoint, model, host_args):
     if notices:
         table = '{' + ','.join(json.dumps(k) + '=' + json.dumps(v) for k, v in notices.items()) + '}'
         controls = ['-c', 'notice.model_migrations=' + table]
-    return [executable, *controls, *host_args, '--remote', endpoint, '--model', model]
+    # The isolated app-server already owns the backend. --no-daemon is only
+    # valid for an ordinary local host, not the attached --remote TUI.
+    remote_args, literal = [], []
+    args = iter(host_args)
+    for arg in args:
+        if arg == '--':
+            literal = [arg, *args]
+            break
+        if arg == '--no-daemon':
+            continue
+        remote_args.append(arg)
+        if arg in _VALUE_OPTIONS['codex']:
+            remote_args.append(next(args))
+    return [executable, *controls, *remote_args, '--remote', endpoint, '--model', model, *literal]
 
 
 def host_argv(executable, host, backend, model, host_args, *, local_tools_only=False, hosted_web=False,
@@ -288,7 +337,7 @@ async def run_host(argv, env):
 async def launch(host, model, limit_v, max_output_tokens=2048, *, yes=False, dry_run=False,
                  host_args=(), broker=None, emit=click.echo, confirm=None, local_tools_only=False,
                  provider='openrouter', runner=None, resume_provider=None, compact=False,
-                 control_environment=None):
+                 control_environment=None, wallet_mode=False):
     """Return the host exit code. Injection points are for bounded offline tests."""
     if host not in {'claude', 'codex'} or not isinstance(model, str) or not _MODEL.fullmatch(model):
         raise IntegrationError('Choose a supported host and an exact model identifier.')
@@ -298,6 +347,13 @@ async def launch(host, model, limit_v, max_output_tokens=2048, *, yes=False, dry
     if type(max_output_tokens) is not int or max_output_tokens < 1:
         raise IntegrationError('max-output-tokens must be a positive integer.')
     validate_host_args(host, host_args)
+    if host == 'codex':
+        if wallet_mode:
+            validate_codex_wallet_handoff(host_args, resume_provider)
+            if provider != 'openai':
+                raise IntegrationError('Codex wallet handoff requires the reviewed direct OpenAI route.')
+        elif resume_provider == 'openai':
+            validate_codex_remote_args(host_args)
     control_environment = control_environment or {}
     if (set(control_environment) - {'OPENVEGAS_SWITCH_SOCKET', 'OPENVEGAS_SWITCH_TOKEN'}
             or any(not isinstance(value, str) or '\x00' in value for value in control_environment.values())):
@@ -344,7 +400,7 @@ async def launch(host, model, limit_v, max_output_tokens=2048, *, yes=False, dry
             unit_prices = [_decimal(pricing.get(field), allow_zero=True) for field in unit_fields]
         if 'v_per_supplier_usd' in pricing and _decimal(pricing['v_per_supplier_usd']) != rate * multiplier:
             raise IntegrationError('Native quote contains inconsistent conversion prices; no host was launched.')
-        if compact:
+        if compact and not wallet_mode:
             emit(f'Model: {model}. Use your wallet up to {format_v(limit_v)}; no purchases or automatic top-ups.')
             emit('Return with openvegas use host. Requests stop if available funds are insufficient.')
         detail = (lambda *args: None) if compact else emit
@@ -355,7 +411,7 @@ async def launch(host, model, limit_v, max_output_tokens=2048, *, yes=False, dry
             incoming, outgoing = unit_prices
             detail(f'Quoted supplier USD per million tokens: input {incoming:f}; output {outgoing:f}.')
             price_label = 'Price' if compact else 'Converted retail $V'
-            emit(f'{price_label} per million tokens: input {format_v(incoming * rate * multiplier)}; '
+            (detail if wallet_mode else emit)(f'{price_label} per million tokens: input {format_v(incoming * rate * multiplier)}; '
                  f'output {format_v(outgoing * rate * multiplier)}.')
         else:
             detail('Model input/output unit prices were not supplied in this quote.')
@@ -372,7 +428,7 @@ async def launch(host, model, limit_v, max_output_tokens=2048, *, yes=False, dry
                 raise IntegrationError('Unreviewed hosted-search quote; no session opened.') from None
             emit(f'Hosted LIVE web search: at most one search per request; supplier US${fee} plus model tokens, '
                  f'with the same {multiplier}x markup. Two model rounds are reserved conservatively.')
-        if local_tools_only:
+        if local_tools_only and not wallet_mode:
             emit('Local tools and MCP stay available; hosted web search is unavailable on this route.')
         if host == 'claude':
             detail('Saved subscription credentials are preserved; cached-subscription coexistence is not yet verified.')
@@ -383,7 +439,8 @@ async def launch(host, model, limit_v, max_output_tokens=2048, *, yes=False, dry
                 emit('Spending not authorized; no session opened.')
                 return 0
         result = await broker.request('POST', '/native/sessions', token=device, data={
-            **selection, 'limit_v': format(limit_v, 'f'), 'confirmed': True, 'pricing_fingerprint': fingerprint})
+            **selection, 'limit_v': format(limit_v, 'f'), 'confirmed': True, 'pricing_fingerprint': fingerprint,
+            **({'billing_mode': 'wallet'} if wallet_mode else {})})
         # Retain only a native-session bearer, even if other response fields
         # are malformed. Never forward or close a provider/device/host key.
         if isinstance(result, dict):
@@ -393,23 +450,34 @@ async def launch(host, model, limit_v, max_output_tokens=2048, *, yes=False, dry
         if (session_token is None or not isinstance(result.get('session_id'), str)
                 or not _SAFE_ID.fullmatch(result['session_id'])
                 or type(result.get('expires_in')) is not int or result['expires_in'] <= 0
-                or _decimal(result.get('budget_v')) != limit_v
+                or (not wallet_mode and _decimal(result.get('budget_v')) != limit_v)
                 or _pricing(result.get('pricing')) != (fingerprint, rate, multiplier)
                 or result['pricing'] != quote['pricing']):
             raise IntegrationError('Native session does not match the consented quote; no host was launched.')
+        if wallet_mode and (result.get('billing_mode') != 'wallet'
+                or not isinstance(result.get('allowed_models'), list)
+                or not 1 <= len(result['allowed_models']) <= 128
+                or model not in result['allowed_models']
+                or any(not isinstance(item, str) or not _MODEL.fullmatch(item) for item in result['allowed_models'])):
+            raise IntegrationError('Backend does not support direct wallet billing; no host was launched.')
         status = await broker.request('GET', '/native/session', token=session_token)
         if (not isinstance(status, dict) or status.get('active') is False
                 or status.get('status') in {'closed', 'expired', 'revoked', 'exhausted'}
                 or any(key in status and status[key] != value for key, value in selection.items())
                 or ('session_id' in status and status['session_id'] != result['session_id'])):
             raise IntegrationError('Native spending session is not active or changed; no host was launched.')
+        if wallet_mode and (status.get('billing_mode') != 'wallet'
+                or status.get('allowed_models') != result['allowed_models']):
+            raise IntegrationError('Wallet billing authorization changed; no host was launched.')
         env = child_environment(host, backend, model, max_output_tokens, session_token)
         env.update(control_environment)
         detail(f'Session authorized for up to {result["expires_in"]} seconds; closing it when the native host exits.')
         if host == 'codex' and resume_provider == 'openai':
             from .codex_billing_route import route
             async with route(info['executable'], backend, model, env,
-                             local_tools_only=local_tools_only) as endpoint:
+                             local_tools_only=local_tools_only,
+                             **({'allowed_models': [{'provider': provider, 'host': host, 'model': item}
+                                 for item in result['allowed_models']]} if wallet_mode else {})) as endpoint:
                 argv = codex_resume_argv(info['executable'], endpoint, model, host_args)
                 return await (runner or run_host)(argv, env)
         argv = host_argv(info['executable'], host, backend, model, list(host_args),

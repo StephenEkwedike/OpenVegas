@@ -8,6 +8,7 @@ import fcntl
 import json
 import os
 import pty
+import re
 import select
 import shutil
 import signal
@@ -23,10 +24,35 @@ from pathlib import Path
 from websockets.asyncio.client import unix_connect
 
 from openvegas.integrations.codex_billing_route import route, rpc
-from openvegas.integrations.native import codex_resume_argv
+from openvegas.integrations.credentials import IntegrationError
+from openvegas.integrations.native import codex_resume_argv, launch
 
 requests = []
 auth_headers = []
+ALLOWED_MODELS = [{'provider': 'openai', 'host': 'codex', 'model': 'gpt-5.6-luna'}]
+
+
+async def read_pty(master, process, seconds, until=None):
+    output = b''
+    end = time.monotonic() + seconds
+    while time.monotonic() < end and process.poll() is None:
+        readable, _, _ = select.select([master], [], [], 0.1)
+        if readable:
+            try:
+                chunk = os.read(master, 65536)
+            except OSError:
+                break
+            output += chunk
+            if b'\x1b[6n' in chunk:
+                os.write(master, b'\x1b[1;1R')
+            if until is not None and until in output:
+                break
+        await asyncio.sleep(0.02)
+    return output
+
+
+def visible_text(output):
+    return re.sub(rb'\x1b\[[0-?]*[ -/]*[@-~]', b'', output).decode('utf-8', errors='replace')
 
 
 def event(kind, **kw):
@@ -137,7 +163,8 @@ async def main():
             }
             backend = "http://127.0.0.1:" + str(server.server_port)
             os.chdir(workspace)
-            async with route(str(wrapper), backend, "gpt-5.6-luna", env) as endpoint:  # noqa: SIM117
+            async with route(str(wrapper), backend, "gpt-5.6-luna", env,  # noqa: SIM117
+                             allowed_models=ALLOWED_MODELS) as endpoint:
                 async with unix_connect(endpoint.removeprefix("unix://")) as ws:
                     await rpc(
                         ws,
@@ -184,7 +211,27 @@ async def main():
             before = {str(p): p.read_bytes() for p in history}
             print("historyfiles", len(history), flush=True)
             assert requests
-            async with route(str(wrapper), backend, "gpt-5.6-luna", env) as endpoint:
+            request_count = len(requests)
+            for provider, arguments in (
+                ('openai', ['--no-daemon', '--sandbox', 'read-only', 'resume', sid]),
+                ('custom-provider', ['--no-daemon', 'resume', sid]),
+            ):
+                original_arguments = list(arguments)
+                try:
+                    await launch('codex', 'gpt-5.6-luna', '10', provider='openai',
+                                 resume_provider=provider, wallet_mode=True, host_args=arguments,
+                                 local_tools_only=True, yes=True)
+                except IntegrationError as exc:
+                    assert ('permission overrides' in str(exc) if provider == 'openai'
+                            else 'original built-in openai' in str(exc))
+                else:
+                    raise AssertionError('Unsupported handoff reached native launch')
+                assert arguments == original_arguments
+            assert len(requests) == request_count
+            print('permission_and_custom_provider_preflight_rejected', True,
+                  'original_args_preserved', True, 'new_requests', 0, flush=True)
+            async with route(str(wrapper), backend, "gpt-5.6-luna", env,
+                             allowed_models=ALLOWED_MODELS) as endpoint:
                 async with unix_connect(endpoint.removeprefix("unix://")) as ws:
                     await rpc(
                         ws,
@@ -195,11 +242,25 @@ async def main():
                     await ws.send(json.dumps({"method": "initialized", "params": {}}))
                     result = await rpc(ws, 2, "thread/resume", {"threadId": sid})
                     print("resumed_provider", result["thread"]["modelProvider"], flush=True)
+                    assert result['approvalPolicy'] == 'on-request', 'Saved approval policy changed'
+                    assert result['sandbox']['type'] == 'readOnly', 'Saved read-only policy changed'
+                    print('saved_remote_policy', result['approvalPolicy'], result['sandbox']['type'], flush=True)
                     assert "ORIGINAL_CONTEXT_MARKER" in json.dumps(result)
+                    listing = await rpc(ws, 3, 'model/list', {'includeHidden': True})
+                    assert [row['model'] for row in listing['data']] == ['gpt-5.6-luna']
+                    native_model = listing['data'][0]
+                    assert native_model['upgrade'] is None
+                    print('reviewed_native_catalog', [row['model'] for row in listing['data']],
+                          'efforts', [level['reasoningEffort']
+                                      for level in native_model['supportedReasoningEfforts']], flush=True)
                 master, slave = pty.openpty()
                 fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 140, 0, 0))
+                host_args = ['--no-daemon', 'resume', sid]
+                original_host_args = list(host_args)
+                argv = codex_resume_argv(str(wrapper), endpoint, 'gpt-5.6-luna', host_args)
+                assert '--no-daemon' not in argv and host_args == original_host_args
                 p = subprocess.Popen(  # noqa: ASYNC220 - Real disposable PTY, not the user's terminal.
-                    codex_resume_argv(str(wrapper), endpoint, "gpt-5.6-luna", ["resume", sid]),
+                    argv,
                     env=env,
                     stdin=slave,
                     stdout=slave,
@@ -208,36 +269,73 @@ async def main():
                     start_new_session=True,
                 )
                 os.close(slave)
-                output = b""
-                end = time.monotonic() + 18
-                while time.monotonic() < end and p.poll() is None:
-                    readable, _, _ = select.select([master], [], [], 0.1)
-                    if readable:
-                        try:
-                            b = os.read(master, 65536)
-                        except OSError:
-                            break
-                        output += b
-                        if b"\x1b[6n" in b:
-                            os.write(master, b"\x1b[1;1R")
-                    await asyncio.sleep(0.02)
+                try:
+                    output = await read_pty(master, p, 18, until=b'ORIGINAL_CONTEXT_MARKER')
+                    assert b'ORIGINAL_CONTEXT_MARKER' in output, visible_text(output)[-2500:]
+                    await read_pty(master, p, 1)
+                    request_count = len(requests)
+                    # Separate typing from Enter so native paste-burst detection
+                    # does not treat the command as a pasted multiline prompt.
+                    os.write(master, b'/model')
+                    await read_pty(master, p, .5)
+                    os.write(master, b'\r')
+                    menu = visible_text(await read_pty(master, p, 3))
+                    if not ('GPT-5.6-Luna' in menu or 'gpt-5.6-luna' in menu):
+                        print('model_menu_failure', repr(menu[-2500:]), flush=True)
+                    assert 'GPT-5.6-Luna' in menu or 'gpt-5.6-luna' in menu, menu[-2500:]
+                    assert 'gpt-6' not in menu.lower() and 'GPT-6' not in menu
+                    print('native_model_menu_reviewed_only', True, flush=True)
+                    os.write(master, b'\r')
+                    effort_menu = visible_text(await read_pty(master, p, 2))
+                    if not ('reasoning' in effort_menu.lower() or 'effort' in effort_menu.lower()):
+                        print('effort_menu_failure', repr(effort_menu[-2500:]), flush=True)
+                    assert 'reasoning' in effort_menu.lower() or 'effort' in effort_menu.lower(), effort_menu[-2500:]
+                    for option in native_model['supportedReasoningEfforts']:
+                        if option['reasoningEffort'] == 'max':
+                            continue  # The native picker puts Max in its own submenu.
+                        assert option['description'].lower() in effort_menu.lower(), effort_menu[-2500:]
+                    if any(option['reasoningEffort'] == 'max'
+                           for option in native_model['supportedReasoningEfforts']):
+                        assert 'More reasoning' in effort_menu
+                        # Initial selection is Medium; High, Extra high, More.
+                        os.write(master, b'\x1b[B\x1b[B\x1b[B')
+                        await read_pty(master, p, .3)
+                        os.write(master, b'\r')
+                        more_menu = visible_text(await read_pty(master, p, 1))
+                        # Native rendering emits cell diffs. A resize forces a
+                        # complete repaint instead of guessing missing letters.
+                        fcntl.ioctl(master, termios.TIOCSWINSZ, struct.pack('HHHH', 40, 141, 0, 0))
+                        os.killpg(p.pid, signal.SIGWINCH)
+                        more_menu += visible_text(await read_pty(master, p, .5))
+                        assert 'max' in more_menu.lower(), more_menu[-2500:]
+                        os.write(master, b'\x1b')
+                        await read_pty(master, p, .3)
+                    os.write(master, b'\x1b')
+                    await read_pty(master, p, .5)
+                    os.write(master, b'\x1b')
+                    await read_pty(master, p, .5)
+                    assert len(requests) == request_count, 'Native menus submitted a model request'
+                    print('native_effort_menu_verified', True, 'menu_provider_calls', 0, flush=True)
+                    print('resume_no_daemon_sanitized', True, 'restore_args_preserved',
+                          host_args == original_host_args, flush=True)
+                    native_alive = p.poll() is None
+                except AssertionError as exc:
+                    print('native_rehearsal_assertion', str(exc), flush=True)
+                    raise
+                finally:
+                    if p.poll() is None:
+                        os.killpg(p.pid, signal.SIGKILL)
+                    p.wait(timeout=5)
+                    os.close(master)
                 print(
                     "native_tui_alive",
-                    p.poll() is None,
+                    native_alive,
                     "context_displayed",
                     b"ORIGINAL_CONTEXT_MARKER" in output,
                     "mismatch",
                     b"modelProviderMismatch" in output,
                     flush=True,
                 )
-                if p.poll() is None:
-                    os.killpg(p.pid, signal.SIGKILL)
-                try:
-                    p.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    os.killpg(p.pid, signal.SIGKILL)
-                    p.wait(timeout=3)
-                os.close(master)
                 assert b"modelProviderMismatch" not in output
                 assert b"Meet GPT" not in output
                 assert b"ORIGINAL_CONTEXT_MARKER" in output, output[-2500:]

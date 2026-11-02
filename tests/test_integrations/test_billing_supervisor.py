@@ -3,6 +3,7 @@ import asyncio
 import json
 import os
 import sys
+from contextlib import asynccontextmanager
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -22,12 +23,14 @@ PRICING = {'fingerprint': 'a' * 64, 'v_per_usd': '100', 'multiplier': '1.4'}
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('host', ['claude', 'codex'])
-@pytest.mark.parametrize('scenario', ['approved', 'declined', 'model_cancel', 'grant_error',
+@pytest.mark.parametrize('scenario', ['approved', 'no_extra_confirmation', 'native_model_selection', 'grant_error',
                                      'v_exit', 'v_exit_zero', 'v_bootstrap_error', 'no_session'])
 async def test_same_terminal_owned_process_switch_lifecycle(tmp_path, monkeypatch, host, scenario):
     home = tmp_path / 'home'
     home.mkdir()
-    (home / 'config.toml').write_text('model_provider="original"\n')
+    config = home / 'config.toml'
+    config.write_text('model_provider="openai"\nsandbox_mode="read-only"\n')
+    config_before = config.read_bytes()
     auth = home / 'auth.json'
     auth.write_text('{"fixture":"unchanged personal login"}')
     before = auth.read_bytes()
@@ -82,26 +85,29 @@ sys.exit(7 if v and FIXTURE_SCENARIO != 'v_exit_zero' else 0)
         calls.append((req.method, req.url.path))
         if req.url.path.endswith('/options'):
             models = [{'model': 'exact-model', 'max_tokens': 128}]
-            if scenario == 'model_cancel':
+            if scenario == 'native_model_selection':
                 models.append({'model': 'other-reviewed-model', 'max_tokens': 256})
             return httpx.Response(200, json={'host': host, 'provider': provider,
-                'balance_v': '500', 'models': models})
+                'balance_v': '500', 'models': models, 'wallet_billing': True})
         if req.url.path.endswith('/quote'):
             return httpx.Response(200, json={**data, 'pricing': PRICING})
         if req.url.path.endswith('/sessions'):
             grants.append(data)
             assert data['provider'] == provider and data['confirmed'] is True
+            assert data['billing_mode'] == 'wallet'
             assert data['limit_v'] == '500.000000'
             assert data['model'] == 'exact-model' and data['max_tokens'] == 128
             assert data['pricing_fingerprint'] == PRICING['fingerprint']
             if scenario == 'grant_error':
                 return httpx.Response(503, json={'detail': 'fixture unavailable'})
             return httpx.Response(200, json={'token': TOKEN, 'session_id': 'fixture',
-                'expires_in': 60, 'budget_v': data['limit_v'], 'pricing': PRICING})
+                'expires_in': 60, 'budget_v': data['limit_v'], 'pricing': PRICING,
+                'billing_mode': 'wallet', 'allowed_models': ['exact-model', 'other-reviewed-model']})
         if req.method == 'DELETE':
             with events.open('a') as f:
                 f.write(json.dumps({'kind': 'revoked'}) + '\n')
-        return httpx.Response(200, json={'active': True, 'session_id': 'fixture'})
+        return httpx.Response(200, json={'active': True, 'session_id': 'fixture',
+            'billing_mode': 'wallet', 'allowed_models': ['exact-model', 'other-reviewed-model']})
 
     def make_broker():
         broker = Broker(backend='http://127.0.0.1:12345', transport=httpx.MockTransport(endpoint))
@@ -109,32 +115,38 @@ sys.exit(7 if v and FIXTURE_SCENARIO != 'v_exit_zero' else 0)
         return broker
     monkeypatch.setattr(billing_host, 'Broker', make_broker)
     monkeypatch.setattr(native, 'detect', lambda _: {'executable': str(stub), 'version': 'fixture'})
+    if host == 'codex':
+        from openvegas.integrations import codex_billing_route
+        @asynccontextmanager
+        async def fixture_route(*args, **kwargs):
+            assert [row['model'] for row in kwargs['allowed_models']] == ['exact-model', 'other-reviewed-model']
+            yield 'unix:///fixture/native-server.sock'
+        monkeypatch.setattr(codex_billing_route, 'route', fixture_route)
     def prompt(label, **kwargs):
         prompts.append(label)
-        assert label == 'Model', 'Wallet ceiling must not become an amount prompt'
-        if scenario == 'model_cancel':
-            raise click.Abort()
-        return kwargs['type'].convert('1', None, None)
+        pytest.fail('Native controls must own model selection')
     def confirm(label, **kwargs):
         confirmations.append(label)
-        assert label == 'Use $V with exact-model?' and kwargs['default'] is False
-        return scenario != 'declined'
+        pytest.fail('The explicit use v command is already consent')
     monkeypatch.setattr(click, 'prompt', prompt)
     monkeypatch.setattr(click, 'confirm', confirm)
     messages = []
-    permission = ['--permission-mode', 'default'] if host == 'claude' else ['--sandbox', 'read-only']
+    # Remote Codex uses persisted policy; invocation overrides have separate
+    # fail-closed preflight tests and must not be silently dropped here.
+    permission = ['--permission-mode', 'default'] if host == 'claude' else []
     env = {**os.environ, 'HOME': str(home), 'CODEX_HOME': str(home)}
     supervisor = billing_host.Supervisor(host, str(stub), permission, env, emit=messages.append)
     code = await asyncio.wait_for(supervisor.run(), 15)
     rows = [json.loads(line) for line in events.read_text().splitlines()]
     children = [row for row in rows if row['kind'] == 'child']
-    activated = scenario in ('approved', 'v_exit', 'v_exit_zero', 'v_bootstrap_error')
+    activated = scenario in ('approved', 'no_extra_confirmation', 'native_model_selection', 'v_exit', 'v_exit_zero', 'v_bootstrap_error')
     assert [c['v'] for c in children] == (
-        [False, True, False] if scenario in ('approved', 'v_bootstrap_error') else
+        [False, True, False] if scenario in ('approved', 'no_extra_confirmation', 'native_model_selection', 'v_bootstrap_error') else
         [False, True] if scenario in ('v_exit', 'v_exit_zero') else
         [False] if scenario == 'no_session' else [False, False])
     assert code == (7 if scenario == 'v_exit' else 0)
     assert auth.read_bytes() == before
+    assert config.read_bytes() == config_before
     for child in children:
         assert child['cwd'] == str(tmp_path) and child['connection']
         assert child['personal_key'] is (not child['v'])
@@ -143,21 +155,19 @@ sys.exit(7 if v and FIXTURE_SCENARIO != 'v_exit_zero' else 0)
     assert all(SID in child['argv'] for child in children[1:])
     if scenario not in ('v_exit', 'v_exit_zero', 'no_session'):
         assert 'original-model' in children[-1]['argv']
-    if scenario in ('approved', 'v_bootstrap_error'):
+    if scenario in ('approved', 'no_extra_confirmation', 'native_model_selection', 'v_bootstrap_error'):
         assert [row['kind'] for row in rows] == ['child', 'child', 'revoked', 'child']
     if host == 'codex':
-        assert all('model_provider="original"' in child['argv'] for child in children[1:])
+        assert all('--remote' in child['argv'] for child in children if child['v'])
+        assert all('model_provider="openai"' in child['argv'] for child in children[1:] if not child['v'])
     if scenario in ('v_exit', 'v_exit_zero'):
         assert supervisor.v_child_ready and supervisor.pending is None
         assert not any('Returning to host billing' in message for message in messages)
     if scenario == 'v_bootstrap_error':
         assert not supervisor.v_child_ready
         assert any('no prompt will be resubmitted' in message for message in messages)
-    assert prompts == (['Model'] if scenario == 'model_cancel' else [])
-    assert len(confirmations) == (0 if scenario in ('model_cancel', 'no_session') else 1)
+    assert prompts == [] and confirmations == []
     assert sum(method == 'DELETE' for method, _ in calls) == int(activated)
-    if scenario in ('declined', 'model_cancel'):
-        assert not any(path.endswith('/sessions') for _, path in calls)
     if scenario == 'no_session':
         assert not calls and not grants and supervisor.identifier is None
     assert TOKEN not in '\n'.join(messages)
@@ -202,7 +212,7 @@ async def test_choose_v_integrates_wallet_model_and_original_provider(
     broker = SimpleNamespace(close=AsyncMock())
     monkeypatch.setattr(billing_host, 'Broker', lambda: broker)
     monkeypatch.setattr(supervisor, 'v_options', AsyncMock(return_value={
-        'models': models, 'balance_v': balance,
+        'models': models, 'balance_v': balance, 'wallet_billing': True,
         'provider': 'openai' if host == 'codex' else 'anthropic'}))
     launch = AsyncMock(return_value=0)
     monkeypatch.setattr(native, 'launch', launch)
@@ -215,7 +225,8 @@ async def test_choose_v_integrates_wallet_model_and_original_provider(
 
     assert await supervisor.choose_v() == 0
     assert launch.await_count == 1
-    assert launch.await_args.args == (host, 'reviewed-second', Decimal(ceiling), 512)
+    expected = ('reviewed-second', 512) if current == 'reviewed-second' else ('reviewed-first', 128)
+    assert launch.await_args.args == (host, expected[0], Decimal(ceiling), expected[1])
     kwargs = launch.await_args.kwargs
     assert kwargs['resume_provider'] == ('openai' if host == 'codex' else None)
     assert kwargs['broker'] is broker and kwargs['compact'] is True
@@ -225,7 +236,8 @@ async def test_choose_v_integrates_wallet_model_and_original_provider(
         'OPENVEGAS_SWITCH_SOCKET': '/tmp/unused-fixture.sock',
         'OPENVEGAS_SWITCH_TOKEN': supervisor.token,
     }
-    assert prompts == ([] if current == 'reviewed-second' else ['Model'])
+    assert prompts == []
+    assert kwargs['yes'] is True and kwargs['wallet_mode'] is True
     if current == 'unavailable-original':
         assert 'unavailable-original is not enabled for $V on this backend.' in messages
     assert not supervisor.v_child_started and supervisor.pending == 'host'
@@ -241,7 +253,7 @@ async def test_unspendable_wallet_never_prompts_or_launches(tmp_path, monkeypatc
     monkeypatch.setattr(billing_host, 'Broker', lambda: broker)
     monkeypatch.setattr(supervisor, 'v_options', AsyncMock(return_value={
         'models': [{'model': 'reviewed-model', 'max_tokens': 128}],
-        'provider': 'anthropic', 'balance_v': balance}))
+        'provider': 'anthropic', 'balance_v': balance, 'wallet_billing': True}))
     launch = AsyncMock()
     monkeypatch.setattr(native, 'launch', launch)
     def forbidden(*args, **kwargs):

@@ -8,14 +8,28 @@ import {spawn} from 'node:child_process';
 const require = createRequire(import.meta.url);
 let timer;
 let shown = false;
+let shownWidth = 0;
 let child;
 let interrupted;
 const signals = ['SIGINT', 'SIGTERM'];
 let handlers = [];
-function clearLoading() {
+function terminalColumns() {
+  const columns = process.stderr.columns;
+  return Number.isInteger(columns) && columns > 0 ? columns : 80;
+}
+function eraseLoading() {
+  // A terminal resize can reflow the previous single-line frame onto more rows.
+  const rows = Math.max(1, Math.ceil(shownWidth / terminalColumns()));
+  return '\r\x1b[2K' + '\x1b[1A\r\x1b[2K'.repeat(rows - 1);
+}
+function clearLoading(done) {
   clearInterval(timer);
-  if (shown) process.stderr.write('\r\x1b[2K');
+  process.stderr.removeListener('resize', drawLoading);
+  const clear = shown ? eraseLoading() : '';
   shown = false;
+  shownWidth = 0;
+  if (clear) process.stderr.write(clear, done);
+  else done?.();
 }
 function finish(code, signal) {
   clearLoading();
@@ -63,16 +77,22 @@ const verbose = args[0] === 'go' && args.includes('--verbose');
 const loading = args[0] === 'go' && !args.includes('--dry-run') && !verbose &&
   process.stderr.isTTY && !process.env.CI;
 let label = 'Checking OpenVegas runtime...';
+let frame = 0;
+function drawLoading() {
+  const clear = eraseLoading();
+  // Labels and frames are ASCII. Leave the last terminal cell unused so no
+  // delayed auto-wrap can strand a suffix when the next label is shorter.
+  const text = `${['|', '/', '-', '\\'][frame++ % 4]} ${label}`.slice(0, terminalColumns() - 1);
+  shown = true;
+  shownWidth = text.length;
+  process.stderr.write(`${clear}\x1b[34m${text}\x1b[0m`);
+}
 const verificationStart = performance.now();
 if ((loading || verbose) && process.platform !== 'win32') env.OPENVEGAS_LAUNCH_NOTIFY_FD = '3';
 if (loading && process.platform !== 'win32') {
-  let frame = 0;
-  const draw = () => {
-    shown = true;
-    process.stderr.write(`\r\x1b[34m${['|', '/', '-', '\\'][frame++ % 4]} ${label}\x1b[0m`);
-  };
-  draw();
-  timer = setInterval(draw, 100);
+  drawLoading();
+  timer = setInterval(drawLoading, 100);
+  process.stderr.on('resize', drawLoading);
 } else if (loading) {
   process.stderr.write('Starting OpenVegas...\n');
 }
@@ -114,6 +134,7 @@ try {
   fail('native package is missing or unreadable. Reinstall with optional dependencies enabled.');
 }
 label = 'Starting OpenVegas...';
+if (shown) drawLoading();
 if (verbose) console.error(`OpenVegas runtime verified (${((performance.now() - verificationStart) / 1000).toFixed(2)}s); starting.`);
 const startupStart = performance.now();
 child = spawn(binary, args, {stdio: ['inherit', 'inherit', 'inherit', 'pipe'], shell: false, env});
@@ -123,10 +144,11 @@ child.stdio[3].on('data', data => {
   ready = (ready + data.toString()).slice(0, 64);
   if (!acknowledged && ready === 'ready\n') {
     acknowledged = true;
-    clearLoading();
-    if (verbose) console.error(`OpenVegas runtime ready (${((performance.now() - startupStart) / 1000).toFixed(2)}s startup).`);
-    // Hand off to the runtime's setup spinner before it can print consent.
-    child.stdio[3].end('1');
+    clearLoading(() => {
+      if (verbose) console.error(`OpenVegas runtime ready (${((performance.now() - startupStart) / 1000).toFixed(2)}s startup).`);
+      // Flush the clear before letting the runtime print consent or success.
+      child.stdio[3].end('1');
+    });
   }
 });
 child.stdio[3].on('error', () => {});

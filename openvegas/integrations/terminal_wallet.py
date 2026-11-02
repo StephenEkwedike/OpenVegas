@@ -28,6 +28,56 @@ LOCAL_CONTROL_SHORTCUT = 'ctrl-bracket-o'
 LOCAL_CONTROL_LABEL = 'Ctrl+] then O'
 
 
+def terminal_reset(*, clear=False, alternate=True):
+    """Reset presentation modes, not scrollback, after the previous writer stops."""
+    # CAN/ST also recover a renderer killed midway through a CSI/OSC/DCS packet.
+    # Kitty's flags/stacks are per screen. Set current flags to zero rather than
+    # blindly popping a caller's stack; also disable xterm modifyOtherKeys.
+    # https://sw.kovidgoyal.net/kitty/keyboard-protocol/#progressive-enhancement
+    # https://invisible-island.net/xterm/ctlseqs/ctlseqs.html (XTMODKEYS)
+    keyboard = b'\x1b[=0u\x1b[>4;0m'
+    data = b'\x18\x1b\\\x1b[?2026l' + keyboard
+    if alternate:
+        data += b'\x1b[?1049l\x1b[?1047l\x1b[?47l' + keyboard
+    data += (b'\x1b[?6l\x1b[r\x1b[0m\x1b(B\x1b>\x1b[4l\x1b[?1l'
+            b'\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1004l\x1b[?1005l'
+            b'\x1b[?1006l\x1b[?1015l\x1b[?2004l\x1b[?7h\x1b[?25h\x1b[0 q')
+    return data + (b'\x1b[2J\x1b[H' if clear else b'')
+
+
+async def handoff_screen(env, *, output_fd=1):
+    """Barrier before a blocking supervisor prompt, after child/task cleanup.
+
+    The caller must stop/reap its native writers and cancel/await its wallet
+    monitor first. A managed relay must acknowledge the reset; silently falling
+    back would race queued native output and the relay's reserved wallet row.
+    """
+    if not env.get(SOCKET_ENV) or not env.get(TOKEN_ENV):
+        if os.isatty(output_fd):
+            data = terminal_reset(clear=True)
+            while data:
+                data = data[os.write(output_fd, data):]
+        return
+    writer = None
+    try:
+        async with asyncio.timeout(REQUEST_SECONDS):
+            validate_socket(env[SOCKET_ENV])
+            reader, writer = await asyncio.open_unix_connection(env[SOCKET_ENV], limit=MAX_MESSAGE)
+            writer.write(json.dumps({'kind': 'handoff', 'token': env[TOKEN_ENV]}).encode() + b'\n')
+            await writer.drain()
+            reply = json.loads(await reader.readline())
+            if not isinstance(reply, dict) or reply.get('reset') is not True:
+                raise ValueError('Handoff was not acknowledged')
+    except (OSError, ValueError, TimeoutError, IntegrationError):
+        raise IntegrationError('Terminal handoff unavailable. Restart the managed terminal; '
+                               'no billing prompt or new host was started.') from None
+    finally:
+        if writer is not None:
+            writer.close()
+            with suppress(OSError, TimeoutError):
+                await asyncio.wait_for(writer.wait_closed(), CLEANUP_SECONDS)
+
+
 class WalletCredentials:
     """Read the game's profile, never the supervisor's native-host HOME.
 
@@ -232,6 +282,8 @@ async def monitor(env, billing, *, broker_factory=Broker, interval=REFRESH_SECON
                 # Optional wallet adapters may fail during construction too.
                 # Never drop the control lease or expose account error text.
                 pass
+            if disconnected.is_set():
+                break
             payload.update(display_status())
             await send(payload)
             # The relay sends a refresh after a game closes. Otherwise poll at
@@ -255,16 +307,32 @@ async def monitor(env, billing, *, broker_factory=Broker, interval=REFRESH_SECON
     finally:
         if ready:
             ready.set()
-        if receiver:
-            receiver.cancel()
-            await asyncio.gather(receiver, return_exceptions=True)
+        # Release the display lease synchronously, before any cancellable wait.
+        # A second cancellation must not leave the HUD alive over a consent prompt.
         if writer:
             with suppress(Exception):
                 writer.close()
-                await asyncio.wait_for(writer.wait_closed(), CLEANUP_SECONDS)
-        if broker:
-            with suppress(Exception):
-                await asyncio.wait_for(broker.close(), CLEANUP_SECONDS)
+        if receiver:
+            receiver.cancel()
+        async def cleanup():
+            if receiver:
+                await asyncio.gather(receiver, return_exceptions=True)
+            if writer:
+                with suppress(Exception):
+                    await asyncio.wait_for(writer.wait_closed(), CLEANUP_SECONDS)
+            if broker:
+                with suppress(Exception):
+                    await asyncio.wait_for(broker.close(), CLEANUP_SECONDS)
+        closing = asyncio.create_task(cleanup())
+        cancelled = False
+        while not closing.done():
+            try:
+                await asyncio.shield(closing)
+            except asyncio.CancelledError:
+                cancelled = True
+        closing.result()
+        if cancelled:
+            raise asyncio.CancelledError
 
 
 class WalletScreen:
@@ -307,7 +375,7 @@ class WalletScreen:
 
     def deactivate(self):
         self.active = False
-        return b"\x1b7\x1b[r" + f"\x1b[{self.rows};1H\x1b[2K".encode() + b"\x1b8"
+        return b"\x1b7\x1b[?6l\x1b[r" + f"\x1b[{self.rows};1H\x1b[2K".encode() + b"\x1b8"
 
     def paint(self):
         if not self.active or not self.safe:
@@ -324,8 +392,8 @@ class WalletScreen:
                 if mode == b"2026": self.sync = enabled
                 if mode == b"7": self.wrap = enabled
                 if mode == b"6": self.origin = enabled
-        if final == b"s": self.saved = True
-        if final == b"u": self.saved = False
+        if final == b"s" and body in (b"", b"0"): self.saved = True
+        if final == b"u" and body in (b"", b"0"): self.saved = False
         if self.active and re.fullmatch(rb"[0-9;]*", body):
             parts = body.split(b";")
             if final == b"r":
@@ -341,6 +409,15 @@ class WalletScreen:
     def feed(self, data):
         output = bytearray()
         for byte in data:
+            if byte in (24, 26):
+                self.state, self.utf8 = "text", 0
+                self.sequence.clear()
+                output.append(byte)
+                continue
+            if byte == 27 and self.state in ("escape", "csi", "csi_pass", "escape_intermediate"):
+                self.sequence.clear()
+                self.state = "escape"
+                continue
             if self.state == "csi":
                 self.sequence.append(byte)
                 if 64 <= byte <= 126:

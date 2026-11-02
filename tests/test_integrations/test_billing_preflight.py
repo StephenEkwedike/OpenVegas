@@ -45,13 +45,13 @@ def supervisor_at(tmp_path, host):
 
 def options(host):
     return {'host': host, 'provider': 'openai' if host == 'codex' else 'anthropic',
-            'balance_v': '500', 'models': [{'model': 'reviewed-model', 'max_tokens': 128}]}
+            'wallet_billing': True, 'balance_v': '500', 'models': [{'model': 'reviewed-model', 'max_tokens': 128}]}
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('host', ['codex', 'claude'])
 @pytest.mark.parametrize('failure', ['disabled', 'offline', 'signed_out', 'expired',
-    'empty_wallet', 'missing_models', 'wrong_route', 'bad_model', 'bad_budget', 'bad_tokens'])
+    'empty_wallet', 'missing_models', 'wrong_route', 'bad_model', 'bad_budget', 'bad_tokens', 'legacy_backend'])
 async def test_rejected_switch_keeps_owned_host_and_billing(tmp_path, monkeypatch, host, failure):
     supervisor = supervisor_at(tmp_path, host)
     calls, brokers = [], []
@@ -72,6 +72,7 @@ async def test_rejected_switch_keeps_owned_host_and_billing(tmp_path, monkeypatc
         if failure == 'wrong_route': data['host'] = 'other'
         if failure == 'bad_model': data['models'][0]['model'] = '\x1b[secret'
         if failure == 'bad_tokens': data['models'][0]['max_tokens'] = True
+        if failure == 'legacy_backend': data.pop('wallet_billing')
         return httpx.Response(200, json=data)
     def make_broker():
         broker = Broker(backend='https://example.invalid', transport=httpx.MockTransport(endpoint))
@@ -107,6 +108,25 @@ async def test_timeout_leaves_host_alive_and_releases_preflight(tmp_path, monkey
     assert not result['ok'] and 'timed out' in result['message']
     assert supervisor.pending is None and not supervisor.changed.is_set() and not supervisor.checking_v
     broker.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('provider,args', [('custom', []),
+    ('openai', ['--sandbox', 'read-only']), ('openai', ['--ask-for-approval', 'on-request']),
+    ('openai', ['--add-dir', '/fixture/extra'])])
+async def test_unsupported_remote_policy_keeps_host_alive_before_billing_lookup(tmp_path, monkeypatch, provider, args):
+    supervisor = supervisor_at(tmp_path, 'codex')
+    supervisor.original_provider, supervisor.args = provider, args
+    broker = SimpleNamespace(credentials=SimpleNamespace(load=lambda: pytest.fail('No credential read expected')),
+                             request=AsyncMock(), close=AsyncMock())
+    monkeypatch.setattr(billing_host, 'Broker', lambda: broker)
+    result = await command(supervisor)
+    assert result['ok'] is False
+    assert supervisor.mode == 'host' and supervisor.pending is None
+    assert not supervisor.changed.is_set()
+    supervisor.child.terminate.assert_not_called()
+    supervisor.child.kill.assert_not_called()
+    broker.request.assert_not_awaited()
 
 
 @pytest.mark.asyncio

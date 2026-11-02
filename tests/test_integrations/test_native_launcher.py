@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import tomllib
+from contextlib import asynccontextmanager
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -77,6 +78,65 @@ def rig(monkeypatch, tmp_path):
         return asyncio.run(invoke())
     return SimpleNamespace(run=run, calls=calls, messages=messages, state=state, home=home,
                            tmp=tmp_path, capture=capture, script=script, broker=broker)
+
+
+@pytest.mark.parametrize('host', ['claude', 'codex'])
+def test_wallet_switch_authorizes_without_prompt_and_keeps_native_controls(rig, host, monkeypatch):
+    model = 'anthropic/exact' if host == 'claude' else 'openai/exact'
+    scope = {'billing_mode': 'wallet', 'allowed_models': [model, 'another-reviewed-model']}
+    rig.state['session_patch'] = scope
+    rig.state['status_patch'] = scope
+    def forbidden():
+        pytest.fail('Explicit use v must not ask again')
+    route_options = {}
+    if host == 'codex':
+        from openvegas.integrations import codex_billing_route
+        @asynccontextmanager
+        async def fixture_route(*args, **kwargs):
+            assert [row['model'] for row in kwargs['allowed_models']] == scope['allowed_models']
+            yield 'unix:///fixture/native-server.sock'
+        monkeypatch.setattr(codex_billing_route, 'route', fixture_route)
+        route_options = {'provider': 'openai', 'resume_provider': 'openai',
+                         'host_args': ['--no-daemon', 'resume', 'fixture-session']}
+    assert rig.run(host, yes=True, wallet_mode=True, compact=True, confirm=forbidden,
+                   local_tools_only=host == 'codex', **route_options) == 7
+    grant = next(row[3] for row in rig.calls if row[1].endswith('/sessions'))
+    assert grant['confirmed'] is True and grant['billing_mode'] == 'wallet'
+    assert not any('ceiling' in message or 'Use your wallet up to' in message for message in rig.messages)
+    assert rig.calls[-1][:2] == ('DELETE', '/integrations/native/session')
+    if host == 'codex':
+        argv = json.loads(rig.capture.read_text())['argv']
+        assert '--remote' in argv and '--no-daemon' not in argv
+
+
+@pytest.mark.parametrize('scope', [{}, {'billing_mode': 'session'},
+    {'billing_mode': 'wallet', 'allowed_models': []},
+    {'billing_mode': 'wallet', 'allowed_models': ['wrong-model']},
+    {'billing_mode': 'wallet', 'allowed_models': ['anthropic/exact', None]}])
+def test_wallet_switch_fails_closed_on_unsupported_or_changed_authorization(rig, scope):
+    rig.state['session_patch'] = scope
+    with pytest.raises(IntegrationError, match='direct wallet billing'):
+        rig.run(yes=True, wallet_mode=True, compact=True)
+    assert not rig.capture.exists()
+    assert rig.calls[-1][:2] == ('DELETE', '/integrations/native/session')
+
+
+def test_wallet_status_cannot_revert_to_legacy_or_broaden_models(rig):
+    rig.state['session_patch'] = {'billing_mode': 'wallet', 'allowed_models': ['anthropic/exact']}
+    rig.state['status_patch'] = {'billing_mode': 'wallet', 'allowed_models': ['anthropic/exact', 'unapproved']}
+    with pytest.raises(IntegrationError, match='authorization changed'):
+        rig.run(yes=True, wallet_mode=True, compact=True)
+    assert not rig.capture.exists()
+
+
+def test_wallet_grant_accepts_fresh_server_balance_without_a_snapshot_ceiling(rig):
+    scope = {'billing_mode': 'wallet', 'allowed_models': ['anthropic/exact']}
+    rig.state['session_patch'] = {**scope, 'budget_v': '1.750000'}
+    rig.state['status_patch'] = scope
+    assert rig.run(yes=True, wallet_mode=True, compact=True) == 7
+    assert rig.capture.exists()
+    assert not any('ceiling' in message for message in rig.messages)
+    assert rig.calls[-1][:2] == ('DELETE', '/integrations/native/session')
 
 
 @pytest.mark.parametrize('host,args', [('claude', ['--continue', '--permission-mode', 'default']),

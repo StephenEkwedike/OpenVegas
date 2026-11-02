@@ -19,8 +19,6 @@ from uuid import UUID
 
 import click
 
-from openvegas.integrations.game_result import amount as format_v
-
 from . import native
 from .billing_choices import model_choices, wallet_ceiling
 from .broker import Broker
@@ -200,8 +198,8 @@ class Supervisor:
             await asyncio.sleep(delay)
             action = await controls(self.mode, game=game, menu=menu, check_v=self.preflight_local_v)
             if action in ('use_v', 'use_host'):
-                # Selection alone never spends: choose_v still quotes and asks
-                # for wallet-spending consent after closing this owned child.
+                # Explicit Use $V authorizes metered wallet usage. Availability
+                # is checked before closing this owned child; no prompt is sent.
                 resume_args(self.host, self.args, self.identifier)
                 self.pending = action[4:]
                 self.changed.set()
@@ -285,12 +283,22 @@ class Supervisor:
                 await asyncio.gather(wallet, return_exceptions=True)
             if attributes is not None:
                 termios.tcsetattr(0, termios.TCSADRAIN, attributes)
+                if self.pending or self.mode == 'v':
+                    # All native/HUD writers are stopped before the relay drains
+                    # their queued output and acknowledges a clean screen.
+                    from .terminal_wallet import handoff_screen
+                    await handoff_screen(env)
 
     async def v_options(self, broker):
+        if self.host == 'codex':
+            native.validate_codex_wallet_handoff(
+                resume_args(self.host, self.args, self.identifier), self.original_provider)
         device = broker.credentials.load()
         if not isinstance(device, str) or not device.startswith('ov_device_'):
             raise IntegrationError('Sign in to OpenVegas first; no provider account is required from you.')
         options = await broker.request('GET', '/native/options?host=' + self.host, token=device)
+        if not isinstance(options, dict) or options.get('wallet_billing') is not True:
+            raise IntegrationError('Direct wallet billing is not available on this backend yet. Billing unchanged.')
         if (not isinstance(options, dict) or options.get('host') != self.host or
                 options.get('provider') != ('anthropic' if self.host == 'claude' else 'openai')):
             raise IntegrationError('The backend returned an invalid native route. Billing unchanged.')
@@ -347,27 +355,21 @@ class Supervisor:
         broker = Broker()
         try:
             options = await self.v_options(broker)
+            if options.get('wallet_billing') is not True:
+                raise IntegrationError('Direct wallet billing is not available on this backend yet. Billing unchanged.')
             models = options['models']
             choices = model_choices(self.host, models, self.original_model)
             balance = native._decimal(options.get('balance_v'), allow_zero=True)
             limit = wallet_ceiling(balance)
             if not limit:
                 raise IntegrationError('Your OpenVegas balance is empty; no spending session opened.')
-            self.emit('OPENVEGAS / USE $V\nBalance: ' + format_v(balance))
             if choices.selected_model:
                 chosen = next(row for row in models if row['model'] == choices.selected_model)
             else:
                 if choices.unavailable_model:
                     self.emit(choices.unavailable_model + ' is not enabled for $V on this backend.')
-                if len(models) == 1:
-                    # The single available alternative is named in the spending
-                    # confirmation, not silently substituted for the host model.
-                    chosen = models[0]
-                else:
-                    for i, item in enumerate(models, 1):
-                        self.emit(f'{i}. {item["model"]}')
-                    index = click.prompt('Model', type=click.IntRange(1, len(models))) - 1
-                    chosen = models[index]
+                chosen = models[0]
+                self.emit('Starting with ' + chosen['model'] + '; change models in the native model menu.')
             self.mode = 'v'
             launched = False
             async def runner(argv, env):
@@ -379,7 +381,8 @@ class Supervisor:
                 provider=options['provider'], broker=broker, emit=self.emit, runner=runner,
                 host_args=resume_args(self.host, self.args, self.identifier),
                 local_tools_only=self.host == 'codex', resume_provider=self.original_provider,
-                compact=True, control_environment={SOCKET: self.env[SOCKET], TOKEN: self.token})
+                compact=True, yes=True, wallet_mode=True,
+                control_environment={SOCKET: self.env[SOCKET], TOKEN: self.token})
             if not launched:
                 self.pending = 'host'  # Cancel before activation restores the original host.
             elif code and not self.v_child_ready:

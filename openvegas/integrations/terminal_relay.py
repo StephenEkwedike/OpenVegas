@@ -20,12 +20,19 @@ import struct
 import sys
 import tempfile
 import termios
-import tty
 import time
+import tty
+from contextlib import suppress
 from pathlib import Path
 
 from .terminal_handoff import SOCKET_ENV, TOKEN_ENV
-from .terminal_wallet import LOCAL_CONTROL_SHORTCUT, MAX_MESSAGE, WalletScreen, wallet_label
+from .terminal_wallet import (
+    LOCAL_CONTROL_SHORTCUT,
+    MAX_MESSAGE,
+    WalletScreen,
+    terminal_reset,
+    wallet_label,
+)
 
 MAX_BACKLOG = 1024 * 1024
 
@@ -35,11 +42,20 @@ class Modes:
     def __init__(self):
         self.values = {7: True, 25: True}
         self.state, self.sequence = "text", bytearray()
+        self.string_bel = False
 
     def feed(self, data):
         for byte in data:
+            if byte in (24, 26):
+                self.state = "text"
+                self.sequence.clear()
+                continue
+            if byte == 27 and self.state in ("escape", "csi"):
+                self.state = "escape"
+                self.sequence.clear()
+                continue
             if self.state == "string":
-                if byte == 7:
+                if byte == 7 and self.string_bel:
                     self.state = "text"
                 elif byte == 27:
                     self.state = "string_escape"
@@ -50,6 +66,7 @@ class Modes:
                     self.state, self.sequence = "csi", bytearray()
                 elif byte in (93, 80, 95, 94, 88):
                     self.state = "string"
+                    self.string_bel = byte == 93
                 else:
                     self.state = "text"
             elif self.state == "csi":
@@ -72,13 +89,62 @@ class Modes:
 
     def restore(self):
         return b"".join(f"\x1b[?{mode}{'h' if self.values.get(mode, False) else 'l'}".encode()
-                        for mode in (7, 25, 1000, 1002, 1003, 1004, 1006, 2004, 2026))
+                        for mode in (1, 7, 25, 1000, 1002, 1003, 1004, 1005,
+                                     1006, 1015, 2004, 2026))
 
 
 def write_all(fd, data):
     while data:
         count = os.write(fd, data)
         data = data[count:]
+
+
+def drain_ready(fd, consume, *, limit=MAX_BACKLOG):
+    """Drain queued PTY bytes, never wait on a descendant holding the slave open."""
+    remaining = limit
+    while remaining > 0 and select.select([fd], [], [], 0)[0]:
+        try:
+            data = os.read(fd, min(65536, remaining))
+        except OSError:
+            return True
+        if not data:
+            return True
+        consume(data)
+        remaining -= len(data)
+    return not select.select([fd], [], [], 0)[0]
+
+
+def stop_child(pid, *, timeout=.25):
+    """Terminate only a PTY child's owned group, including a surviving renderer."""
+    if not pid or pid == os.getpgrp():
+        return
+    def reap():
+        try:
+            return bool(os.waitpid(pid, os.WNOHANG)[0])
+        except ChildProcessError:
+            return True
+
+    reaped = reap()
+    # Darwin may report EPERM when the group's only remaining member is a
+    # zombie. Reap before signalling and tolerate that exit/signalling race.
+    with suppress(ProcessLookupError, PermissionError):
+        os.killpg(pid, signal.SIGTERM)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not reaped:
+            reaped = reap()
+        try:
+            os.killpg(pid, 0)
+        except (ProcessLookupError, PermissionError):
+            break
+        time.sleep(.01)
+    else:
+        with suppress(ProcessLookupError, PermissionError):
+            os.killpg(pid, signal.SIGKILL)
+    if not reaped:
+        deadline = time.monotonic() + timeout
+        while not reap() and time.monotonic() < deadline:
+            time.sleep(.01)
 
 
 def run(shell):
@@ -158,11 +224,15 @@ def run(shell):
 
     def restore_game():
         nonlocal game_pid, game_fd, connection, backlog
+        stop_child(game_pid)
         if game_fd is not None:
             os.close(game_fd)
         # Textual has left its alternate buffer. Restore host modes and flush only
         # output produced while hidden; never replay user keystrokes.
-        write_all(1, b"\x1b[?1049l\x1b[0m" + modes.restore())
+        # Returning to a live host must preserve its saved primary-screen cursor;
+        # unlike a supervisor handoff, do not reset margins/home the cursor here.
+        write_all(1, b'\x18\x1b\\\x1b[?2026l\x1b[?1049l\x1b[?1047l\x1b[?47l\x1b[0m'
+                  + modes.restore())
         write_all(1, wallet.feed(backlog))
         modes.feed(backlog)
         backlog.clear()
@@ -181,22 +251,34 @@ def run(shell):
                 close_wallet()
         update_wallet()
 
+    cleaned = False
     def cleanup():
-        for pid in (game_pid, host_pid):
-            if pid:
-                try:
-                    if os.waitpid(pid, os.WNOHANG)[0] == 0:
-                        os.killpg(pid, signal.SIGTERM)
-                except (OSError, ChildProcessError):
-                    pass
-        if game_fd is not None:
-            write_all(1, b"\x1b[?1049l\x1b[?25h\x1b[0m")
-        if wallet.active:
-            write_all(1, wallet.deactivate())
-        close_wallet()
-        termios.tcsetattr(0, termios.TCSADRAIN, original)
-        listener.close()
-        directory.cleanup()
+        nonlocal cleaned
+        if os.getpid() != owner_pid or cleaned:
+            return
+        cleaned = True
+        try:
+            for pid in (game_pid, host_pid):
+                with suppress(OSError, ChildProcessError):
+                    stop_child(pid)
+            with suppress(OSError):
+                write_all(1, terminal_reset(clear=True,
+                                           alternate=game_fd is not None or modes.alternate))
+                if wallet.active:
+                    write_all(1, wallet.deactivate())
+        finally:
+            # A disconnected display must not strand the user's tty in raw mode.
+            with suppress(OSError, termios.error):
+                termios.tcsetattr(0, termios.TCSANOW, original)
+            close_wallet()
+            if connection is not None:
+                connection.close()
+            for fd in (game_fd, host_fd):
+                if fd is not None:
+                    with suppress(OSError):
+                        os.close(fd)
+            listener.close()
+            directory.cleanup()
 
     atexit.register(cleanup)
     previous_winch = signal.signal(signal.SIGWINCH, resize)
@@ -208,7 +290,11 @@ def run(shell):
         if host_pid == 0:
             listener.close()
             # exec keeps the user's shell HOME, cwd, executable and host billing.
-            os.execvpe(shell[0], shell, shell_env)
+            try:
+                os.execvpe(shell[0], shell, shell_env)
+            except OSError:
+                os.write(2, b'OpenVegas shell startup failed.\r\n')
+                os._exit(1)
         resize()
         tty.setraw(0)
         while True:
@@ -235,11 +321,30 @@ def run(shell):
                                 break
                             data += piece
                         request = json.loads(data)
-                        valid = (type(request) is dict and request.get("kind") in {"game", "status", "wallet"}
+                        valid = (type(request) is dict and request.get("kind") in {"game", "status", "wallet", "handoff"}
                                  and isinstance(request.get("token"), str) and hmac.compare_digest(request["token"], token))
                         if not valid:
                             candidate.close()
                             continue
+                        if request['kind'] == 'handoff':
+                            def flush_host(data, *, modes=modes, wallet=wallet):
+                                modes.feed(data)
+                                write_all(1, wallet.feed(data))
+                            if game_fd is not None or not drain_ready(host_fd, flush_host):
+                                candidate.sendall(b'{"reset":false}\n')
+                            else:
+                                close_wallet()
+                                rows, columns = wallet.rows, wallet.columns
+                                wallet = WalletScreen()
+                                wallet.rows, wallet.columns = rows, columns
+                                modes = Modes()
+                                keys = LocalKeys()
+                                write_all(1, terminal_reset(clear=True))
+                                resize()
+                                candidate.sendall(b'{"reset":true}\n')
+                            candidate.close()
+                            # drain_ready consumed any host_fd readiness snapshot.
+                            break
                         if request['kind'] == 'wallet':
                             if wallet_connection is not None or request.get('billing') not in {'host', 'v'}:
                                 candidate.close()
@@ -265,15 +370,17 @@ def run(shell):
                         # Stop host mouse/paste modes only on the owned outer terminal.
                         write_all(1, b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?2026l")
                         if wallet.active:
-                            write_all(1, b'\x1b[r')
+                            write_all(1, b'\x1b7\x1b[r\x1b8')
                         game_pid, game_fd = pty.fork()
                         if game_pid == 0:
                             listener.close()
                             os.close(host_fd)
+                            if wallet_connection is not None:
+                                wallet_connection.close()
                             try:
                                 from .terminal_handoff import exec_renderer
                                 exec_renderer(connection)
-                            except Exception as exc:
+                            except Exception as exc:  # noqa: BLE001
                                 # Never hide startup failures behind a successful
                                 # exit or print exception payloads/credentials.
                                 os.write(2, ('\r\nOpenVegas renderer startup failed (' +
@@ -345,17 +452,12 @@ def run(shell):
                     if data:
                         write_all(1, data)
                     else:
-                        os.waitpid(game_pid, 0)
                         restore_game()
             if game_pid is not None:
                 exited, _ = os.waitpid(game_pid, os.WNOHANG)
                 if exited:
                     # Drain final screen-restoration bytes before reporting done.
-                    try:
-                        while data := os.read(game_fd, 65536):
-                            write_all(1, data)
-                    except OSError:
-                        pass
+                    drain_ready(game_fd, lambda data: write_all(1, data))
                     restore_game()
     finally:
         signal.signal(signal.SIGWINCH, previous_winch)

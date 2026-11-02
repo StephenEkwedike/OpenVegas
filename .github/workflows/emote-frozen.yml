@@ -66,6 +66,11 @@ jobs:
           tests/test_integrations/test_terminal_wallet.py
           tests/test_integrations/test_use_v.py
           tests/test_integrations/test_fast_billing_hook.py
+          tests/test_integrations/test_native_launcher.py
+          tests/test_integrations/test_billing_preflight.py
+          tests/test_integrations/test_resume_transport_flags.py
+          tests/test_integrations/test_handoff_screen.py
+          tests/test_packaging/test_npm_launcher_loading.py
       - name: Record exact source inputs for cross-platform diagnosis
         working-directory: dist/public-source
         run: >-

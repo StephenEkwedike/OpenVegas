@@ -17,4 +17,7 @@ def test_installed_codex_same_provider_context_and_original_auth_return():
         cwd=root, env={**os.environ, 'PYTHONPATH': str(root)}, capture_output=True, text=True, timeout=100, check=False)
     assert result.returncode == 0, result.stdout + result.stderr
     assert 'host return with original auth' in result.stdout
+    assert 'resume_no_daemon_sanitized True restore_args_preserved True' in result.stdout
+    assert 'native_model_menu_reviewed_only True' in result.stdout
+    assert 'native_effort_menu_verified True menu_provider_calls 0' in result.stdout
     print(result.stdout)

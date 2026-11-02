@@ -12,6 +12,7 @@ import os
 import signal
 import tempfile
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from pathlib import Path
 
 from websockets.asyncio.client import unix_connect
@@ -89,12 +90,114 @@ async def stop(process, *, process_group=None):
         raise asyncio.CancelledError
 
 
+def _reviewed_ids(models, selected):
+    """Accept backend selection descriptors, not inferred provider aliases."""
+    if not isinstance(models, (list, tuple)) or not 1 <= len(models) <= 128:
+        raise IntegrationError('Codex requires a nonempty reviewed model catalog.')
+    identifiers = []
+    for row in models:
+        if isinstance(row, str):
+            row = {'provider': 'openai', 'model': row}
+        if not isinstance(row, dict):
+            raise IntegrationError('Invalid reviewed Codex model descriptor.')
+        identifier = row.get('model', row.get('model_id'))
+        if (row.get('provider') != 'openai' or row.get('host', 'codex') != 'codex'
+                or not isinstance(identifier, str) or not identifier
+                or len(identifier) > 200 or '\x00' in identifier
+                or row.get('model_id', identifier) != identifier or identifier in identifiers):
+            raise IntegrationError('Invalid reviewed Codex model descriptor.')
+        identifiers.append(identifier)
+    if selected not in identifiers:
+        raise IntegrationError('Selected Codex model is not in the reviewed catalog.')
+    return identifiers
+
+
+def _filter_catalog(bundled, identifiers):
+    """Keep the installed CLI's exact capabilities and effort metadata."""
+    rows = bundled.get('models') if isinstance(bundled, dict) else None
+    if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+        raise IntegrationError('Codex bundled model metadata is unavailable.')
+    selected = []
+    for identifier in identifiers:
+        matches = [row for row in rows if row.get('slug') == identifier]
+        if len(matches) != 1:
+            raise IntegrationError('A reviewed model has no exact installed Codex metadata.')
+        row = deepcopy(matches[0])
+        efforts = row.get('supported_reasoning_levels')
+        if (row.get('supported_in_api') is not True or row.get('visibility') != 'list'
+                or not isinstance(efforts, list) or not efforts
+                or any(not isinstance(level, dict) or not isinstance(level.get('effort'), str)
+                       or not isinstance(level.get('description'), str) for level in efforts)
+                or row.get('default_reasoning_level') not in [level['effort'] for level in efforts]
+                or not isinstance(row.get('input_modalities'), list)):
+            raise IntegrationError('Reviewed model lacks usable native picker metadata.')
+        # A native upgrade prompt must not escape the backend's allowlist.
+        upgrade = row.get('upgrade')
+        if upgrade is not None and (not isinstance(upgrade, dict)
+                                    or upgrade.get('model') not in identifiers):
+            row['upgrade'] = None
+        selected.append(row)
+    return {'models': selected}
+
+
+async def _bundled_catalog(executable, directory, env):
+    home = Path(directory) / 'catalog-home'
+    home.mkdir(mode=0o700)
+    # The supported --bundled path never refreshes. It also gets no host auth,
+    # grant, config, daemon address or provider environment from this process.
+    isolated = {key: env[key] for key in ('PATH', 'LANG', 'LC_ALL') if key in env}
+    isolated.update(HOME=str(home), CODEX_HOME=str(home), TMPDIR=str(home))
+    process = None
+    process_group = None
+    try:
+        process, cancelled = await _settle(asyncio.create_task(asyncio.create_subprocess_exec(
+            executable, 'debug', 'models', '--bundled', env=isolated, cwd=home,
+            stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL, start_new_session=True)))
+        process_group = getattr(process, 'pid', None)
+        if cancelled:
+            raise asyncio.CancelledError
+        stdout, _ = await asyncio.wait_for(process.communicate(), 10)
+        if process.returncode != 0 or len(stdout) > 8 * 1024 * 1024:
+            raise IntegrationError('Codex bundled model metadata is unavailable.')
+        return json.loads(stdout)
+    finally:
+        if process is not None:
+            await stop(process, process_group=process_group)
+
+
+def _verify_catalog(result, catalog):
+    rows = result.get('data') if isinstance(result, dict) else None
+    expected = {row['slug']: row for row in catalog['models']}
+    if (not isinstance(rows, list) or len(rows) != len(expected) or result.get('nextCursor')
+            or any(not isinstance(row, dict) or not isinstance(row.get('model'), str)
+                   for row in rows)
+            or {row['model'] for row in rows} != set(expected)):
+        raise IntegrationError('Codex did not isolate the reviewed native model catalog.')
+    for row in rows:
+        metadata = expected[row['model']]
+        efforts = [{'reasoningEffort': level['effort'], 'description': level['description']}
+                   for level in metadata['supported_reasoning_levels']]
+        if (row.get('hidden') is not False or row.get('id') != row['model']
+                or row.get('defaultReasoningEffort') != metadata['default_reasoning_level']
+                or row.get('supportedReasoningEfforts') != efforts
+                or row.get('inputModalities') != metadata['input_modalities']
+                or row.get('upgrade') not in (None, *expected)):
+            raise IntegrationError('Codex native model capabilities differ from installed metadata.')
+
+
 @asynccontextmanager
-async def route(executable, backend, model, env, *, local_tools_only=True):
-    """Yield a private endpoint; never log in to or change the host's account."""
+async def route(executable, backend, model, env, *, local_tools_only=True, allowed_models=None):
+    """Yield a private endpoint with optional backend-reviewed native model choices.
+
+    allowed_models contains direct OpenAI IDs or selection descriptors (provider
+    and model/model_id), not fabricated Codex capability metadata. Missing exact
+    installed descriptors fail closed; the backend still owns spending policy.
+    """
     token = env.get('OPENVEGAS_NATIVE_TOKEN', '')
     if not token.startswith('ov_native_'):
         raise IntegrationError('Missing OpenVegas spending authorization; no Codex route opened.')
+    identifiers = _reviewed_ids(allowed_models, model) if allowed_models is not None else None
     with tempfile.TemporaryDirectory(prefix='ov-codex-', dir='/tmp') as directory:
         os.chmod(directory, 0o700)
         socket = str(Path(directory) / 'native.sock')
@@ -110,8 +213,17 @@ async def route(executable, backend, model, env, *, local_tools_only=True):
         process = None
         process_group = None
         try:
+            catalog = None
+            catalog_path = None
+            if identifiers is not None:
+                catalog = _filter_catalog(await _bundled_catalog(executable, directory, env), identifiers)
+                catalog_path = Path(directory) / 'models.json'
+                with catalog_path.open('x', encoding='utf-8') as output:
+                    os.chmod(catalog_path, 0o600)
+                    json.dump(catalog, output)
+                controls += ['-c', 'model_catalog_json=' + json.dumps(str(catalog_path))]
             process, cancelled = await _settle(asyncio.create_task(asyncio.create_subprocess_exec(
-                executable, *controls, 'app-server', '--listen', 'unix://' + socket,
+                executable, '--no-daemon', *controls, 'app-server', '--listen', 'unix://' + socket,
                 env=env, stdin=asyncio.subprocess.DEVNULL, start_new_session=True,
                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)))
             process_group = getattr(process, 'pid', None)
@@ -134,6 +246,14 @@ async def route(executable, backend, model, env, *, local_tools_only=True):
                             or effective.get('openai_base_url') != backend + '/integrations/native/v1'):
                         raise IntegrationError('Codex configuration cannot isolate OpenVegas billing. '
                                                'Saved login unchanged; no prompt submitted.')
+                    if catalog is not None:
+                        configured = effective.get('model_catalog_json')
+                        if (not isinstance(configured, str)
+                                or Path(configured).resolve() != catalog_path.resolve()):
+                            raise IntegrationError('Codex configuration cannot isolate the model catalog.')
+                        listed = await rpc(connection, 5, 'model/list', {
+                            'includeHidden': True, 'limit': len(identifiers) + 1})
+                        _verify_catalog(listed, catalog)
                     await rpc(connection, 2, 'account/login/start', {'type': 'apiKey', 'apiKey': token})
                     account = await rpc(connection, 3, 'account/read', {'refreshToken': False})
                     if account.get('account', {}).get('type') != 'apiKey':
