@@ -67,9 +67,10 @@ async def hook(host, data):
                                 game=play[1].lower() if play and play[1] else None,
                                 transcript_path=data.get('transcript_path'))
     except IntegrationError as exc:
-        message = str(exc)
-    # Never let the model reinterpret a billing command or charge for handling it.
-    return {'decision': 'block', 'reason': message} if match or play else {}
+        return {'decision': 'block', 'reason': str(exc)} if match or play else {}
+    # A successful command was handled, not rejected by policy. Stop before the
+    # model without manufacturing a blocking error; real failures stay visible.
+    return {'continue': False, 'stopReason': message, 'suppressOutput': True} if match or play else {}
 
 
 def hook_main(host):

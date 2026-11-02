@@ -26,7 +26,9 @@ const deadline = setTimeout(() => finish({}), 4000);
   const explicit = Boolean(billing || play);
   if (explicit) failure = {decision: 'block', reason: missing};
   if (!explicit && data.hook_event_name !== 'SessionStart') return finish({});
-  const reply = message => finish(explicit ? {decision: 'block', reason: message} : {});
+  const reply = (message, handled = false) => finish(!explicit ? {} : handled
+    ? {continue: false, stopReason: message, suppressOutput: true}
+    : {decision: 'block', reason: message});
   clearTimeout(deadline);
   setTimeout(() => reply(missing), 3000);
   const socketPath = process.env.OPENVEGAS_SWITCH_SOCKET;
@@ -52,7 +54,8 @@ const deadline = setTimeout(() => finish({}), 4000);
     if (!response.includes('\n')) return;
     try {
       const result = JSON.parse(response.split('\n')[0]);
-      reply(result && typeof result.message === 'string' ? result.message : missing);
+      const valid = result && typeof result.message === 'string';
+      reply(valid ? result.message : missing, valid && result.ok === true);
     } catch { reply(missing); }
   });
 })().catch(() => finish(failure));

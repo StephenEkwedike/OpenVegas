@@ -6,6 +6,7 @@ import json
 from openvegas.keychain_access import keychain_call
 import logging
 import os
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -226,17 +227,20 @@ def save_refresh_to_platform_store(refresh_token: str) -> None:
         raise RuntimeError("keyring_unavailable")
     token = str(refresh_token or "")
     try:
-        keychain_call(keyring.set_password, _PLATFORM_STORE_SERVICE, _PLATFORM_STORE_ACCOUNT, token)
+        keychain_call(keyring.set_password, _PLATFORM_STORE_SERVICE, _PLATFORM_STORE_ACCOUNT, token,
+                      interactive=False)
         return
     except Exception as e:
         if not _is_keychain_owner_mismatch_error(e):
             raise
     # Self-heal migrated/stale keychain entries that reject updates (OSStatus -25244).
     try:
-        keychain_call(keyring.delete_password, _PLATFORM_STORE_SERVICE, _PLATFORM_STORE_ACCOUNT)
+        keychain_call(keyring.delete_password, _PLATFORM_STORE_SERVICE, _PLATFORM_STORE_ACCOUNT,
+                      interactive=False)
     except Exception:
         pass
-    keychain_call(keyring.set_password, _PLATFORM_STORE_SERVICE, _PLATFORM_STORE_ACCOUNT, token)
+    keychain_call(keyring.set_password, _PLATFORM_STORE_SERVICE, _PLATFORM_STORE_ACCOUNT, token,
+                  interactive=False)
 
 
 def load_refresh_from_platform_store() -> str:
@@ -244,7 +248,8 @@ def load_refresh_from_platform_store() -> str:
     if keyring is None:
         return ""
     try:
-        token = keychain_call(keyring.get_password, _PLATFORM_STORE_SERVICE, _PLATFORM_STORE_ACCOUNT)
+        token = keychain_call(keyring.get_password, _PLATFORM_STORE_SERVICE, _PLATFORM_STORE_ACCOUNT,
+                             interactive=False)
     except Exception:
         return ""
     return str(token or "").strip()
@@ -255,7 +260,8 @@ def _clear_platform_refresh_token_only() -> None:
     if keyring is None:
         return
     try:
-        keychain_call(keyring.delete_password, _PLATFORM_STORE_SERVICE, _PLATFORM_STORE_ACCOUNT)
+        keychain_call(keyring.delete_password, _PLATFORM_STORE_SERVICE, _PLATFORM_STORE_ACCOUNT,
+                      interactive=False)
     except Exception:
         # Key may not exist; treat as already cleared.
         pass
@@ -342,20 +348,22 @@ def save_session(access_token: str, refresh_token: str, access_expires_at: int |
                 save_refresh_to_platform_store(refresh_token)
                 platform_saved = True
                 session_payload["refresh_storage"] = "platform_credential_store"
-            except Exception as keychain_err:
-                # Never hard-fail login/session persistence on keychain write issues.
-                session_payload["refresh_storage"] = "config"
-                session_payload["refresh_token"] = str(refresh_token or "")
+            except Exception:
+                # A denied macOS ACL must not silently move a protected refresh
+                # credential to disk. Keep the access session; reconnect on expiry.
+                denied_mac_store = sys.platform == "darwin"
+                session_payload["refresh_storage"] = "unavailable" if denied_mac_store else "config"
+                session_payload["refresh_token"] = "" if denied_mac_store else str(refresh_token or "")
                 emit_metric(
                     "auth_session_save_degraded_total",
                     {
-                        "reason": "keychain_store_failed_fallback_config",
+                        "reason": "keychain_store_unavailable" if denied_mac_store else "keychain_store_failed_fallback_config",
                         "platform_saved": "false",
                     },
                 )
                 logger.warning(
-                    "session_save_degraded keychain_store_failed_fallback_config err=%s",
-                    str(keychain_err),
+                    "session_save_degraded refresh_storage=%s",
+                    session_payload["refresh_storage"],
                 )
         else:
             session_payload["refresh_storage"] = "config"

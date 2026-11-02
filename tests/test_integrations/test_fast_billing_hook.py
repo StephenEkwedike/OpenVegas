@@ -37,11 +37,12 @@ async def test_non_control_hook_is_fast_and_ordinary_prompts_untouched(host):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('ok', [True, False, None, 'true'])
 @pytest.mark.parametrize('host,prompt,action,game', [
     ('codex', '$openvegas:openvegas play roulette', 'play', 'roulette'),
     ('claude', '/openvegas use host', 'host', None),
 ])
-async def test_same_local_supervisor_protocol(host, prompt, action, game, tmp_path):
+async def test_same_local_supervisor_protocol(host, prompt, action, game, tmp_path, ok):
     if not hasattr(os, 'getuid'):
         pytest.skip('POSIX owned terminal socket')
     # Keep the Unix socket path below the macOS sockaddr limit.
@@ -51,7 +52,7 @@ async def test_same_local_supervisor_protocol(host, prompt, action, game, tmp_pa
         seen = []
         async def serve(reader, writer):
             seen.append(json.loads(await reader.readline()))
-            writer.write(b'{"ok":true,"message":"Game menu opened."}\n')
+            writer.write(json.dumps({'ok': ok, 'message': 'Control response.'}).encode() + b'\n')
             await writer.drain()
             writer.close()
             await writer.wait_closed()
@@ -60,7 +61,9 @@ async def test_same_local_supervisor_protocol(host, prompt, action, game, tmp_pa
             result = await invoke(command(host), {'hook_event_name': 'UserPromptSubmit',
                 'prompt': prompt, 'session_id': 'synthetic-session'},
                 {'OPENVEGAS_SWITCH_SOCKET': socket, 'OPENVEGAS_SWITCH_TOKEN': 'synthetic-token'})
-            assert result == {'decision': 'block', 'reason': 'Game menu opened.'}
+            expected = ({'continue': False, 'stopReason': 'Control response.', 'suppressOutput': True}
+                        if ok is True else {'decision': 'block', 'reason': 'Control response.'})
+            assert result == expected
             assert seen == [{'host': host, 'token': 'synthetic-token', 'action': action,
                 'session_id': 'synthetic-session', 'model': None, 'game': game,
                 'transcript_path': None, 'rate_limits': None}]

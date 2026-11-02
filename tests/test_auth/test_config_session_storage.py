@@ -206,6 +206,7 @@ def test_save_session_keychain_store_failure_falls_back_to_config(
     tmp_path,
 ):
     _bind_temp_config(monkeypatch, tmp_path)
+    monkeypatch.setattr(cfg.sys, "platform", "linux")
     monkeypatch.delenv("OPENVEGAS_FORCE_CONFIG_REFRESH_STORAGE", raising=False)
 
     monkeypatch.setattr(cfg, "platform_keychain_available", lambda: True)
@@ -220,3 +221,18 @@ def test_save_session_keychain_store_failure_falls_back_to_config(
     assert sess["refresh_storage"] == "config"
     assert sess["refresh_token"] == "refresh-2"
     assert sess["access_token"] == "access-2"
+
+
+def test_mac_denied_store_keeps_access_without_plaintext_refresh(monkeypatch, tmp_path):
+    _bind_temp_config(monkeypatch, tmp_path)
+    monkeypatch.delenv("OPENVEGAS_FORCE_CONFIG_REFRESH_STORAGE", raising=False)
+    monkeypatch.setattr(cfg.sys, "platform", "darwin")
+    monkeypatch.setattr(cfg, "platform_keychain_available", lambda: True)
+    def denied(_token):
+        raise RuntimeError("Keychain denied")
+    monkeypatch.setattr(cfg, "save_refresh_to_platform_store", denied)
+    cfg.save_session("access-fixture", "protected-refresh-fixture")
+    assert cfg.get_session_metadata() == {
+        "access_token": "access-fixture", "refresh_token": "", "refresh_storage": "unavailable"
+    }
+    assert "protected-refresh-fixture" not in cfg.CONFIG_FILE.read_text()

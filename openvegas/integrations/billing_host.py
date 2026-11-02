@@ -132,7 +132,7 @@ class Supervisor:
                     if data.get('game') is not None and data['game'] not in GAMES:
                         raise ValueError
                     self.open_controls(game=data.get('game'), delay=.75)
-                    response = {'ok': True, 'message': 'Opening OpenVegas locally in this terminal. No model request sent.'}
+                    response = {'ok': True, 'message': 'Opening OpenVegas. No AI credits used.'}
                 elif data.get('action') in ('v', 'host'):
                     # Codex may trust plugin hooks after SessionStart. The first
                     # exact prompt supplies the same host-owned identity fields.

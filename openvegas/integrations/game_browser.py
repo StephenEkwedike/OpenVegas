@@ -92,7 +92,8 @@ async def browser_action(action, ask, client, broker):
         broker.credentials.save(result["token"])
     except IntegrationError:
         reply = await ask(
-            "Your OS keychain is unavailable. Save this login in a private file readable only by your user?",
+            "Save this login on this Mac? Keychain access was declined. A private file avoids password pop-ups; "
+            "it is not encrypted and is readable by programs running as your user.",
             choice_model("BrowserStorage", ["save_private_file", "quit"]),
         )
         if reply is None or reply.choice != "save_private_file":
