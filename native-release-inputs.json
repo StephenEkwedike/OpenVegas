@@ -635,7 +635,7 @@
     "scripts/build_cli_candidate.py": "99ef3030ef4bc6546422280bd731683015c2e3d9579017330ac0f20be2704b43",
     "scripts/frozen_entry.py": "d167597c40b0f988bf3b0eb0e181c0bb13862c4e867030e7bbb1fcaece54ac9e",
     "scripts/prepare_public_release.py": "787dde403da1ee94c337e89dc39eb6467761b70032adc96fcb2b6ec95a094099",
-    "scripts/verify_native_release_source.py": "73b405d35d6cb934d4b33f646fcc520d34de184c65258de2d1fa913fa70a9f68"
+    "scripts/verify_native_release_source.py": "6a1fb8612afe6df8803237e4b53fd06b9cbafb3a14b90dd49d35933473c1f876"
   },
   "repository_scope": "Pinned overlay; preserve baseline files, stage only the client allowlist",
   "source_sha256": "f63750695da7af2c2d14042cda9056ca026fa30d9883ad6ad004cdf723dc206e",
