@@ -359,8 +359,11 @@ async def launch(host, model, limit_v, max_output_tokens=2048, *, yes=False, dry
         elif resume_provider == 'openai':
             validate_codex_remote_args(host_args)
     control_environment = control_environment or {}
-    from .staged_generation import validate_control_environment
-    validate_control_environment(control_environment)
+    if control_environment or codex_handoff_source is not None:
+        if os.name != 'posix':
+            raise IntegrationError('Managed native billing controls require POSIX; no host was launched.')
+        from .staged_generation import validate_control_environment
+        validate_control_environment(control_environment)
     if live_codex_executable is not None and (codex_handoff_source is None or not control_environment):
         raise IntegrationError('Live executable binding requires a verified managed Codex handoff.')
     if codex_handoff_source is not None or (host == 'codex' and wallet_mode and control_environment):
@@ -546,8 +549,7 @@ async def launch(host, model, limit_v, max_output_tokens=2048, *, yes=False, dry
     finally:
         stop_restore = False
         if session_token:
-            from .session_ownership import GENERATION_ENV
-            strict_close = wallet_mode and GENERATION_ENV in control_environment
+            strict_close = wallet_mode and 'OPENVEGAS_TERMINAL_GENERATION' in control_environment
             try:
                 async with asyncio.timeout(5):
                     closed = await broker.request('DELETE', '/native/session', token=session_token)

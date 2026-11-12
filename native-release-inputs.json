@@ -234,7 +234,7 @@
     "openvegas/integrations/local_controls.py": "2df9449f5d7557dc5a10e1079018c5675ac5812c468c98cbc9c9f4d7ffc5e335",
     "openvegas/integrations/local_review.py": "ccf60edad75832fbb4f15a62984a58ec77d5f8b5fd39ebd6d1afcdc8412a615b",
     "openvegas/integrations/mcp_server.py": "6a78989ecbb3fcf42b12165d69beb429fa5738bcab7a4b4c3793adf0e8bf2d15",
-    "openvegas/integrations/native.py": "f02cdc068429a8a4304d845d29bbe7af82e536c0bbfc213a10e5c88e9b3722f5",
+    "openvegas/integrations/native.py": "f11048783efebc0cbc87049444403ed7b70db2afbee9dff14d0a6b18b32d4c92",
     "openvegas/integrations/native_owned_process.py": "e11a681e44270ca520c820234600a0a35c1950471f0611ec6ff445ce01bccdb1",
     "openvegas/integrations/native_play.py": "2c814e8637def801aafaeefc682140d70ee677a2f0f754d3ec362ec5e6b2455a",
     "openvegas/integrations/native_process.py": "8a2dac3e2bb34600cad2763b4d4de00636b3421e185911690920d4af1e4afc61",
@@ -546,7 +546,7 @@
     "openvegas/integrations/local_controls.py": "2df9449f5d7557dc5a10e1079018c5675ac5812c468c98cbc9c9f4d7ffc5e335",
     "openvegas/integrations/local_review.py": "ccf60edad75832fbb4f15a62984a58ec77d5f8b5fd39ebd6d1afcdc8412a615b",
     "openvegas/integrations/mcp_server.py": "6a78989ecbb3fcf42b12165d69beb429fa5738bcab7a4b4c3793adf0e8bf2d15",
-    "openvegas/integrations/native.py": "f02cdc068429a8a4304d845d29bbe7af82e536c0bbfc213a10e5c88e9b3722f5",
+    "openvegas/integrations/native.py": "f11048783efebc0cbc87049444403ed7b70db2afbee9dff14d0a6b18b32d4c92",
     "openvegas/integrations/native_owned_process.py": "e11a681e44270ca520c820234600a0a35c1950471f0611ec6ff445ce01bccdb1",
     "openvegas/integrations/native_play.py": "2c814e8637def801aafaeefc682140d70ee677a2f0f754d3ec362ec5e6b2455a",
     "openvegas/integrations/native_process.py": "8a2dac3e2bb34600cad2763b4d4de00636b3421e185911690920d4af1e4afc61",
@@ -638,7 +638,7 @@
     "scripts/verify_native_release_source.py": "6a1fb8612afe6df8803237e4b53fd06b9cbafb3a14b90dd49d35933473c1f876"
   },
   "repository_scope": "Pinned overlay; preserve baseline files, stage only the client allowlist",
-  "source_sha256": "f63750695da7af2c2d14042cda9056ca026fa30d9883ad6ad004cdf723dc206e",
+  "source_sha256": "885613c262749740346f89b66dea32c684687d316fca1c9eb378a5620b7b7d6f",
   "version": "0.3.18",
   "version_changes": {
     "openvegas/__init__.py": {
