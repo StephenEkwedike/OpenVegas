@@ -21,6 +21,9 @@ PREFIX = r'(?:/|\$)?openvegas(?::openvegas)?'
 COMMAND = re.compile(PREFIX + r'[ \t]+use[ \t]+(v|host)\Z', re.IGNORECASE | re.ASCII)
 PLAY_COMMAND = re.compile(PREFIX + r'[ \t]+play(?:[ \t]+(blackjack|roulette|poker|baccarat|slots|horse))?\Z', re.IGNORECASE | re.ASCII)
 LOBBY_COMMAND = re.compile(PREFIX + r'\Z', re.IGNORECASE | re.ASCII)
+QUOTA_COMMAND = re.compile(PREFIX + r'[ \t]+quota\Z', re.IGNORECASE | re.ASCII)
+QUOTA_INFO = ('Host quota is not available from this command. Check the host usage display; '
+              'the OpenVegas HUD can show a low-quota warning when the host supplies usage data.')
 MAX_INPUT = 131072
 MAX_FRAME = 8192
 MISSING = ('Local OpenVegas controls are not connected to this session. Restart the native host '
@@ -38,6 +41,8 @@ def parse_command(prompt):
     play = PLAY_COMMAND.fullmatch(prompt)
     if play or LOBBY_COMMAND.fullmatch(prompt):
         return 'play', play[1].lower() if play and play[1] else None
+    if QUOTA_COMMAND.fullmatch(prompt):
+        return 'quota-info', None
     return None
 
 
@@ -96,6 +101,9 @@ async def hook(host, data, *, input_failed=False):
         return {}
     if input_failed:
         return {'decision': 'block', 'reason': MISSING} if command else {}
+    if command and command[0] == 'quota-info':
+        # Supervisor "quota" is a status-line write, not a query.
+        return {'continue': False, 'stopReason': QUOTA_INFO}
     try:
         message = await request(host, command[0] if command else 'register',
                                 session_id=data.get('session_id'), model=data.get('model'),

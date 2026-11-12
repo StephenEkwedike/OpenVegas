@@ -12,6 +12,7 @@ from contextlib import suppress
 from pathlib import Path
 
 from .credentials import IntegrationError
+from .session_ownership import GENERATION_ENV, OWNER_ENV, fence_fields
 
 SOCKET_ENV = "OPENVEGAS_TERMINAL_SOCKET"
 TOKEN_ENV = "OPENVEGAS_TERMINAL_TOKEN"
@@ -70,7 +71,8 @@ async def connect(*, kind='game'):
     path = os.environ[SOCKET_ENV]
     validate_socket(path)
     reader, writer = await asyncio.wait_for(asyncio.open_unix_connection(path, limit=MAX_PACKET), 3)
-    writer.write(json.dumps({"token": os.environ[TOKEN_ENV], "kind": kind}).encode() + b"\n")
+    writer.write(json.dumps({"token": os.environ[TOKEN_ENV], "kind": kind,
+                             **fence_fields(os.environ)}).encode() + b"\n")
     await writer.drain()
     try:
         reply = json.loads(await asyncio.wait_for(reader.readline(), 5))
@@ -330,7 +332,8 @@ def exec_renderer(connection):
     os.set_inheritable(fd, True)
     # The already-authenticated socket is sufficient to render public state.
     # Do not let the renderer open another privileged relay connection.
-    env = {key: value for key, value in os.environ.items() if key not in {SOCKET_ENV, TOKEN_ENV}}
+    env = {key: value for key, value in os.environ.items()
+           if key not in {SOCKET_ENV, TOKEN_ENV, OWNER_ENV, GENERATION_ENV}}
     os.execve(sys.executable, renderer_command(fd), env)
 
 

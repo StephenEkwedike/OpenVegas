@@ -51,7 +51,7 @@ def help_text():
         f"{name}: {description}" for name, description, _ in READ_ACTIONS
     ) + (
         "\nplay: Choose a game; submitting your amount places one wager."
-        "\nuse v: Review direct API pricing and approve a session ceiling in this terminal."
+        "\nuse v: Switch eligible requests to your OpenVegas wallet. Pay for usage; no automatic top-ups."
         "\nuse host: Return to your original host billing. No automatic prompt or fallback."
         "\nAnimations: /pets opens the controls; /pets off hides them in either host."
         "\nEquipment: ask 'OpenVegas equip companion <item_id>' or "

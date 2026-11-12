@@ -32,6 +32,7 @@ def host_environment(env=None):
         "WEZTERM_EXECUTABLE", "WEZTERM_VERSION", "GHOSTTY_RESOURCES_DIR",
         "LANG", "LC_ALL", "TMPDIR", "SYSTEMROOT", "WINDIR",
         "OPENVEGAS_TERMINAL_SOCKET", "OPENVEGAS_TERMINAL_TOKEN",
+        "OPENVEGAS_TERMINAL_OWNER", "OPENVEGAS_TERMINAL_GENERATION",
     ) if key in os.environ}
     result["HOME"] = result["USERPROFILE"] = os.environ["OPENVEGAS_HOST_HOME"]
     for name in ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "XDG_CONFIG_HOME"):
@@ -252,6 +253,7 @@ def bundle_files(info, marketplace):
         codex_mcp = {"mcpServers": {"openvegas": {"command": cmd[0], "args": cmd[1:],
                                                   "tool_timeout_sec": 900,
                                                   "env_vars": ["OPENVEGAS_TERMINAL_SOCKET", "OPENVEGAS_TERMINAL_TOKEN",
+                                                               "OPENVEGAS_TERMINAL_OWNER", "OPENVEGAS_TERMINAL_GENERATION",
                                                                "OPENVEGAS_NATIVE_TOKEN"]}}}
         if codex_game_entry_opt_in(marketplace):
             # Codex intersects the user setting with the plugin declaration.

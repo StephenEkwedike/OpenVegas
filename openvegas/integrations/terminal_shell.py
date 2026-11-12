@@ -12,8 +12,16 @@ if (( ! $+aliases[codex] && ! $+functions[codex] )); then
   function codex {
     local ov_help ov_arg
     local -a ov_flags
+    # Native management and batch commands do not need a TUI, a help probe
+    # or a managed server. In particular don't add TUI flags to their argv.
+    case "${1-}" in
+      -h|--help|-V|--version|help|exec|e|review|login|logout|mcp|plugin|app-server|completion|doctor|update)
+        command codex "$@"
+        return $? ;;
+    esac
     # Explicit host transport choices take precedence over terminal defaults.
     for ov_arg in "$@"; do
+      [[ $ov_arg == -- ]] && break
       if [[ $ov_arg == --remote || $ov_arg == --remote=* ]]; then
         command codex "$@"
         return $?

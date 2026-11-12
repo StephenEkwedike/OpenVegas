@@ -25,6 +25,7 @@ import tty
 from contextlib import suppress
 from pathlib import Path
 
+from .session_ownership import RelayFence
 from .terminal_handoff import SOCKET_ENV, TOKEN_ENV
 from .terminal_wallet import (
     LOCAL_CONTROL_SHORTCUT,
@@ -35,6 +36,10 @@ from .terminal_wallet import (
 )
 
 MAX_BACKLOG = 1024 * 1024
+
+
+class InputOwnerLost(RuntimeError):
+    pass
 
 
 class Modes:
@@ -114,6 +119,11 @@ def drain_ready(fd, consume, *, limit=MAX_BACKLOG):
     return not select.select([fd], [], [], 0)[0]
 
 
+def handoff_input_clear(keys, fd=0):
+    """Reject, rather than discard/replay, an incomplete input transaction."""
+    return not (keys.pending or keys.paste or select.select([fd], [], [], 0)[0])
+
+
 def stop_child(pid, *, timeout=.25):
     """Terminate only a PTY child's owned group, including a surviving renderer."""
     if not pid or pid == os.getpgrp():
@@ -162,6 +172,9 @@ def run(shell):
     game_pid = game_fd = connection = None
     host_pid = host_fd = None
     wallet_connection = None
+    owner_connection = None
+    input_nonce = None
+    fence = RelayFence()
     wallet_buffer = bytearray()
     wallet = WalletScreen()
     wallet_resized = False
@@ -246,7 +259,7 @@ def run(shell):
         resize()
         if wallet_connection is not None:
             try:
-                wallet_connection.sendall(b'{"refresh":true}\n')
+                wallet_connection.sendall(json.dumps({'refresh': True, **fence.fields()}).encode() + b'\n')
             except OSError:
                 close_wallet()
         update_wallet()
@@ -271,6 +284,8 @@ def run(shell):
             with suppress(OSError, termios.error):
                 termios.tcsetattr(0, termios.TCSANOW, original)
             close_wallet()
+            if owner_connection is not None:
+                owner_connection.close()
             if connection is not None:
                 connection.close()
             for fd in (game_fd, host_fd):
@@ -296,19 +311,22 @@ def run(shell):
                 os.write(2, b'OpenVegas shell startup failed.\r\n')
                 os._exit(1)
         resize()
-        tty.setraw(0)
+        # setraw defaults to TCSAFLUSH: a command already typed while the
+        # managed shell was starting would disappear before our first read.
+        tty.setraw(0, termios.TCSANOW)
         while True:
-            if keys.pending and time.monotonic() - key_time > keys.wait_seconds:
-                write_all(game_fd if game_fd is not None else host_fd, keys.flush())
+            if input_nonce is None and keys.pending and time.monotonic() - key_time > keys.wait_seconds:
+                write_all(host_fd, keys.flush())
             if wallet_resized:
                 update_wallet()
             # Pets/progress can keep drawing while their host is hidden. Apply
             # PTY backpressure at the buffer limit, never kill a human game or
             # discard part of an escape/image sequence to make room.
             host_ready = game_fd is None or len(backlog) < MAX_BACKLOG
-            readable, _, _ = select.select([0, listener, *([host_fd] if host_ready else []),
+            readable, _, _ = select.select([listener, *([0] if input_nonce is None else []), *([host_fd] if host_ready else []),
                                            *([game_fd] if game_fd is not None else []),
-                                           *([wallet_connection] if wallet_connection is not None else [])], [], [], .1)
+                                           *([wallet_connection] if wallet_connection is not None else []),
+                                           *([owner_connection] if owner_connection is not None else [])], [], [], .1)
             for ready in readable:
                 if ready == listener:
                     candidate, _ = listener.accept()
@@ -321,16 +339,58 @@ def run(shell):
                                 break
                             data += piece
                         request = json.loads(data)
-                        valid = (type(request) is dict and request.get("kind") in {"game", "status", "wallet", "handoff"}
+                        valid = (type(request) is dict and request.get("kind") in {"game", "status", "wallet", "handoff", "owner", "input"}
                                  and isinstance(request.get("token"), str) and hmac.compare_digest(request["token"], token))
                         if not valid:
+                            candidate.close()
+                            continue
+                        if (owner_connection is not None
+                                and select.select([owner_connection], [], [], 0)[0]
+                                and not owner_connection.recv(1, socket.MSG_PEEK)):
+                            owner_connection.close()
+                            owner_connection = None
+                            if input_nonce is not None:
+                                raise InputOwnerLost('Billing owner disconnected while terminal input was held.')
+                            fence.disconnect()
+                            close_wallet()
+                            update_wallet()
+                        if request['kind'] == 'owner':
+                            # Only one live controller. EOF releases the lease without
+                            # consuming input or clearing terminal buffers.
+                            if owner_connection is not None or wallet_connection is not None or game_fd is not None or not fence.claim(request):
+                                candidate.close()
+                                continue
+                            owner_connection = candidate
+                            candidate.settimeout(None)
+                            candidate.sendall(json.dumps({'ready': True, **fence.fields()}).encode() + b'\n')
+                            continue
+                        if not fence.matches(request):
+                            candidate.close()
+                            continue
+                        if request['kind'] == 'input':
+                            nonce = request.get('nonce')
+                            valid = (owner_connection is not None and game_fd is None
+                                     and isinstance(nonce, str) and re.fullmatch(r'[a-f0-9]{32}', nonce)
+                                     and type(request.get('hold')) is bool)
+                            if (valid and request['hold'] and input_nonce is None
+                                    and not keys.paste and not keys.pending):
+                                input_nonce = nonce
+                            elif valid and not request['hold'] and input_nonce == nonce:
+                                input_nonce = None
+                            else:
+                                candidate.close()
+                                continue
+                            candidate.sendall(json.dumps({'ready': True, 'held': input_nonce is not None,
+                                'nonce': nonce, **fence.fields()}).encode() + b'\n')
                             candidate.close()
                             continue
                         if request['kind'] == 'handoff':
                             def flush_host(data, *, modes=modes, wallet=wallet):
                                 modes.feed(data)
                                 write_all(1, wallet.feed(data))
-                            if game_fd is not None or not drain_ready(host_fd, flush_host):
+                            if (input_nonce is not None or game_fd is not None or not handoff_input_clear(keys)
+                                    or not drain_ready(host_fd, flush_host)
+                                    or not handoff_input_clear(keys)):
                                 candidate.sendall(b'{"reset":false}\n')
                             else:
                                 close_wallet()
@@ -342,6 +402,7 @@ def run(shell):
                                 write_all(1, terminal_reset(clear=True))
                                 resize()
                                 candidate.sendall(b'{"reset":true}\n')
+                                fence.consume_handoff()
                             candidate.close()
                             # drain_ready consumed any host_fd readiness snapshot.
                             break
@@ -354,14 +415,22 @@ def run(shell):
                             wallet.payload = {'state': 'loading', 'billing': request['billing']}
                             update_wallet()
                             candidate.sendall(json.dumps({'wallet': 1,
-                                'controls_shortcut': LOCAL_CONTROL_SHORTCUT}).encode() + b'\n')
+                                'controls_shortcut': LOCAL_CONTROL_SHORTCUT, **fence.fields()}).encode() + b'\n')
                             continue
                         if request['kind'] == 'status':
-                            candidate.sendall(b'{"ready":true}\n')
+                            candidate.sendall(b'{"ready":true,"ownership_protocol":1,"input_protocol":1}\n')
+                            candidate.close()
+                            continue
+                        if input_nonce is not None:
+                            candidate.sendall(b'{"ready":false,"message":"Billing handoff is holding terminal input."}\n')
                             candidate.close()
                             continue
                         if game_fd is not None or modes.alternate:
                             candidate.sendall(b'{"ready":false,"message":"Terminal is already in a full-screen view or game. Return to the normal coding prompt first; no wager placed."}\n')
+                            candidate.close()
+                            continue
+                        if not handoff_input_clear(keys):
+                            candidate.sendall(b'{"ready":false,"message":"Finish typing or pasting, then open Play again. No wager placed."}\n')
                             candidate.close()
                             continue
                         candidate.sendall(b'{"ready":true}\n')
@@ -389,6 +458,15 @@ def run(shell):
                         resize()
                     except (OSError, ValueError):
                         candidate.close()
+                elif ready == owner_connection:
+                    # The controller never sends application data on its lease.
+                    if input_nonce is not None:
+                        raise InputOwnerLost('Billing owner disconnected while terminal input was held.')
+                    owner_connection.close()
+                    owner_connection = None
+                    fence.disconnect()
+                    close_wallet()
+                    update_wallet()
                 elif ready == wallet_connection:
                     try:
                         data = wallet_connection.recv(MAX_MESSAGE)
@@ -402,7 +480,7 @@ def run(shell):
                                 if len(line) > MAX_MESSAGE:
                                     raise ValueError
                                 payload = json.loads(line)
-                                if (type(payload) is not dict or payload.get('state') not in
+                                if (type(payload) is not dict or not fence.matches(payload) or payload.get('state') not in
                                         {'ready', 'loading', 'login', 'unavailable'}):
                                     raise ValueError
                                 # Billing comes from the authenticated lease, not wallet JSON.
@@ -417,19 +495,26 @@ def run(shell):
                         close_wallet()
                     update_wallet()
                 elif ready == 0:
+                    if input_nonce is not None:
+                        continue
                     data = os.read(0, 65536)
                     if not data:
                         return
-                    data, menu = keys.feed(data, game_fd is None and not modes.alternate
+                    if game_fd is not None:
+                        # Escape, paste, and mouse packets belong entirely to the
+                        # game; never carry a partial packet back to the host.
+                        write_all(game_fd, data)
+                        continue
+                    data, menu = keys.feed(data, not modes.alternate
                                            and wallet_connection is not None
                                            and wallet.payload.get('controls') is True)
                     key_time = time.monotonic()
                     if menu:
                         try:
-                            wallet_connection.sendall(b'{"control":"menu"}\n')
+                            wallet_connection.sendall(json.dumps({'control': 'menu', **fence.fields()}).encode() + b'\n')
                         except OSError:
                             close_wallet()
-                    write_all(game_fd if game_fd is not None else host_fd, data)
+                    write_all(host_fd, data)
                 elif ready == host_fd:
                     try:
                         limit = min(65536, MAX_BACKLOG - len(backlog)) if game_fd is not None else 65536
@@ -471,7 +556,15 @@ def main(argv=None):
     shell = list(sys.argv[1:] if argv is None else argv)
     if shell and shell[0] == "--":
         shell = shell[1:]
-    run(shell or ["/bin/zsh", "-l"])
+    try:
+        run(shell or ["/bin/zsh", "-l"])
+    except KeyboardInterrupt:
+        # An interrupt sent to the relay process, not a key on the native PTY.
+        raise SystemExit(130) from None
+    except InputOwnerLost:
+        print('OpenVegas stopped the managed terminal because its billing owner disconnected. '
+              'Held input was not sent to a payer or shell.', file=sys.stderr)
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":

@@ -24,7 +24,10 @@ async def controls(mode, *, game=None, menu=False, check_v=None):
             description = (
                 'OPENVEGAS / LOCAL CONTROLS\nNo Claude/Codex model request is needed.\n'
                 'Opening this menu needs no wallet balance or host credits.\n'
-                'Actual game stakes need your OpenVegas wallet; $V billing needs your spending consent.\n'
+                'Opening Play does not place a wager.\n'
+                'Select a billing route to check whether this chat can switch. '
+                'Wait for the status line to confirm the new payer before asking a question. '
+                'Use /exit only if the status line explicitly asks you to.\n'
                 'Esc returns to coding.')
             error = ''
             while True:
@@ -69,8 +72,11 @@ async def controls(mode, *, game=None, menu=False, check_v=None):
 
 
 class LocalKeys:
-    """Recognize Ctrl+] then O, leaving host leader/voice keys untouched."""
+    """Recognize Ctrl+] then lowercase o, leaving host leader/voice keys untouched."""
     MENU = b'\x1do'
+    # Legacy control byte, CSI-u and xterm modifyOtherKeys press encodings.
+    LEADERS = (MENU[:1], b'\x1b[93;5u', b'\x1b[27;5;93~')
+    CHORDS = tuple(prefix + key for prefix in LEADERS for key in (b'o', b'\x1b[111u'))
     START, END = b'\x1b[200~', b'\x1b[201~'
 
     def __init__(self):
@@ -80,6 +86,9 @@ class LocalKeys:
     def feed(self, data, enabled):
         output, opened = bytearray(), False
         for byte in data:
+            if not self.pending and byte not in (0x1b, 0x1d):
+                output.append(byte)
+                continue
             self.pending.append(byte)
             while self.pending:
                 value = bytes(self.pending)
@@ -87,14 +96,11 @@ class LocalKeys:
                     self.paste = value == self.START
                     output.extend(value)
                     self.pending.clear()
-                elif value == self.MENU:
-                    if enabled and not self.paste:
-                        opened = True
-                    else:
-                        output.extend(value)
+                elif enabled and not self.paste and value in self.CHORDS:
+                    opened = True
                     self.pending.clear()
                 elif any(key.startswith(value) for key in (
-                        self.START, self.END, *((self.MENU,) if enabled and not self.paste else ()))):
+                        self.START, self.END, *(self.CHORDS if enabled and not self.paste else ()))):
                     break
                 else:
                     output.append(self.pending.pop(0))
@@ -102,7 +108,7 @@ class LocalKeys:
 
     @property
     def wait_seconds(self):
-        return 1.5 if self.pending == self.MENU[:1] else .15
+        return 1.5 if self.pending in self.LEADERS else .15
 
     def flush(self):
         data = bytes(self.pending)

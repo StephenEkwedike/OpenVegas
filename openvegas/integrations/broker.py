@@ -13,8 +13,9 @@ from urllib.parse import urlencode
 
 import httpx
 
-from .credentials import Credentials, IntegrationError, backend_url
 from openvegas.keychain_access import private_login_files
+
+from .credentials import Credentials, IntegrationError, backend_url
 
 
 class Broker:
@@ -34,14 +35,23 @@ class Broker:
                                                headers={"Authorization": "Bearer " + token} if token else {})
         except httpx.HTTPError:
             raise IntegrationError("Cannot reach the OpenVegas backend; no credentials were changed.") from None
-        if response.status_code in {401, 403}:
-            raise IntegrationError("Authorization expired, declined or not permitted. Run openvegas go.", response.status_code)
-        if response.status_code == 503:
+        if response.status_code in {403, 503}:
             try:
                 detail = response.json().get('detail')
             except (ValueError, AttributeError):
                 detail = None
-            # Only map known server reasons; never echo an arbitrary error body.
+            # Only classify the options lookup, not an in-flight inference or settlement.
+            if method == 'GET' and path.partition('?')[0] == '/native/options':
+                if response.status_code == 503 and detail == '$V inference pilot is unavailable or expired.':
+                    raise IntegrationError('OpenVegas wallet chat is unavailable on this server. '
+                                           'This is not your host quota. Billing unchanged; '
+                                           'openvegas play does not need host credits.', 503)
+                if response.status_code == 403 and detail == '$V inference is not enabled for this account.':
+                    raise IntegrationError('OpenVegas wallet chat is not enabled for this account. '
+                                           'Signing in again will not enable it. Billing unchanged.', 403)
+        if response.status_code in {401, 403}:
+            raise IntegrationError("Authorization expired, declined or not permitted. Run openvegas go.", response.status_code)
+        if response.status_code == 503:
             if detail == 'Native integration setup is not enabled on this backend.':
                 message = 'OpenVegas account integration is disabled on this server.'
             elif path.startswith('/native/'):

@@ -18,6 +18,7 @@ from contextlib import suppress
 from .broker import Broker
 from .credentials import IntegrationError
 from .game_result import amount
+from .session_ownership import fence_fields
 from .terminal_handoff import SOCKET_ENV, TOKEN_ENV, validate_socket
 
 REFRESH_SECONDS = 5
@@ -25,7 +26,7 @@ REQUEST_SECONDS = 3
 CLEANUP_SECONDS = .25
 MAX_MESSAGE = 1024
 LOCAL_CONTROL_SHORTCUT = 'ctrl-bracket-o'
-LOCAL_CONTROL_LABEL = 'Ctrl+] then O'
+LOCAL_CONTROL_LABEL = 'Ctrl+] then o'
 
 
 def terminal_reset(*, clear=False, alternate=True):
@@ -63,7 +64,8 @@ async def handoff_screen(env, *, output_fd=1):
         async with asyncio.timeout(REQUEST_SECONDS):
             validate_socket(env[SOCKET_ENV])
             reader, writer = await asyncio.open_unix_connection(env[SOCKET_ENV], limit=MAX_MESSAGE)
-            writer.write(json.dumps({'kind': 'handoff', 'token': env[TOKEN_ENV]}).encode() + b'\n')
+            writer.write(json.dumps({'kind': 'handoff', 'token': env[TOKEN_ENV],
+                                     **fence_fields(env)}).encode() + b'\n')
             await writer.drain()
             reply = json.loads(await reader.readline())
             if not isinstance(reply, dict) or reply.get('reset') is not True:
@@ -177,6 +179,16 @@ def wallet_label(payload, columns):
         value = {"loading": "wallet loading", "login": "sign in to OpenVegas",
                  "unavailable": "wallet unavailable"}.get(state, "wallet unavailable")
     mode = "$V billing" if payload.get("billing") == "v" else "host billing"
+    target = payload.get('switch_on_exit')
+    if target in ('v', 'host') and target != payload.get('billing') and payload.get('billing') in ('host', 'v'):
+        current = '$V' if payload['billing'] == 'v' else 'host'
+        destination = '$V' if target == 'v' else 'host'
+        notice = f'/exit to switch to {destination}'
+        for text in (f' OPENVEGAS / {value} / {mode} / {notice}',
+                     f' {current} billing / {notice}', notice):
+            if len(text) < columns:
+                return text
+        return notice[:max(0, columns - 1)]
     controls = (payload.get('controls') is True
                 and payload.get('controls_shortcut') == LOCAL_CONTROL_SHORTCUT)
     suffix = f' / {LOCAL_CONTROL_LABEL}: OpenVegas' if controls else ''
@@ -186,7 +198,7 @@ def wallet_label(payload, columns):
     if low:
         suffix = f' / Host {quota:g}% left'
         if controls:
-            suffix += f' / {LOCAL_CONTROL_LABEL}: switch to $V'
+            suffix += f' / {LOCAL_CONTROL_LABEL}: play or switch to $V'
     if payload.get('local_error') is True and controls:
         suffix = f' / local menu unavailable; {LOCAL_CONTROL_LABEL} to retry'
     if payload.get('relay_restart_required') is True:
@@ -194,14 +206,17 @@ def wallet_label(payload, columns):
     compact = value + (f' / host {quota:g}%' if low else '')
     if controls:
         compact += f' / {LOCAL_CONTROL_LABEL}'
-    for text in (f" OPENVEGAS / {value} / {mode}{suffix}", f" OV / {value}{suffix}", compact, f" OV / {value}", value):
+    recovery = (f'Host 0% / {LOCAL_CONTROL_LABEL}: menu', f'{LOCAL_CONTROL_LABEL}: menu',
+                LOCAL_CONTROL_LABEL) if low and quota == 0 and controls else ()
+    for text in (f" OPENVEGAS / {value} / {mode}{suffix}", f" OV / {value}{suffix}", compact,
+                 *recovery, f" OV / {value}", value):
         if len(text) < columns:
             return text
     return value[:max(0, columns - 1)]
 
 
 async def monitor(env, billing, *, broker_factory=Broker, interval=REFRESH_SECONDS, ready=None,
-                  credentials=None, account_factory=WalletCredentials, control=None, status=None):
+                  credentials=None, account_factory=WalletCredentials, control=None, status=None, status_changed=None):
     """Lease the strip to this native child, not to a long-lived shell or MCP.
 
     Closing the pipe removes the strip even after a crash. Never authorize,
@@ -212,18 +227,21 @@ async def monitor(env, billing, *, broker_factory=Broker, interval=REFRESH_SECON
         if ready:
             ready.set()
         return
-    writer = broker = receiver = account_credentials = None
+    writer = broker = receiver = notifier = account_credentials = None
     credentials = credentials or CredentialReader()
+    fields = fence_fields(env)
     try:
         async with asyncio.timeout(REQUEST_SECONDS):
             validate_socket(env[SOCKET_ENV])
             reader, writer = await asyncio.open_unix_connection(env[SOCKET_ENV], limit=MAX_MESSAGE)
             writer.write(json.dumps({"kind": "wallet", "token": env[TOKEN_ENV],
-                                     "billing": billing}).encode() + b"\n")
+                                     "billing": billing, **fields}).encode() + b"\n")
             await writer.drain()
             handshake = json.loads(await reader.readline())
             if not isinstance(handshake, dict) or handshake.get("wallet") != 1:
                 return  # Older relay: leave its screen and the host untouched.
+            if any(handshake.get(key) != value for key, value in fields.items()):
+                return
             controls_supported = handshake.get('controls_shortcut') == LOCAL_CONTROL_SHORTCUT
         if ready:
             ready.set()
@@ -238,16 +256,27 @@ async def monitor(env, billing, *, broker_factory=Broker, interval=REFRESH_SECON
                 payload.pop('quota_remaining', None)
                 payload.pop('local_error', None)
             return payload
-        async def send(payload):
-            async with asyncio.timeout(REQUEST_SECONDS):
-                writer.write(json.dumps(payload).encode() + b'\n')
+        cached = {'state': 'loading', 'billing': billing}
+        sending = asyncio.Lock()
+        async def publish():
+            async with sending, asyncio.timeout(REQUEST_SECONDS):
+                writer.write(json.dumps({**cached, **display_status(), **fields}).encode() + b'\n')
                 await writer.drain()
         refresh, disconnected = asyncio.Event(), asyncio.Event()
+        async def push_status():
+            try:
+                while not disconnected.is_set():
+                    await status_changed.wait()
+                    status_changed.clear()
+                    await publish()
+            except (OSError, ValueError, TimeoutError):
+                disconnected.set()
+                refresh.set()
         async def receive():
             try:
                 while line := await reader.readline():
                     event = json.loads(line)
-                    if isinstance(event, dict):
+                    if isinstance(event, dict) and all(event.get(key) == value for key, value in fields.items()):
                         if control:
                             control(event)
                         if event.get('refresh') is True:
@@ -259,7 +288,9 @@ async def monitor(env, billing, *, broker_factory=Broker, interval=REFRESH_SECON
             # The private relay lease, not wallet initialization or balance,
             # enables input. Keep one receiver even while account reads fail.
             receiver = asyncio.create_task(receive())
-            await send({'state': 'loading', 'billing': billing, **display_status()})
+            await publish()
+            if status_changed is not None and fields:
+                notifier = asyncio.create_task(push_status())
         while not disconnected.is_set():
             payload = {"state": "unavailable", "billing": billing}
             try:
@@ -284,8 +315,8 @@ async def monitor(env, billing, *, broker_factory=Broker, interval=REFRESH_SECON
                 pass
             if disconnected.is_set():
                 break
-            payload.update(display_status())
-            await send(payload)
+            cached = payload
+            await publish()
             # The relay sends a refresh after a game closes. Otherwise poll at
             # a bounded cadence, never in the host's model/tool execution loop.
             try:
@@ -314,9 +345,10 @@ async def monitor(env, billing, *, broker_factory=Broker, interval=REFRESH_SECON
                 writer.close()
         if receiver:
             receiver.cancel()
+        if notifier:
+            notifier.cancel()
         async def cleanup():
-            if receiver:
-                await asyncio.gather(receiver, return_exceptions=True)
+            await asyncio.gather(*(task for task in (receiver, notifier) if task is not None), return_exceptions=True)
             if writer:
                 with suppress(Exception):
                     await asyncio.wait_for(writer.wait_closed(), CLEANUP_SECONDS)

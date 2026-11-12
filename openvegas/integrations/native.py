@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 import re
+import shutil
 from decimal import Decimal, InvalidOperation
 
 import click
@@ -185,11 +186,21 @@ def _pricing(value):
     return value['fingerprint'], _decimal(value.get('v_per_usd')), _decimal(value.get('multiplier'))
 
 
+def _check_claude_gateway_discovery(env):
+    # Claude shares its discovery cache across grants in the same config dir.
+    value = env.get('CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY', '')
+    if value not in ('', '0'):
+        raise IntegrationError('Claude gateway discovery uses the shared host profile. '
+                               'OpenVegas cannot isolate this wallet model list. '
+                               'Billing unchanged; no Claude wallet child started.')
+
+
 def child_environment(host, backend, model, max_tokens, token):
     """Use the original native home; strip stale provider routing and local keys."""
     env = dict(host_environment() or os.environ)
     local_connections = {key: os.environ[key] for key in (
         'OPENVEGAS_TERMINAL_SOCKET', 'OPENVEGAS_TERMINAL_TOKEN',
+        'OPENVEGAS_TERMINAL_OWNER', 'OPENVEGAS_TERMINAL_GENERATION',
         'OPENVEGAS_SWITCH_SOCKET', 'OPENVEGAS_SWITCH_TOKEN',
     ) if key in os.environ}
     prefixes = ('ANTHROPIC_', 'OPENAI_', 'OPENROUTER_', 'OPENVEGAS_', 'AZURE_OPENAI_',
@@ -203,6 +214,7 @@ def child_environment(host, backend, model, max_tokens, token):
                                              'CODEX_MODEL_PROVIDER', 'CLAUDE_CODE_SIMPLE'}:
             env.pop(key)
     if host == 'claude':
+        _check_claude_gateway_discovery(env)
         env.update(ANTHROPIC_BASE_URL=backend + '/integrations/native',
                    ANTHROPIC_API_KEY='', ANTHROPIC_AUTH_TOKEN=token,
                    ANTHROPIC_MODEL=model, ANTHROPIC_DEFAULT_MODEL=model,
@@ -258,18 +270,8 @@ def codex_resume_argv(executable, endpoint, model, host_args):
         controls = ['-c', 'notice.model_migrations=' + table]
     # The isolated app-server already owns the backend. --no-daemon is only
     # valid for an ordinary local host, not the attached --remote TUI.
-    remote_args, literal = [], []
-    args = iter(host_args)
-    for arg in args:
-        if arg == '--':
-            literal = [arg, *args]
-            break
-        if arg == '--no-daemon':
-            continue
-        remote_args.append(arg)
-        if arg in _VALUE_OPTIONS['codex']:
-            remote_args.append(next(args))
-    return [executable, *controls, *remote_args, '--remote', endpoint, '--model', model, *literal]
+    from .host_adapter import remote_attach
+    return remote_attach(executable, endpoint, model, host_args, controls=controls)
 
 
 def host_argv(executable, host, backend, model, host_args, *, local_tools_only=False, hosted_web=False,
@@ -337,13 +339,15 @@ async def run_host(argv, env):
 async def launch(host, model, limit_v, max_output_tokens=2048, *, yes=False, dry_run=False,
                  host_args=(), broker=None, emit=click.echo, confirm=None, local_tools_only=False,
                  provider='openrouter', runner=None, resume_provider=None, compact=False,
-                 control_environment=None, wallet_mode=False):
+                 control_environment=None, wallet_mode=False, codex_handoff_source=None,
+                 live_codex_executable=None):
     """Return the host exit code. Injection points are for bounded offline tests."""
     if host not in {'claude', 'codex'} or not isinstance(model, str) or not _MODEL.fullmatch(model):
         raise IntegrationError('Choose a supported host and an exact model identifier.')
     if provider not in {'openrouter', 'anthropic' if host == 'claude' else 'openai'}:
         raise IntegrationError('Provider must match the native host.')
-    limit_v = _decimal(limit_v)
+    if not wallet_mode or limit_v is not None:
+        limit_v = _decimal(limit_v)
     if type(max_output_tokens) is not int or max_output_tokens < 1:
         raise IntegrationError('max-output-tokens must be a positive integer.')
     validate_host_args(host, host_args)
@@ -355,16 +359,26 @@ async def launch(host, model, limit_v, max_output_tokens=2048, *, yes=False, dry
         elif resume_provider == 'openai':
             validate_codex_remote_args(host_args)
     control_environment = control_environment or {}
-    if (set(control_environment) - {'OPENVEGAS_SWITCH_SOCKET', 'OPENVEGAS_SWITCH_TOKEN'}
-            or any(not isinstance(value, str) or '\x00' in value for value in control_environment.values())):
-        raise IntegrationError('Invalid local billing control connection.')
+    from .staged_generation import validate_control_environment
+    validate_control_environment(control_environment)
+    if live_codex_executable is not None and (codex_handoff_source is None or not control_environment):
+        raise IntegrationError('Live executable binding requires a verified managed Codex handoff.')
+    if codex_handoff_source is not None or (host == 'codex' and wallet_mode and control_environment):
+        from .codex_handoff_policy import require_snapshot
+        require_snapshot(codex_handoff_source)
+        if (host != 'codex' or not wallet_mode or resume_provider != 'openai' or provider != 'openai'
+                or 'OPENVEGAS_TERMINAL_GENERATION' not in control_environment
+                or tuple(host_args[-2:]) != ('resume', codex_handoff_source.thread_id)
+                or any(a not in {'--no-daemon', '--no-alt-screen'} for a in host_args[:-2])):
+            raise IntegrationError('Managed Codex resume does not match the verified source.')
     if local_tools_only and host != 'codex':
         raise IntegrationError('--local-tools-only is the explicit Codex web-search compatibility option.')
     if local_tools_only and '--search' in host_args:
         raise IntegrationError('--search conflicts with explicit local-tools-only mode.')
     backend = broker.backend if broker is not None else backend_url()
     if dry_run:
-        emit(f'Dry run: {host}, exact model {model}, budget ceiling {format_v(limit_v)}, output cap {max_output_tokens}.')
+        payer = 'pay from available wallet funds' if wallet_mode else f'budget ceiling {format_v(limit_v)}'
+        emit(f'Dry run: {host}, exact model {model}, {payer}, output cap {max_output_tokens}.')
         emit('Route: ' + backend + '/integrations/native' + ('/v1/responses' if host == 'codex' else '/v1/messages'))
         emit('Pricing/markup: server quote required; no authentication, grant, host process or configuration changes.')
         emit('Native cwd, stdio, history and permissions are retained. Ordinary claude/codex billing is unchanged.')
@@ -372,12 +386,30 @@ async def launch(host, model, limit_v, max_output_tokens=2048, *, yes=False, dry
             emit('Hosted web search: disabled for this invocation only.' if local_tools_only else
                  'Hosted web search requires an explicit reviewed server quote; otherwise use --local-tools-only.')
         return 0
-    info = detect(host)
+    if host == 'claude':
+        _check_claude_gateway_discovery(host_environment() or os.environ)
+    if live_codex_executable is None:
+        info = detect(host)
+    else:
+        # Re-resolve the normal installation; a caller-supplied path is a
+        # comparison value, never an executable override or a shell command.
+        from .codex_binary import resolve_native_codex
+        from .host_adapter import PINNED_VERSIONS
+        version = PINNED_VERSIONS['codex']
+        binary = await asyncio.to_thread(resolve_native_codex, shutil.which('codex'), version)
+        if binary != live_codex_executable:
+            raise IntegrationError('Native Codex installation changed before wallet launch; no grant requested.')
+        info = {'executable': binary, 'version': version}
     if not info:
         raise IntegrationError('Native host executable/version unavailable. No spending session was opened.')
+    if host == 'codex' and resume_provider == 'openai':
+        from .host_adapter import codex_remote_options, require_version
+        require_version(host, info.get('version'))
+        codex_remote_options(host_args)
     owned_broker = broker is None
     broker = broker or Broker()
     session_token = None
+    child_returned = False
     try:
         device = broker.credentials.load()
         if not isinstance(device, str) or not device.startswith('ov_device_'):
@@ -405,7 +437,8 @@ async def launch(host, model, limit_v, max_output_tokens=2048, *, yes=False, dry
             emit('Return with openvegas use host. Requests stop if available funds are insufficient.')
         detail = (lambda *args: None) if compact else emit
         detail(f'OpenVegas $V inference: {host}; exact model {model}; output cap {max_output_tokens}.')
-        detail(f'Session budget ceiling: {format_v(limit_v)}. Server pricing: {format_v(rate)}/USD x {multiplier} '
+        payer = 'Pay from available wallet funds' if wallet_mode else f'Session budget ceiling: {format_v(limit_v)}'
+        detail(f'{payer}. Server pricing: {format_v(rate)}/USD x {multiplier} '
              f'(markup {(multiplier - 1) * 100}%).')
         if unit_prices is not None:
             incoming, outgoing = unit_prices
@@ -432,6 +465,13 @@ async def launch(host, model, limit_v, max_output_tokens=2048, *, yes=False, dry
             emit('Local tools and MCP stay available; hosted web search is unavailable on this route.')
         if host == 'claude':
             detail('Saved subscription credentials are preserved; cached-subscription coexistence is not yet verified.')
+        if codex_handoff_source is not None:
+            from .codex_billing_route import preflight_wallet
+            preflight_env = child_environment(host, backend, model, max_output_tokens, '')
+            preflight_env = {k:v for k,v in preflight_env.items() if k != 'OPENVEGAS_NATIVE_TOKEN'
+                             and not k.startswith(('OPENVEGAS_SWITCH_', 'OPENVEGAS_TERMINAL_'))}
+            await preflight_wallet(info['executable'], backend, model, preflight_env,
+                                   local_tools_only=local_tools_only, source=codex_handoff_source)
         if not yes:
             accepted = confirm() if confirm else click.confirm(
                 f'Use $V with {model}?' if compact else 'Authorize this quoted $V session?', default=False)
@@ -439,7 +479,8 @@ async def launch(host, model, limit_v, max_output_tokens=2048, *, yes=False, dry
                 emit('Spending not authorized; no session opened.')
                 return 0
         result = await broker.request('POST', '/native/sessions', token=device, data={
-            **selection, 'limit_v': format(limit_v, 'f'), 'confirmed': True, 'pricing_fingerprint': fingerprint,
+            **selection, **({'limit_v': format(limit_v, 'f')} if limit_v is not None else {}),
+            'confirmed': True, 'pricing_fingerprint': fingerprint,
             **({'billing_mode': 'wallet'} if wallet_mode else {})})
         # Retain only a native-session bearer, even if other response fields
         # are malformed. Never forward or close a provider/device/host key.
@@ -473,33 +514,55 @@ async def launch(host, model, limit_v, max_output_tokens=2048, *, yes=False, dry
         env.update(control_environment)
         detail(f'Session authorized for up to {result["expires_in"]} seconds; closing it when the native host exits.')
         if host == 'codex' and resume_provider == 'openai':
-            from .codex_billing_route import route
+            from .codex_billing_route import _grant_catalog, route
+            catalog_options = {}
+            if wallet_mode:
+                binding = {'version': info['version'], 'session_id': result['session_id'],
+                           'catalog_hash': result.get('catalog_hash')}
+                catalog = await _grant_catalog(broker, session_token, **binding,
+                                               identifiers=result['allowed_models'])
+                if catalog is not None:
+                    catalog_options = {'reviewed_catalog': catalog, 'catalog_binding': binding}
             async with route(info['executable'], backend, model, env,
                              local_tools_only=local_tools_only,
+                             **catalog_options,
+                             **({'handoff_source': codex_handoff_source} if codex_handoff_source else {}),
                              **({'allowed_models': [{'provider': provider, 'host': host, 'model': item}
                                  for item in result['allowed_models']]} if wallet_mode else {})) as endpoint:
                 argv = codex_resume_argv(info['executable'], endpoint, model, host_args)
-                return await (runner or run_host)(argv, env)
+                code = await (runner or run_host)(argv, env)
+                child_returned = True
+                return code
         argv = host_argv(info['executable'], host, backend, model, list(host_args),
                          local_tools_only=local_tools_only, hosted_web=bool(web) and not local_tools_only,
                          provider_identity=resume_provider or 'openvegas_v')
-        return await (runner or run_host)(argv, env)
+        code = await (runner or run_host)(argv, env)
+        child_returned = True
+        return code
     except (IntegrationError, click.Abort, asyncio.CancelledError):
         raise
     except Exception:  # noqa: BLE001 - Do not expose exceptions containing credentials.
         raise IntegrationError('Native launch failed; no credentials or host configuration were changed.') from None
     finally:
+        stop_restore = False
         if session_token:
+            from .session_ownership import GENERATION_ENV
+            strict_close = wallet_mode and GENERATION_ENV in control_environment
             try:
                 async with asyncio.timeout(5):
-                    await broker.request('DELETE', '/native/session', token=session_token)
+                    closed = await broker.request('DELETE', '/native/session', token=session_token)
+                    if strict_close and (not isinstance(closed, dict) or closed.get('closed') is not True):
+                        raise ValueError
             except Exception:  # noqa: BLE001 - Cleanup must not hide the host's exit status.
                 emit('Warning: session close could not be confirmed; its server budget and expiry still apply.')
+                stop_restore = strict_close and child_returned
         if owned_broker:
             try:
                 await broker.close()
             except Exception:  # noqa: BLE001, S110 - Never print credential-bearing transport errors.
                 pass
+        if stop_restore:
+            raise IntegrationError('Wallet grant closure unconfirmed. No return to host billing was started.')
 
 
 @click.command('native', cls=NativeCommand)
@@ -542,9 +605,29 @@ class HostCommand(NativeCommand):
         self.fixed_host = host
         super().__init__(host, callback=native.callback,
                          params=[copy.copy(p) for p in native.params if p.name != 'host'],
-                         help=f'Launch {host} with a confirmed OpenVegas $V budget. Native options follow --.')
+                         help=f'Launch {host} with a confirmed OpenVegas $V budget. Native options follow --.'
+                         + (' Or use --wallet alone for a fresh local wallet chat.' if host == 'codex' else ''))
+
+    def parse_args(self, ctx, args):
+        # Only a shell alias and an exact standalone flag can consent. Never
+        # reinterpret a prompt or a host argument after the literal delimiter.
+        prefix = args[:args.index('--')] if '--' in args else args
+        if '--wallet' in prefix:
+            if list(args) != ['--wallet']:
+                raise click.UsageError('--wallet must be used alone for a fresh interactive chat.', ctx)
+            ctx.meta['fresh_wallet'] = True
+            return super().parse_args(ctx, [])
+        return super().parse_args(ctx, args)
 
     def invoke(self, ctx):
+        if ctx.meta.get('fresh_wallet'):
+            from .fresh_wallet import command
+            try:
+                ctx.exit(asyncio.run(command(self.fixed_host)))
+            except IntegrationError as exc:
+                raise click.ClickException(str(exc)) from None
+            except KeyboardInterrupt:
+                ctx.exit(130)
         ctx.params['host'] = self.fixed_host
         return super().invoke(ctx)
 

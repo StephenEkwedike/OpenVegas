@@ -30,8 +30,10 @@ function command(data) {
   const billing = prompt.match(/^(?:\/|\$)?openvegas(?::openvegas)?[ \t]+use[ \t]+(v|host)$/i);
   const play = prompt.match(/^(?:\/|\$)?openvegas(?::openvegas)?[ \t]+play(?:[ \t]+(blackjack|roulette|poker|baccarat|slots|horse))?$/i);
   const lobby = prompt.match(/^(?:\/|\$)?openvegas(?::openvegas)?$/i);
+  const quota = prompt.match(/^(?:\/|\$)?openvegas(?::openvegas)?[ \t]+quota$/i);
   // JavaScript's $ also matches before a final Unicode line separator; reject it.
   if (billing && billing[0] === prompt) return [billing[1].toLowerCase(), null];
+  if (quota && quota[0] === prompt) return ['quota-info', null];
   if ((play && play[0] === prompt) || (lobby && lobby[0] === prompt)) return ['play', play?.[1]?.toLowerCase() ?? null];
   return null;
 }
@@ -48,6 +50,8 @@ const deadline = setTimeout(inputFailure, 4000);
   const data = envelope(input);
   const control = command(data);
   if (!control) return finish({});
+  if (control[0] === 'quota-info') return finish({continue: false,
+    stopReason: 'Host quota is not available from this command. Check the host usage display; the OpenVegas HUD can show a low-quota warning when the host supplies usage data.'});
   const explicit = control[0] !== 'register';
   if (explicit) failure = {decision: 'block', reason: missing};
   const reply = (message, handled = false) => finish(!explicit ? {} : handled
