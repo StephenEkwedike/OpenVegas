@@ -1,12 +1,12 @@
 {
   "baseline_build_inputs_sha256": null,
-  "baseline_freeze_sha256": "59229fc720f6bc44f639a382da943e8709d7e0a6edfc02fa8dd6df7aed9b4455",
+  "baseline_freeze_sha256": "578bca75b580005ed050e25605e0f4a4a6675823f3c2d3877b8d88760a63c634",
   "checkout_native_inputs": {
     "openvegas/integrations/billing_host.py": "a4edbee91ea245d6bebe8827a9c5e8e7b2b3aa62e1e7ff70e14b5ad98f6f36a1",
     "openvegas/integrations/codex_stable_transport.py": "5f93083018ead0c736a1f55f308e7ab7eabc925ac6738c4bcfcddfb24c28c172",
     "openvegas/integrations/inference_router.py": "01310548b50d43de0634f8014be15dff35fafe895fab895645266daa3a1721d2",
     "openvegas/integrations/inference_router_adapter.py": "3f1c55bca5c40c0bdd4784d0fa96437b11218aa3427ddcbf3fadfeaad330dd2b",
-    "openvegas/integrations/inference_router_claude.py": "038e4a577f726d767aad05d4c9799871c0c32a180a1a4e0cf98ea57e51ab84f6",
+    "openvegas/integrations/inference_router_claude.py": "79e2e44876c49f6e4e9205778ad2b5b5f09fb9b0ac913a676958cd75f7c63676",
     "openvegas/integrations/inference_router_controls.py": "2d21e8267c0ce257ac3ebf764f1c674ec2e65269acb35cec2a80e0cb186a94af",
     "openvegas/integrations/inference_router_fixture.py": "26cb165c054bc4b1a85d062b20398a820d837f99bad7092e75d9567a3a57a41f",
     "openvegas/integrations/inference_router_managed.py": "16e1c65d1c3f05417ad8aae4a6f37335fe28535cd589ce0255b058e35a1588de",
@@ -20,7 +20,7 @@
     "scripts/frozen_entry.py": "1f39353e7d62f5a12259550cbbd0524adaaa165984d954960a0f3aa37c10a505"
   },
   "format": "openvegas-native-router-candidate-v1",
-  "freezer_sha256": "8fcf33019273481043fadd0beceea28c99e139c039b869531c2b7a42e8174362",
+  "freezer_sha256": "e2a43d4dd6d0db7152ae9c3e291ee62eb31400dceea7f41e86d33576cf8178f4",
   "frozen": true,
   "inputs": {
     "cli": {
@@ -243,7 +243,7 @@
       "openvegas/integrations/inference_router.py": "01310548b50d43de0634f8014be15dff35fafe895fab895645266daa3a1721d2",
       "openvegas/integrations/inference_router_adapter.py": "3f1c55bca5c40c0bdd4784d0fa96437b11218aa3427ddcbf3fadfeaad330dd2b",
       "openvegas/integrations/inference_router_boundary.py": "37dfd177635e91603948562ba909d9122fa945f8297ef9c4ccc4a02cde8bb5dc",
-      "openvegas/integrations/inference_router_claude.py": "038e4a577f726d767aad05d4c9799871c0c32a180a1a4e0cf98ea57e51ab84f6",
+      "openvegas/integrations/inference_router_claude.py": "79e2e44876c49f6e4e9205778ad2b5b5f09fb9b0ac913a676958cd75f7c63676",
       "openvegas/integrations/inference_router_controls.py": "2d21e8267c0ce257ac3ebf764f1c674ec2e65269acb35cec2a80e0cb186a94af",
       "openvegas/integrations/inference_router_fixture.py": "26cb165c054bc4b1a85d062b20398a820d837f99bad7092e75d9567a3a57a41f",
       "openvegas/integrations/inference_router_managed.py": "16e1c65d1c3f05417ad8aae4a6f37335fe28535cd589ce0255b058e35a1588de",
@@ -353,7 +353,7 @@
     "native_terminal_balance_display": "not_run",
     "permission_and_tool_continuity": "not_run"
   },
-  "preparation": "stable version unchanged; only pinned Claude eligibility compatibility fix",
+  "preparation": "stable version unchanged; only pinned Claude empty managed-cache guard including post-read identity fence",
   "publication_approved": false,
   "published": false,
   "version": "0.3.19"

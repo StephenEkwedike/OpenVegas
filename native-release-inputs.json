@@ -214,7 +214,7 @@
     "openvegas/integrations/inference_router.py": "01310548b50d43de0634f8014be15dff35fafe895fab895645266daa3a1721d2",
     "openvegas/integrations/inference_router_adapter.py": "3f1c55bca5c40c0bdd4784d0fa96437b11218aa3427ddcbf3fadfeaad330dd2b",
     "openvegas/integrations/inference_router_boundary.py": "37dfd177635e91603948562ba909d9122fa945f8297ef9c4ccc4a02cde8bb5dc",
-    "openvegas/integrations/inference_router_claude.py": "038e4a577f726d767aad05d4c9799871c0c32a180a1a4e0cf98ea57e51ab84f6",
+    "openvegas/integrations/inference_router_claude.py": "79e2e44876c49f6e4e9205778ad2b5b5f09fb9b0ac913a676958cd75f7c63676",
     "openvegas/integrations/inference_router_controls.py": "2d21e8267c0ce257ac3ebf764f1c674ec2e65269acb35cec2a80e0cb186a94af",
     "openvegas/integrations/inference_router_fixture.py": "26cb165c054bc4b1a85d062b20398a820d837f99bad7092e75d9567a3a57a41f",
     "openvegas/integrations/inference_router_managed.py": "16e1c65d1c3f05417ad8aae4a6f37335fe28535cd589ce0255b058e35a1588de",
@@ -317,9 +317,9 @@
   },
   "native_paid_enabled": false,
   "repository_files": {
-    ".github/workflows/native-public.yml": "55cfa39d26122c041cb1f728a1a4185b0299e4beb74823e8dc235f9d2d271996",
+    ".github/workflows/native-public.yml": "abf353239e7dad6d761d8b3083158561281954e752b939227fd192829dd31aa5",
     "ci-build-requirements.txt": "9abfa42c3c675a76a4edb4db8e2c296467ec38da27522c15633456d3478f5a09",
-    "native-router-freeze.json": "578bca75b580005ed050e25605e0f4a4a6675823f3c2d3877b8d88760a63c634",
+    "native-router-freeze.json": "fc965c98fed39e1a6eec0ccc832f9db14ed120db3fca58aa3b001fa89e1ff401",
     "npm-cli/bin/release.js": "1a8a0bf494acc4ab68c9828bb0f100ba3267ca7bd0386056591b87d33d933555",
     "openvegas-0.3.19.dist-info/METADATA": "96593e28cc3a988f784ca80821aa217265d8e0547320edd632a117e09cf7c7d1",
     "openvegas-0.3.19.dist-info/RECORD": "1c44cf89c210bea0ee8f49921d65557b71457409e2836814282b21f2a9092fe5",
@@ -540,7 +540,7 @@
     "openvegas/integrations/inference_router.py": "01310548b50d43de0634f8014be15dff35fafe895fab895645266daa3a1721d2",
     "openvegas/integrations/inference_router_adapter.py": "3f1c55bca5c40c0bdd4784d0fa96437b11218aa3427ddcbf3fadfeaad330dd2b",
     "openvegas/integrations/inference_router_boundary.py": "37dfd177635e91603948562ba909d9122fa945f8297ef9c4ccc4a02cde8bb5dc",
-    "openvegas/integrations/inference_router_claude.py": "038e4a577f726d767aad05d4c9799871c0c32a180a1a4e0cf98ea57e51ab84f6",
+    "openvegas/integrations/inference_router_claude.py": "79e2e44876c49f6e4e9205778ad2b5b5f09fb9b0ac913a676958cd75f7c63676",
     "openvegas/integrations/inference_router_controls.py": "2d21e8267c0ce257ac3ebf764f1c674ec2e65269acb35cec2a80e0cb186a94af",
     "openvegas/integrations/inference_router_fixture.py": "26cb165c054bc4b1a85d062b20398a820d837f99bad7092e75d9567a3a57a41f",
     "openvegas/integrations/inference_router_managed.py": "16e1c65d1c3f05417ad8aae4a6f37335fe28535cd589ce0255b058e35a1588de",
@@ -640,12 +640,12 @@
     "requirements.lock": "74cf80310c10efff836d8e29e4165abb225d779c3ec86c16ee23a5c2c4996162",
     "scripts/assemble_npm_release.py": "394689db9e93170279a5f3597ea83f940845459e343173869754ced88c137256",
     "scripts/build_cli_candidate.py": "99ef3030ef4bc6546422280bd731683015c2e3d9579017330ac0f20be2704b43",
-    "scripts/ci_prepare_native_frozen.py": "d595fdaba683eaed98c1c73466fa17927844b8029f6ce2b7d2f3d7af33d46ce1",
+    "scripts/ci_prepare_native_frozen.py": "5144894bd6bf11dea7a51ecdcee4ac69a6506fefda7f3c75e895f885c6e292ed",
     "scripts/frozen_entry.py": "1f39353e7d62f5a12259550cbbd0524adaaa165984d954960a0f3aa37c10a505",
     "scripts/prepare_public_release.py": "787dde403da1ee94c337e89dc39eb6467761b70032adc96fcb2b6ec95a094099",
     "scripts/verify_native_release_source.py": "09c1e3748ff710ed0490c9fa905522bf756be420e66f42e8e70ffa895df2b74a",
-    "scripts/verify_native_router_candidate.py": "d8ae503647af3153980e6688833370be6f61ebc3ea13a8de4d2628f66acd41b5"
+    "scripts/verify_native_router_candidate.py": "b94aaa0eaa457a33b07e8e89e87d92613dcfcea123e78208add7fc2cd05cec18"
   },
-  "source_sha256": "5a66b69f6d00586e91fde4f106b286ab59cd3651f8a94a641844e400a2168100",
+  "source_sha256": "b5fe7d00e547a52a4d3d158234c8406f870712cef3d50182da39c2090f469b1a",
   "version": "0.3.19"
 }

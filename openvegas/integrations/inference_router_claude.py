@@ -10,6 +10,7 @@ import json
 import os
 import secrets
 import shlex
+import stat
 import termios
 from dataclasses import dataclass
 from pathlib import Path
@@ -152,6 +153,26 @@ class ClaudeRouterObserver(ClaudeGenerationObserver):
         raise IntegrationError('Native Claude metadata observer is unavailable; billing unchanged.')
 
 
+def _empty_remote_settings(path):
+    """An empty native cache carries no policy; never ignore actual settings."""
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid not in (0, os.geteuid())
+                or info.st_mode & 0o022 or not 0 < info.st_size <= 1024):
+            return False
+        raw = os.read(fd, 1025)
+        after = os.fstat(fd)
+        current = path.lstat()
+        fields = ('st_dev', 'st_ino', 'st_uid', 'st_mode', 'st_size',
+                  'st_mtime_ns', 'st_ctime_ns')
+        return (all(getattr(info, key) == getattr(after, key) == getattr(current, key)
+                    for key in fields)
+                and len(raw) == info.st_size and json.loads(raw) == {})
+    finally:
+        os.close(fd)
+
+
 def verify_settings(env, cwd):
     """Refuse unknown effective routing sources, without reading native auth."""
     if (not env.get('HOME') or any(key.startswith(('CLAUDE_CODE_MANAGED_', 'CLAUDE_CODE_POLICY_'))
@@ -169,6 +190,8 @@ def verify_settings(env, cwd):
             try:
                 path.lstat()
             except FileNotFoundError:
+                continue
+            if path == profile / 'remote-settings.json' and _empty_remote_settings(path):
                 continue
             raise IntegrationError('Managed native routing policy is unverified; no router launch.')
         sources = {profile / 'settings.json', profile / 'settings.local.json'}

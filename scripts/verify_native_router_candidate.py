@@ -312,7 +312,12 @@ def expected_launcher(blobs: dict[str, bytes], name: str, os_name: str, arch: st
     spec = importlib.util.spec_from_file_location("router_candidate_builder", builder)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.npm_launcher(name, os_name, arch, sha256).encode()
+    launcher = module.npm_launcher(name, os_name, arch, sha256)
+    # The frozen builder uses write_text with native newline translation.
+    # Reconstruct target bytes; never normalize the archive under inspection.
+    if os_name == "win32":
+        launcher = launcher.replace("\n", "\r\n")
+    return launcher.encode()
 
 
 def verify_npm(archive: Path, binary_name: str, binary_sha256: str, *, launcher: bytes) -> dict:
@@ -351,7 +356,9 @@ def verify_npm(archive: Path, binary_name: str, binary_sha256: str, *, launcher:
         raise ValueError("npm launcher differs from reviewed builder")
     for name, mode in modes.items():
         expected_modes = {0o644} if name == "package/package.json" else {0o755}
-        if package.get("os") == ["win32"] and name == "package/bin/" + binary_name:
+        if package.get("os") == ["win32"] and name in {
+            "package/bin/" + binary_name, "package/bin/openvegas.js",
+        }:
             expected_modes = {0o644, 0o755}
         if mode not in expected_modes:
             raise ValueError("Unexpected npm payload permissions")
