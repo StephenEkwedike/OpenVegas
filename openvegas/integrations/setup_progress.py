@@ -14,10 +14,11 @@ def launcher_ready():
     fd = os.environ.pop("OPENVEGAS_LAUNCH_NOTIFY_FD", "")
     if fd != "3" or os.name != "posix":
         return
+    acknowledged = False
     try:
         os.write(3, b"ready\n")
         if select.select([3], [], [], 2)[0]:
-            os.read(3, 1)
+            acknowledged = os.read(3, 1) == b"1"
     except OSError:
         pass
     finally:
@@ -25,6 +26,10 @@ def launcher_ready():
             os.close(3)
         except OSError:
             pass
+    if not acknowledged:
+        # A timeout is not a terminal-ownership barrier. Exit silently while
+        # the launcher still owns stderr, rather than printing over its spinner.
+        raise SystemExit(1)
 
 
 @contextmanager

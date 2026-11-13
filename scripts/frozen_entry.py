@@ -35,6 +35,7 @@ def verify_mac_credential_files():
     import builtins
     import tempfile
     from pathlib import Path
+
     from openvegas import config
     from openvegas.integrations.credentials import Credentials
     from openvegas.integrations.game_browser import game_credentials
@@ -102,6 +103,7 @@ def verify_bundle(*, include_review_packs=False):
     terminal_profile = None
     if sys.platform == 'darwin':
         from pathlib import Path
+
         from openvegas.integrations.terminal_profile import profile_spec
         terminal_profile = profile_spec(Path.home() / 'native-terminal-probe')
     report = {
@@ -124,6 +126,14 @@ def verify_bundle(*, include_review_packs=False):
 
 
 if __name__ == "__main__":
+    if 'OPENVEGAS_NATIVE_FIXTURE' in os.environ:
+        from openvegas.integrations.inference_router_fixture import configured
+        try:
+            configured()
+        except Exception:  # noqa: BLE001 - No raw fixture paths or private details.
+            print('Offline native fixture isolation failed; no command was launched.', file=sys.stderr)
+            raise SystemExit(1) from None
+        os.umask(0o077)
     if sys.argv[1:3] == ['integration', 'serve'] and '--billing-hook' in sys.argv[3:]:
         # Five-second host hooks must not import the full chat/audio CLI or MCP
         # server merely to notify the local terminal supervisor.

@@ -17,7 +17,13 @@ import click
 from . import native
 from .billing_choices import model_choices, wallet_ceiling
 from .broker import Broker
-from .codex_billing_route import _bundled_catalog, _filter_catalog, _settle
+from .codex_billing_route import (
+    _bundled_catalog,
+    _filter_catalog,
+    _grant_catalog,
+    _settle,
+    _validate_grant_catalog,
+)
 from .credentials import IntegrationError
 from .host_adapter import require_version
 from .native_owned_process import OwnedLeader, spawn_leader
@@ -122,13 +128,6 @@ async def _session(host, broker, info, directory, runner, emit):
     _check(choices and all(row.get('host') == host for row in rows), 'No exact reviewed host models.')
     for row in rows:
         _selection(row)
-    bundled = await _bundled_catalog(info['executable'], directory, os.environ)
-    catalog = _filter_catalog(bundled, choices)
-    model_file = Path(directory) / 'models.json'
-    with model_file.open('x') as output:
-        os.chmod(model_file, 0o600)
-        json.dump(catalog, output)
-
     row = rows[0]
     selection = _selection(row)
     quote = await broker.request('POST', '/native/quote', token=device, data=selection)
@@ -174,12 +173,26 @@ async def _session(host, broker, info, directory, runner, emit):
                and native._decimal(status.get('used_or_reserved_v'), allow_zero=True) == 0
                and type(status.get('requests')) is int and status['requests'] == 0,
                'The wallet session is not fresh or its authorization changed.')
+        binding = {'version': info['version'], 'session_id': grant['session_id'],
+                   'catalog_hash': grant.get('catalog_hash')}
+        reviewed = await _grant_catalog(broker, token, **binding,
+                                         identifiers=list(choices), grant_status=status)
+        if reviewed is None:
+            catalog = _filter_catalog(await _bundled_catalog(info['executable'], directory, os.environ), choices)
+        else:
+            catalog = _validate_grant_catalog(reviewed, **binding, identifiers=list(choices))
+        model_file = Path(directory) / 'models.json'
+        with model_file.open('x') as output:
+            os.chmod(model_file, 0o600)
+            json.dump(catalog, output)
         env = _child_env(host, broker.backend, row['model'], row['max_tokens'], token)
         # A unique provider table cannot merge previously configured auth hooks.
         argv = native.host_argv(info['executable'], host, broker.backend, row['model'], [],
                                 local_tools_only=True, provider_identity='openvegas_wallet_' + secrets.token_hex(8))
         argv[1:1] = ['--no-daemon', '--disable', 'multi_agent', '--disable', 'multi_agent_v2',
                      '-c', 'model_catalog_json=' + json.dumps(str(model_file))]
+        if reviewed is not None:
+            _validate_grant_catalog(reviewed, **binding, identifiers=list(choices))
         code = await runner(argv, env)
     finally:
         if token:

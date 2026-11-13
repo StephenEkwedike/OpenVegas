@@ -1,9 +1,9 @@
-name: Native 0.3.18 candidates (never publish)
+name: Native 0.3.19 candidates (never publish)
 
 on:
   workflow_dispatch:
   push:
-    branches: ['codex/native-release-0318']
+    branches: ['codex/native-release-0319']
 
 permissions:
   contents: read
@@ -39,42 +39,28 @@ jobs:
       - name: Linux audio runtime
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libportaudio2
-      - name: Export identical public-only source on every platform
+      - name: Export byte-identical pinned public client
         run: |
           git -c core.autocrlf=false -c core.eol=lf archive --format=zip --output ../release-source.zip HEAD
           python -m zipfile -e ../release-source.zip dist/git-source
-          python dist/git-source/scripts/verify_native_release_source.py --source dist/git-source --stage dist/public-source
-      - name: Verify exact rc7-derived client inputs and sanitization
-        run: python scripts/verify_native_release_source.py --source dist/git-source --exported dist/public-source
-      - name: Install candidate build dependencies
-        working-directory: dist/public-source
+          python dist/git-source/scripts/ci_prepare_native_frozen.py dist/git-source dist/frozen
+      - name: Install lock-constrained build dependencies
         env:
           OPENSSL_STATIC: '1'
-        run: python -m pip install --no-cache-dir -c requirements.lock ".[audio]" "pyinstaller==6.22.3"
-      - name: Verify native launcher runtime dependencies
-        run: python -c "import uvicorn, websockets; assert uvicorn.__version__ == '0.52.4'; assert websockets.__version__ == '15.0.1'"
-      - name: Record exact source inputs for cross-platform diagnosis
-        working-directory: dist/public-source
-        run: >-
-          python -c "import hashlib,json,pathlib; root=pathlib.Path('.'); files={p.as_posix():hashlib.sha256(p.read_bytes()).hexdigest() for p in root.rglob('*') if p.is_file() and (p.parts[0]=='openvegas' or p.as_posix() in ('pyproject.toml','requirements.lock','scripts/frozen_entry.py','scripts/build_cli_candidate.py')) and p.suffix in ('.py','.json','.png','.js','.md','.toml','.lock')}; pathlib.Path('../source-inputs.json').write_text(json.dumps(files,sort_keys=True))"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: source-inputs-${{ matrix.target }}
-          path: dist/source-inputs.json
-          retention-days: 7
+        run: python -m pip install --no-cache-dir -c dist/frozen/cli/requirements.lock -r dist/git-source/ci-build-requirements.txt
       - name: Reject dynamically linked macOS cryptography
         if: runner.os == 'macOS'
         run: |
-          python -c "import cryptography.hazmat.bindings._rust as r, subprocess; result=subprocess.check_output(['otool','-L',r.__file__],text=True); print(result); assert not any(name in result for name in ('libssl.', 'libcrypto.')), 'cryptography must statically link OpenSSL before freezing'"
-      - name: Build native executable and npm tarball, verify empty-home startup
-        working-directory: dist/public-source
-        run: python scripts/build_cli_candidate.py --output ../native-candidate
-      - name: Verify runner matches the requested target
+          python -c "import cryptography.hazmat.bindings._rust as r, subprocess; result=subprocess.check_output(['otool','-L',r.__file__],text=True); print(result); assert not any(name in result for name in ('libssl.', 'libcrypto.'))"
+      - name: Build and clean-install private platform package
+        working-directory: dist/frozen/cli
+        run: python -B scripts/build_cli_candidate.py --output ../../native-candidate
+      - name: Verify target and exact compiled source
         env:
           EXPECTED_TARGET: ${{ matrix.target }}
-        run: >-
-          python -c "import json,os; r=json.load(open('dist/native-candidate/candidate.json'));
-          assert r['os']+'-'+r['arch']==os.environ['EXPECTED_TARGET']"
+        run: |
+          python -c "import json,os; r=json.load(open('dist/native-candidate/candidate.json')); assert r['version']=='0.3.19' and r['os']+'-'+r['arch']==os.environ['EXPECTED_TARGET']; assert r['source_sha256']=='5a66b69f6d00586e91fde4f106b286ab59cd3651f8a94a641844e400a2168100'"
+          python -B dist/git-source/scripts/verify_native_router_candidate.py verify --frozen dist/frozen --freeze-sha256 578bca75b580005ed050e25605e0f4a4a6675823f3c2d3877b8d88760a63c634 --candidate dist/native-candidate --output dist/native-candidate/independent-verified.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -82,11 +68,20 @@ jobs:
           retention-days: 7
           path: |
             dist/native-candidate/candidate.json
+            dist/native-candidate/independent-verified.json
             dist/native-candidate/bin/*
             dist/native-candidate/*.txt
             dist/native-candidate/npm/*.tgz
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: frozen-source-evidence-${{ matrix.target }}
+          retention-days: 7
+          path: |
+            dist/frozen/freeze.json
+            dist/frozen/public-export-receipt.json
 
-  assemble:
+  assembly-check:
     needs: frozen
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -101,7 +96,7 @@ jobs:
         with:
           pattern: unsigned-native-candidate-*
           path: dist/candidates
-      - name: Verify the complete matrix and assemble (no publication)
+      - name: Assemble all five platforms without publication
         run: >-
           python scripts/assemble_npm_release.py
           --candidate dist/candidates/unsigned-native-candidate-darwin-arm64
@@ -109,9 +104,9 @@ jobs:
           --candidate dist/candidates/unsigned-native-candidate-linux-arm64
           --candidate dist/candidates/unsigned-native-candidate-linux-x64
           --candidate dist/candidates/unsigned-native-candidate-win32-x64
-          --output dist/npm-release
+          --output dist/npm-assembly-check
       - uses: actions/upload-artifact@v4
         with:
-          name: unpublished-openvegas-ai-matrix
+          name: unpublished-0319-assembly-check-not-native-certified
           retention-days: 7
-          path: dist/npm-release
+          path: dist/npm-assembly-check

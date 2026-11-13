@@ -58,7 +58,7 @@ async def _private_server(argv, env, cwd):
                 while not socket.exists():
                     if process.returncode is not None:
                         raise IntegrationError('Private Codex server did not start.')
-                    await asyncio.sleep(.05)
+                    await asyncio.sleep(.01)
             socket.chmod(0o600)
             _OWNED_SERVERS[endpoint] = process
             _POLICY_CONTEXT[endpoint] = _launch_scope(env, cwd)
@@ -298,16 +298,40 @@ def _validate_grant_catalog(value, *, version, session_id, catalog_hash, identif
     return catalog
 
 
-async def _grant_catalog(broker, token, *, version, session_id, catalog_hash, identifiers):
-    """Opt-in bounded metadata read from the already selected backend only."""
+def _reviewed_catalog_mode(*, version, session_id, catalog_hash, grant_status=None):
+    """Only an absent advertisement is legacy; a broken one never downgrades."""
+    import re
+
+    setting = os.getenv('OPENVEGAS_CODEX_CATALOG_DELIVERY', '')
+    if setting not in ('', 'reviewed-v1'):
+        raise IntegrationError('Unsupported Codex metadata delivery mode.')
+    if grant_status is not None and not isinstance(grant_status, dict):
+        raise IntegrationError('Invalid native metadata capability response.')
+    if grant_status is not None and 'codex_catalog' in grant_status:
+        capability = grant_status['codex_catalog']
+        if (not isinstance(capability, dict) or set(capability) != {
+                'mode', 'client_version', 'session_id', 'catalog_hash'}
+                or capability.get('mode') != 'reviewed-v1'
+                or capability.get('client_version') != version
+                or capability.get('session_id') != session_id
+                or grant_status.get('session_id') != session_id
+                or not isinstance(catalog_hash, str) or not re.fullmatch(r'[a-f0-9]{64}', catalog_hash)
+                or capability.get('catalog_hash') != catalog_hash):
+            raise IntegrationError('Reviewed metadata capability does not match this grant/client; '
+                                   'no bundled fallback.')
+        return True
+    return setting == 'reviewed-v1'
+
+
+async def _grant_catalog(broker, token, *, version, session_id, catalog_hash, identifiers,
+                         grant_status=None):
+    """Advertised (or explicitly requested) read from the selected backend only."""
     import httpx
 
     from .host_adapter import require_version
-    setting = os.getenv('OPENVEGAS_CODEX_CATALOG_DELIVERY', '')
-    if not setting:
+    if not _reviewed_catalog_mode(version=version, session_id=session_id, catalog_hash=catalog_hash,
+                                  grant_status=grant_status):
         return None
-    if setting != 'reviewed-v1':
-        raise IntegrationError('Unsupported Codex metadata delivery mode.')
     require_version('codex', version)
     import re
     if (not isinstance(token, str) or not re.fullmatch(r'ov_native_[A-Za-z0-9_-]{16,128}', token)
@@ -323,9 +347,12 @@ async def _grant_catalog(broker, token, *, version, session_id, catalog_hash, id
             return result
 
         async with asyncio.timeout(10):
-            async with broker.http.stream('GET', '/integrations/native/codex/catalog',
+            scoped_stream = getattr(broker, 'native_catalog_stream', None)
+            stream = (scoped_stream(token=token, client_version=version) if scoped_stream is not None
+                      else broker.http.stream('GET', '/integrations/native/codex/catalog',
                     params={'client_version': version}, follow_redirects=False,
-                    headers={'Authorization': 'Bearer ' + token, 'Accept-Encoding': 'identity'}) as response:
+                    headers={'Authorization': 'Bearer ' + token, 'Accept-Encoding': 'identity'}))
+            async with stream as response:
                 if (response.status_code != 200
                         or response.headers.get('content-encoding', 'identity') != 'identity'):
                     raise IntegrationError('Reviewed Codex metadata unavailable; no bundled fallback or retry.')
@@ -340,7 +367,7 @@ async def _grant_catalog(broker, token, *, version, session_id, catalog_hash, id
         return value
     except IntegrationError:
         raise
-    except (httpx.HTTPError, TimeoutError, ValueError, TypeError, KeyError, RecursionError):
+    except (httpx.HTTPError, TimeoutError, ValueError, TypeError, KeyError, AttributeError, RecursionError):
         raise IntegrationError('Reviewed Codex metadata could not be verified; no fallback or retry.') from None
 
 
@@ -479,7 +506,7 @@ async def route(executable, backend, model, env, *, local_tools_only=True, allow
                 while not Path(socket).exists():
                     if process.returncode is not None:
                         raise IntegrationError('Codex could not open its local billing connection. No prompt submitted.')
-                    await asyncio.sleep(.05)
+                    await asyncio.sleep(.01)
                 os.chmod(socket, 0o600)
                 async with unix_connect(socket, open_timeout=3, max_size=1024 * 1024) as connection:
                     await rpc(connection, 1, 'initialize', {

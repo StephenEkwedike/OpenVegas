@@ -178,8 +178,10 @@ def run(shell):
     wallet_buffer = bytearray()
     wallet = WalletScreen()
     wallet_resized = False
-    from .local_controls import LocalKeys
+    from .local_controls import EscapeObserver, LocalKeys
     keys = LocalKeys()
+    paste_keys = LocalKeys()
+    escape = EscapeObserver()
     key_time = 0
     size = fcntl.ioctl(0, termios.TIOCGWINSZ, bytes(8))
     token = secrets.token_hex(32)
@@ -213,11 +215,34 @@ def run(shell):
                     pass
 
     def close_wallet():
-        nonlocal wallet_connection
+        nonlocal wallet_connection, escape
         if wallet_connection is not None:
             wallet_connection.close()
             wallet_connection = None
         wallet_buffer.clear()
+        escape = EscapeObserver()
+
+    def cancel_questions(questions):
+        for question in questions:
+            if (wallet_connection is not None and isinstance(question, str)
+                    and re.fullmatch('[a-f0-9]{32}', question)):
+                try:
+                    wallet_connection.sendall(json.dumps({
+                        'control': 'cancel_question', 'question': question,
+                        **fence.fields()}).encode() + b'\n')
+                except OSError:
+                    close_wallet()
+
+    def acknowledge_question():
+        question = wallet.payload.get('cancel_question')
+        if (wallet_connection is not None and escape.state == 'text'
+                and isinstance(question, str) and re.fullmatch('[a-f0-9]{32}', question)):
+            try:
+                wallet_connection.sendall(json.dumps({
+                    'control': 'observe_question', 'question': question,
+                    **fence.fields()}).encode() + b'\n')
+            except OSError:
+                close_wallet()
 
     def update_wallet():
         nonlocal wallet_resized
@@ -316,6 +341,8 @@ def run(shell):
         tty.setraw(0, termios.TCSANOW)
         while True:
             if input_nonce is None and keys.pending and time.monotonic() - key_time > keys.wait_seconds:
+                cancel_questions(escape.flush())
+                acknowledge_question()
                 write_all(host_fd, keys.flush())
             if wallet_resized:
                 update_wallet()
@@ -399,6 +426,7 @@ def run(shell):
                                 wallet.rows, wallet.columns = rows, columns
                                 modes = Modes()
                                 keys = LocalKeys()
+                                paste_keys = LocalKeys()
                                 write_all(1, terminal_reset(clear=True))
                                 resize()
                                 candidate.sendall(b'{"reset":true}\n')
@@ -488,7 +516,13 @@ def run(shell):
                                 payload['controls'] = (payload.get('controls') is True and
                                     payload.get('controls_shortcut') == LOCAL_CONTROL_SHORTCUT)
                                 wallet_label(payload, wallet.columns)
+                                question = payload.get('cancel_question')
+                                if isinstance(question, str) and re.fullmatch('[a-f0-9]{32}', question):
+                                    cancel_questions(escape.advertise(question))
+                                    # Same authenticated stream orders early cancellation
+                                    # before permission to dispatch this queued question.
                                 wallet.payload = payload
+                                acknowledge_question()
                             if len(wallet_buffer) > MAX_MESSAGE:
                                 raise ValueError
                     except (OSError, ValueError, TypeError):
@@ -505,9 +539,22 @@ def run(shell):
                         # game; never carry a partial packet back to the host.
                         write_all(game_fd, data)
                         continue
-                    data, menu = keys.feed(data, not modes.alternate
-                                           and wallet_connection is not None
-                                           and wallet.payload.get('controls') is True)
+                    enabled = (not modes.alternate and wallet_connection is not None
+                               and wallet.payload.get('controls') is True)
+                    forwarded, cancelled, menu = bytearray(), [], False
+                    # Keep lossless paste tracking separate from timed-out key
+                    # forwarding and Escape cancellation. Never flush this
+                    # disabled parser; a lone ESC may begin a delayed paste.
+                    for byte in data:
+                        packet = bytes((byte,))
+                        paste_keys.feed(packet, False)
+                        cancelled.extend(escape.feed(packet, wallet.payload.get('cancel_question')))
+                        chunk, opened = keys.feed(packet, enabled and not paste_keys.paste)
+                        forwarded.extend(chunk)
+                        menu = menu or opened
+                    cancel_questions(cancelled)
+                    acknowledge_question()
+                    data = bytes(forwarded)
                     key_time = time.monotonic()
                     if menu:
                         try:

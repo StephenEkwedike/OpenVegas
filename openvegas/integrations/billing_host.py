@@ -33,6 +33,13 @@ from .use import SOCKET, TOKEN
 ARM_SECONDS = 60
 
 
+def native_router_requested(host, version, env, *, eligible=True):
+    requested = env.get('OPENVEGAS_NATIVE_ROUTER')
+    if requested is not None:
+        return requested == '1'
+    return eligible and (host, version) in {('codex', '0.166.0'), ('claude', '2.1.322')}
+
+
 def _codex_management():
     # Mixed-version installations keep the ordinary native host; they do not
     # silently omit a policy argument when creating a wallet grant.
@@ -232,6 +239,9 @@ class Supervisor:
     async def check_live_source(self, *, preview=False):
         if self.host != 'codex':
             return
+        observe_source = getattr(self.live_owner, 'observe_source', None)
+        if callable(observe_source):
+            return await observe_source(preview=preview)
         _, policy = _codex_management()
         endpoint, identifier, child, gen = self.codex_endpoint, self.identifier, self.child, self.generation
         if not endpoint or child is None or child.returncode is not None:
@@ -297,7 +307,7 @@ class Supervisor:
                     except IntegrationError as exc:
                         if self.provisional is item:
                             self.provisional_reason = str(exc)
-                        await asyncio.sleep(.25)
+                        await asyncio.sleep(.02 if item.guard is not None else .25)
                         continue
                     if (self.provisional is item and self.armed is None and monotonic() < item.expires):
                         require_same_model(item.host_model, model)
@@ -324,7 +334,8 @@ class Supervisor:
                 self.provisional = self.provisional_task = None
                 if item.guard is not None and not transferred and self.live_owner is item.guard.owner:
                     self.local_error = True
-                    self.emit('Native idle or ownership check did not pass. Payer unchanged; no input replayed.')
+                    self.emit('Switch not completed. Payer unchanged. Finish or cancel the task, '
+                              'then request the switch again. Waiting questions were not sent.')
 
     def provisional_finished(self, item):
         # Cancellation before the first coroutine step skips its finally block.
@@ -624,6 +635,16 @@ class Supervisor:
                 guard.release()
 
     def control_event(self, event):
+        if event.get('control') == 'observe_question':
+            transport = getattr(self.live_owner, 'transport', None)
+            if transport is not None and hasattr(transport, 'observe_pending'):
+                transport.observe_pending(event.get('question'))
+            return
+        if event.get('control') == 'cancel_question':
+            transport = getattr(self.live_owner, 'transport', None)
+            if transport is not None and hasattr(transport, 'cancel_pending'):
+                transport.cancel_pending(event.get('question'))
+            return
         if event.get('control') == 'menu':
             try:
                 self.open_controls(menu=True)
@@ -632,7 +653,12 @@ class Supervisor:
 
     def local_status(self):
         item = self.active_intent()
+        transport = getattr(self.live_owner, 'transport', None)
+        owner = self.live_owner if self.live_owner is not None else self.claude_owner
         return {'controls': True, 'local_error': self.local_error,
+                'billing': self.mode,
+                'switch_status': getattr(owner, 'switch_status', None),
+                'cancel_question': getattr(transport, 'pending_cancel', None),
                 **({'switch_on_exit': item.target} if item and self._undelivered is not item else {}),
                 'quota_remaining': self.quota.remaining() if self.mode == 'host' else None}
 
@@ -676,6 +702,23 @@ class Supervisor:
         self.token = staged_token or secrets.token_urlsafe(32)
         self.env[TOKEN] = env[TOKEN] = self.token
         self.transition_state = 'ATTACH_VERIFIED_TARGET' if self.generation > 1 else 'HOST_ACTIVE'
+        claude_router_eligible = (self.host == 'claude' and self.modern_relay
+            and self.generation == 1 and self.mode == 'host'
+            and self.launch_spec.version == '2.1.322' and os.isatty(0) and os.isatty(1))
+        if self.host == 'claude' and native_router_requested(
+                self.host, self.launch_spec.version, self.env, eligible=claude_router_eligible):
+            from .inference_router_claude import ClaudeRouterObserver, ManagedClaudeRouter
+            if not claude_router_eligible:
+                raise IntegrationError('Claude billing router needs a fresh supported managed terminal.')
+            observer = ClaudeRouterObserver()
+            env.update(observer.env)
+            env.setdefault('CLAUDE_CODE_DISABLE_TERMINAL_TITLE', '1')
+            self.claude_owner = ManagedClaudeRouter(self, env, observer)
+            try:
+                return await self.claude_owner.run((*self.launch_spec.original_argv, *observer.argv), env)
+            finally:
+                self.claude_owner = None
+                observer.close()
         if (self.host == 'claude' and self.modern_relay and self.generation == 1
                 and self.mode == 'host' and self.launch_spec.version == '2.1.322'
                 and self.env.get('OPENVEGAS_CLAUDE_GENERATION_SWITCH', '1') == '1'
@@ -707,6 +750,9 @@ class Supervisor:
                         raise
                 else:
                     if self.generation == 1 and self.env.get('OPENVEGAS_CODEX_LIVE_SWITCH', '1') == '1':
+                        if native_router_requested(self.host, self.launch_spec.version, self.env):
+                            from .inference_router_managed import ManagedCodexRouter
+                            return await ManagedCodexRouter(self, env).run(client)
                         from .codex_live_switch import RuntimeOwner
                         return await RuntimeOwner(self, env).run(client)
                     return await self._managed_codex_child(client, env)
@@ -1119,6 +1165,9 @@ class Supervisor:
 
 
 def main(host, args):
+    from .inference_router_fixture import configured
+    if configured() is not None:
+        click.echo('Offline native acceptance: synthetic loopback billing only.', err=True)
     env = dict(native.host_environment() or os.environ)
     # Noninteractive/admin invocations stay completely outside the supervisor.
     from .host_invocation import passthrough

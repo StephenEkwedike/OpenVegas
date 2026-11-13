@@ -113,13 +113,14 @@ class ClaudeRuntimeOwner:
 
     def __init__(self, executable, original_args, original_env, cwd, *, observer,
                  input_fence, launch_prefix=(), stop_grace=.25, version=VERSION,
-                 before_spawn=None, commit=None):
+                 before_spawn=None, commit=None, refuse_input=None):
         _require(version == VERSION and callable(observer) and callable(input_fence)
                  and type(stop_grace) in (int, float) and 0 <= stop_grace <= 5)
         self._executable, self._args = executable, tuple(original_args)
         self._env, self._cwd = dict(original_env), cwd
         self._observer, self._fence = observer, input_fence
         self._before_spawn, self._commit = before_spawn, commit
+        self._refuse_input = refuse_input
         self._prefix, self._grace = tuple(launch_prefix), stop_grace
         self._master, self._slave = os.openpty()
         os.set_blocking(self._master, False)
@@ -203,12 +204,17 @@ class ClaudeRuntimeOwner:
             extra = {} if action == 'capture' and not pending else {'action': action, 'pending': pending}
             result = await self._observer(process=self._process, generation=self._generation,
                                           nonce=nonce, draft=draft, **extra)
+        if action == 'refuse':
+            _require(result is True and self._process.returncode is None)
+            return result
         _require(type(result) is Observation and result.generation == self._generation
                  and result.nonce == nonce and type(result.snapshot) is RuntimeSnapshot
                  and type(result.draft) is ComposerDraft and self._process.returncode is None)
         _require(type(result.pending) is tuple and len(result.pending) <= 128
                  and all(type(item) is PendingPrompt for item in result.pending)
                  and len({item.identifier for item in result.pending}) == len(result.pending))
+        if action == 'capture':
+            _require(result.composer_ready is True)
         if draft is not None:
             _require(result.composer_ready is True and result.draft == draft)
         return result
@@ -305,11 +311,18 @@ class ClaudeRuntimeOwner:
             _require(self._state == 'reserved' and self._reserved_identity == (
                 self._process, self._generation, self._mode, self._wallet)
                 and self._process.returncode is None)
-            await self._observe(action='release')
-            await self._release()
+            try:
+                await self._observe(action='refuse')
+                if self._refuse_input is not None:
+                    self._refuse_input()
+                await self._release()
+            except BaseException:
+                # A missing refusal acknowledgement is not release authority.
+                self._state = 'failed'
+                raise
             self._reserved_identity = None
 
-    async def change(self, target, *, wallet=None, commit=None):
+    async def change(self, target, *, wallet=None, commit=None, check=None):
         self._same_loop()
         async with self._lock:
             _require(self._state in ('active', 'reserved') and target in ('host', 'v') and target != self._mode
@@ -320,8 +333,11 @@ class ClaudeRuntimeOwner:
             self._state = 'changing'
             began = time.monotonic()
             retired = committed = False
+            check = check or (lambda: None)
             try:
+                check()
                 before = await self._observe()
+                check()
                 # Validate prompt-free resume before stopping the current child.
                 resume_argv(self._executable, self._args, before.snapshot)
                 if target == 'v':
@@ -329,22 +345,28 @@ class ClaudeRuntimeOwner:
                     wallet.gate.hold_admission()
                 if self._wallet is not None:
                     self._wallet.gate.seal()
+                    self._wallet.gate.require_transport_drained()
                     self._retired_wallets.append(self._wallet)
                     self._wallet = None
                 retired = True  # Stop uncertainty must never release old input.
                 receipt = await retire_owned_group(self._process, grace_seconds=self._grace)
+                check()
                 await self._launch(target, before.snapshot, wallet)
+                check()
                 after = await self._observe(draft=before.draft, pending=before.pending)
+                check()
                 before.snapshot.require_same_runtime(after.snapshot)
                 _require(after.pending == before.pending)
-                self._snapshot, self._wallet, self._mode = after.snapshot, wallet, target
-                committed = True
                 callback = commit if commit is not None else self._commit
                 if callback is not None:
                     await callback(target, after.snapshot)
+                self._snapshot, self._wallet, self._mode = after.snapshot, wallet, target
+                committed = True
+                check()
                 if wallet is not None:
                     wallet.gate.activate_admission()
                 await self._observe(action='release')
+                check()
                 elapsed = time.monotonic() - began
                 await self._release()
                 self._reserved_identity = None
@@ -352,9 +374,9 @@ class ClaudeRuntimeOwner:
                                   elapsed, after.snapshot)
             except BaseException:
                 self._state = 'failed' if retired else 'reserved'
-                if wallet is not None and not committed:
+                if wallet is not None:
                     wallet.gate.seal()
-                    if wallet not in self._retired_wallets:
+                    if wallet is not self._wallet and wallet not in self._retired_wallets:
                         self._retired_wallets.append(wallet)
                 if retired and not committed:
                     await self._cleanup_failed_child()

@@ -1,0 +1,3 @@
+[console_scripts]
+openvegas = openvegas.cli:cli
+ov = openvegas.cli:cli

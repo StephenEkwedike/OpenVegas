@@ -65,6 +65,14 @@ _ROUTE_FIELDS = {
     "model_catalog_json",
 }
 _SELECTION_FIELDS = {"model", "model_reasoning_effort"}
+_SANDBOX_MODES = {
+    "readOnly": "read-only",
+    "workspaceWrite": "workspace-write",
+    "dangerFullAccess": "danger-full-access",
+}
+_BUILTIN_PROFILES = {":read-only", ":workspace", ":full-access"}
+_APPROVAL_POLICIES = {"on-request", "never"}
+_APPROVAL_REVIEWERS = {"user", "auto_review"}
 
 
 def require_snapshot(value):
@@ -327,14 +335,14 @@ async def _configuration(call, cwd, hook_params):
         "custom policy or account binding",
     )
     _require(
-        effective["default_permissions"] in (None, ":workspace", ":read-only"),
+        effective["default_permissions"] in _BUILTIN_PROFILES | {None},
         "unknown default permissions",
     )
     _require(
-        effective.get("approval_policy") in (None, "on-request")
-        and effective.get("approvals_reviewer") in (None, "user")
-        and effective["sandbox_mode"] in (None, "read-only", "workspace-write"),
-        "only the native user reviewer, on-request approvals and a restricted local sandbox are supported",
+        effective.get("approval_policy") in _APPROVAL_POLICIES | {None}
+        and effective.get("approvals_reviewer") in _APPROVAL_REVIEWERS | {None}
+        and effective["sandbox_mode"] in set(_SANDBOX_MODES.values()) | {None},
+        "unknown native sandbox or approval policy",
     )
     _require(
         (await call("configRequirements/read", {}))["requirements"] is None, "managed requirements"
@@ -426,16 +434,20 @@ async def _resume_snapshot(call, sid, result, *, before, model):
         "resumed a different runtime",
     )
     sandbox, profile = result["sandbox"], result["activePermissionProfile"]
+    # Accept the original native policy, including full access; the complete
+    # policy is fingerprinted below and must match before the payer changes.
+    # This never grants permissions or rewrites the user's configuration.
     _require(
-        sandbox["type"] in {"readOnly", "workspaceWrite"}
-        and sandbox.get("networkAccess") is False
-        and result["approvalPolicy"] == "on-request"
-        and result["approvalsReviewer"] == "user",
+        sandbox["type"] in _SANDBOX_MODES
+        and (type(sandbox.get("networkAccess")) is bool
+             or sandbox["type"] == "dangerFullAccess" and "networkAccess" not in sandbox)
+        and result["approvalPolicy"] in _APPROVAL_POLICIES
+        and result["approvalsReviewer"] in _APPROVAL_REVIEWERS,
         "unverified sandbox, network or approval mode",
     )
     _require(
         profile is None
-        or (profile["id"] in {":read-only", ":workspace"} and not profile.get("extends")),
+        or (profile["id"] in _BUILTIN_PROFILES and not profile.get("extends")),
         "custom permission profile",
     )
     _require(result["runtimeWorkspaceRoots"] == [actual.cwd], "additional runtime roots")
@@ -444,7 +456,7 @@ async def _resume_snapshot(call, sid, result, *, before, model):
     if profile is None:
         _require(
             effective["sandbox_mode"]
-            == {"readOnly": "read-only", "workspaceWrite": "workspace-write"}[sandbox["type"]],
+            == _SANDBOX_MODES[sandbox["type"]],
             "no authoritative profile or explicit matching legacy sandbox",
         )
     policy = {

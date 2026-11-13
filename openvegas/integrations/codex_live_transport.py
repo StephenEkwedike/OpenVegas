@@ -511,7 +511,11 @@ class LiveTransport:
             self._check(expected_generation, "verifying")
             self.attached_resume(self._source_endpoint, self._sid, expected_generation, self._pid)
             if commit is not None:
-                commit()
+                try:
+                    commit()
+                except BaseException:
+                    self._fail()
+                    raise
             self._projection = None
             self._generation += 1
             self._phase = "open"

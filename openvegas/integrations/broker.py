@@ -18,6 +18,10 @@ from openvegas.keychain_access import private_login_files
 from .credentials import Credentials, IntegrationError, backend_url
 
 
+class GrantNotCreated(IntegrationError):
+    """Positive acknowledgement from the wallet's pre-creation balance check."""
+
+
 class Broker:
     def __init__(self, *, backend=None, transport=None):
         self.backend = backend or backend_url()
@@ -35,6 +39,17 @@ class Broker:
                                                headers={"Authorization": "Bearer " + token} if token else {})
         except httpx.HTTPError:
             raise IntegrationError("Cannot reach the OpenVegas backend; no credentials were changed.") from None
+        if (method == 'POST' and path == '/native/sessions'
+                and isinstance(data, dict) and data.get('billing_mode') == 'wallet'
+                and response.status_code == 402):
+            try:
+                rejection = response.json()
+            except ValueError:
+                rejection = None
+            # Exact existing server contract, before budget.create. No generic
+            # HTTP failure, timeout, or other 402 establishes a mutation outcome.
+            if rejection == {'detail': 'No $V is available. No wallet grant was created.'}:
+                raise GrantNotCreated('No $V is available. No wallet grant was created.', 402)
         if response.status_code in {403, 503}:
             try:
                 detail = response.json().get('detail')

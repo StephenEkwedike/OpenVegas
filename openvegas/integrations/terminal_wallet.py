@@ -179,6 +179,15 @@ def wallet_label(payload, columns):
         value = {"loading": "wallet loading", "login": "sign in to OpenVegas",
                  "unavailable": "wallet unavailable"}.get(state, "wallet unavailable")
     mode = "$V billing" if payload.get("billing") == "v" else "host billing"
+    switch = payload.get('switch_status')
+    if switch in ('pending', 'timed_out', 'blocked', 'refreshing'):
+        notice = {'pending': 'Switching... payer not confirmed',
+                  'refreshing': 'Billing confirmed; updating display'}.get(
+                      switch, 'Switch not completed; input held')
+        for text in (f' OPENVEGAS / {value} / {notice}', notice):
+            if len(text) < columns:
+                return text
+        return notice[:max(0, columns - 1)]
     target = payload.get('switch_on_exit')
     if target in ('v', 'host') and target != payload.get('billing') and payload.get('billing') in ('host', 'v'):
         current = '$V' if payload['billing'] == 'v' else 'host'

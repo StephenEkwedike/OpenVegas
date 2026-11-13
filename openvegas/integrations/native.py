@@ -523,7 +523,7 @@ async def launch(host, model, limit_v, max_output_tokens=2048, *, yes=False, dry
                 binding = {'version': info['version'], 'session_id': result['session_id'],
                            'catalog_hash': result.get('catalog_hash')}
                 catalog = await _grant_catalog(broker, session_token, **binding,
-                                               identifiers=result['allowed_models'])
+                                               identifiers=result['allowed_models'], grant_status=status)
                 if catalog is not None:
                     catalog_options = {'reviewed_catalog': catalog, 'catalog_binding': binding}
             async with route(info['executable'], backend, model, env,

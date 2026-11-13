@@ -503,6 +503,7 @@ export function register(on) {
     const epoch = session;
     const requested = (e.args || '').trim().toLowerCase();
     const action = CONTROLS.aliases[requested] || requested;
+    if (action === 'quota') return { text: 'Host quota is not available from this command. Check the host usage display; the OpenVegas HUD can show a low-quota warning when the host supplies usage data.' };
     if (action === 'use v' || action === 'use host') {
       if (activeTurn || gameRequestPending) return { text: 'Finish the active turn or game before switching billing.' };
       try {

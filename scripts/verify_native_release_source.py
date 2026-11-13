@@ -67,7 +67,7 @@ def read(root, name, expected):
 
 def verify(source, exported=None):
     record = json.loads((source / 'native-release-inputs.json').read_bytes(), object_pairs_hook=unique_object)
-    if record['version'] != '0.3.18' or record['native_paid_enabled'] is not False:
+    if record['version'] != '0.3.19' or record['native_paid_enabled'] is not False:
         raise ValueError('Unexpected release contract')
     repository_files = normalized_files(record['repository_files'])
     client_files = normalized_files(record['client_files'])

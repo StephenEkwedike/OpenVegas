@@ -158,7 +158,7 @@ def make_server(host: str, broker: Broker | None = None):
                 "gateway_available": state.get("gateway_available", False),
                 "message": "$V cannot refill Claude or ChatGPT subscription quota. "
                            "Use " + ('/openvegas' if host == 'claude' else '$openvegas') +
-                           " use v to review a direct API quote and session ceiling in this terminal; use host switches back. "
+                           " use v to pay for eligible requests from your available wallet balance; use host switches back. "
                            "The pre-model host command requires explicit consent and a configured backend. "
                            "Never execute a billing switch through a model's shell tool or change billing automatically."}
 

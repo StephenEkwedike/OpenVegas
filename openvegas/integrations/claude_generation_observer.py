@@ -101,7 +101,7 @@ class ClaudeGenerationObserver:
         _require(not self._closed and all(isinstance(value, str) and re.fullmatch(r'[a-f0-9]{32}', value)
                                          for value in (generation, nonce))
                  and (draft is None or type(draft) is ComposerDraft)
-                 and action in ('capture', 'release') and type(pending) is tuple
+                 and action in ('capture', 'release', 'refuse') and type(pending) is tuple
                  and len(pending) <= 128 and all(type(item) is PendingPrompt for item in pending))
         async with self._lock:
             request = {'generation': generation, 'nonce': nonce, 'action': action,
@@ -120,9 +120,18 @@ class ClaudeGenerationObserver:
                         response = {}
                     if (isinstance(response, dict) and response.get('generation') == generation
                             and response.get('nonce') == nonce):
+                        if action == 'refuse':
+                            _require(response.get('action') == 'refuse'
+                                     and response.get('refused') is True
+                                     and response.get('pending') == [])
+                            return True
                         _require(response.get('controls_ready') is True
                                  and type(response.get('composer_ready')) is bool
                                  and not response.get('untransferable'))
+                        if action == 'capture':
+                            if response.get('boundary_ready') is not True or not response['composer_ready']:
+                                raise IntegrationError('Claude is busy or not ready. Cancel the active turn '
+                                                       'yourself, then retry switching while idle.')
                         try:
                             snapshot = RuntimeSnapshot(**response['snapshot'])
                             actual = ComposerDraft(**response['draft'])

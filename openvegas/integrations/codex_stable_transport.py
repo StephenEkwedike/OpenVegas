@@ -57,6 +57,12 @@ class StableTransport(LiveTransport):
         self._epoch = 0
         self._hello = None
         self._pending = None
+        self._pending_cancel = None
+        self.pending_changed = lambda: None
+        self.require_cancel_ack = False
+        self._pending_observed = asyncio.Event()
+        self._cancelled_pending = None
+        self._refusal_revision = 0
         self._internal = {}
         self._internal_prefix = "ov-internal-" + secrets.token_hex(16) + "-"
         self._serial = 0
@@ -77,6 +83,10 @@ class StableTransport(LiveTransport):
 
     async def _reject_pending(self, message):
         pending, self._pending = self._pending, None
+        self._pending_cancel = None
+        self._pending_observed.set()
+        self.pending_changed()
+        self._cancelled_pending = None
         if pending is not None:
             _, key, _, timer, _ = pending
             if timer is not asyncio.current_task():
@@ -85,12 +95,19 @@ class StableTransport(LiveTransport):
             try:
                 if self._client is not None and self._client.state is State.OPEN:
                     await self._refuse(self._client, {"id": key}, message)
+            except BaseException:
+                self._fail()
+                raise
             finally:
                 self._rejecting_ids.discard(key)
 
     def _reject_later(self, message):
         # Detach the payload synchronously before opening the original route.
         pending, self._pending = self._pending, None
+        self._pending_cancel = None
+        self._pending_observed.set()
+        self.pending_changed()
+        self._cancelled_pending = None
         if pending is None:
             return
         _, key, _, timer, _ = pending
@@ -113,13 +130,34 @@ class StableTransport(LiveTransport):
 
     def release_intent(self, generation, guard):
         if super().release_intent(generation, guard):
+            self._refusal_revision += 1
             self._reject_later("Not sent: billing switch was refused; original payer unchanged.")
+            return True
+        return False
+
+    @property
+    def pending_cancel(self):
+        return self._pending_cancel if self._pending is not None else None
+
+    def cancel_pending(self, nonce):
+        # The authenticated relay echoes the nonce displayed for this exact
+        # unsent question. Delayed Escape cannot cancel a successor question.
+        if (not isinstance(nonce, str) or self._pending is None
+                or nonce != self._pending_cancel or self._phase in {'failed', 'closed'}):
+            return False
+        self._reject_later('Not sent: waiting question cancelled with Escape.')
+        return True
+
+    def observe_pending(self, nonce):
+        if isinstance(nonce, str) and self._pending is not None and nonce == self._pending_cancel:
+            self._pending_observed.set()
             return True
         return False
 
     async def thaw(self, generation):
         async with self._lock:
             self._check(generation, "frozen")
+            self._refusal_revision += 1
             await self._reject_pending("Not sent: billing switch was refused; original payer unchanged.")
             self._proof = None
             self._phase = "open"
@@ -238,28 +276,48 @@ class StableTransport(LiveTransport):
             self._fail()
             raise
 
-    async def admit(self, generation, *, commit=None):
+    async def admit_rejected(self, generation, *, commit):
+        """Restore a verified original payer without replaying held questions."""
+        await self.admit(generation, commit=commit, reject_pending=True)
+
+    async def admit(self, generation, *, commit=None, reject_pending=False):
         async with self._lock:
             self._check(generation, "verifying")
             self.attached_resume(self._source_endpoint, self._sid, generation, self._pid)
             if not callable(commit):
                 raise TransportRefused("An atomic payer commit is required.")
-            commit()
-            self._generation += 1
-            self._phase = "open"
-            self._projection = None
             try:
+                if reject_pending:
+                    await self._reject_pending('Not sent: wallet grant refused; original payer restored.')
+                    # Invalidate frames received during the refusal send, too.
+                    self._refusal_revision += 1
+                elif self._pending is not None and self.require_cancel_ack:
+                    try:
+                        async with asyncio.timeout(3):
+                            await self._pending_observed.wait()
+                    except TimeoutError:
+                        await self._reject_pending('Not sent: terminal cancellation acknowledgement unavailable.')
+                commit()
+                self._generation += 1
+                self._phase = "open"
+                self._projection = None
                 async with asyncio.timeout(_BOOTSTRAP_FLUSH_SECONDS):
                     for raw in self._deferred:
                         await _send(self._client, raw)
                 self._deferred.clear()
                 self._deferred_size = 0
                 pending, self._pending = self._pending, None
+                self._pending_cancel = None
+                self.pending_changed()
+                cancelled, self._cancelled_pending = self._cancelled_pending, None
                 if pending is not None:
                     raw, key, admitted_generation, timer, deadline = pending
                     timer.cancel()
                     if admitted_generation != generation or key in self._out:
                         raise TransportUncertain("Queued turn identity changed.")
+                    if cancelled is pending:
+                        await self._refuse(self._client, {"id": key}, "Not sent: waiting question cancelled.")
+                        return
                     if asyncio.get_running_loop().time() >= deadline:
                         await self._refuse(self._client, {"id": key}, "Not sent: billing verification timed out.")
                         return
@@ -289,10 +347,24 @@ class StableTransport(LiveTransport):
 
         self._pending = (raw, key, self._generation, asyncio.create_task(expiry()),
                          asyncio.get_running_loop().time() + 30)
+        self._pending_cancel = secrets.token_hex(16)
+        self._pending_observed = asyncio.Event()
+        self.pending_changed()
 
     async def _front(self, raw):
         frame = _frame(raw)
         key, method, params = frame.get("id"), frame.get("method"), frame.get("params", {})
+        boundary = (self._intent_revision, self._refusal_revision)
+        generation = self._generation
+        received_fenced = self._intent is not None or self._phase != "open"
+        cancelled = None
+        # Observe cancellation before waiting behind a bootstrap flush. Once a
+        # turn is taken for dispatch, _pending is None and delivery is uncertain.
+        if (method == "turn/interrupt" and self._pending is not None
+                and key is not None and key != self._pending[1] and key not in self._out
+                and key not in self._rejecting_ids and params.get("threadId") == self._sid
+                and not (isinstance(key, str) and key.startswith(self._internal_prefix))):
+            cancelled = self._cancelled_pending = self._pending
         async with self._lock:
             if isinstance(key, str) and key.startswith(self._internal_prefix):
                 raise TransportUncertain("Reserved internal RPC ID.")
@@ -301,18 +373,31 @@ class StableTransport(LiveTransport):
             if key is not None and (key in self._rejecting_ids
                     or self._pending is not None and key == self._pending[1]):
                 raise TransportUncertain("Native request reused a queued turn ID.")
+            if cancelled is not None:
+                if self._pending is cancelled:
+                    await self._reject_pending("Not sent: waiting question cancelled.")
+                await self._refuse(self._client, frame, "Not sent: no target turn had started to interrupt.")
+                return
+            if method and (boundary != (self._intent_revision, self._refusal_revision)
+                    or received_fenced and self._phase == "open" and self._intent is None
+                    and generation == self._generation):
+                await self._refuse(self._client, frame, "Not sent: billing switch changed before input admission.")
+                return
             fenced = self._intent is not None or self._phase != "open"
             if fenced:
                 if (self._phase not in ("failed", "closed") and method == "turn/start"
                         and key is not None and params.get("threadId") == self._sid):
                     await self._queue(raw, frame)
                     return
-                if (method == "turn/interrupt" and self._pending is not None
-                        and key is not None and params.get("threadId") == self._sid):
-                    await self._reject_pending("Not sent: waiting question cancelled.")
-                    await self._refuse(self._client, frame, "Not sent: no target turn had started to interrupt.")
-                    return
-                if (self._phase == "open" and self._intent is not None
+                if (getattr(self, 'request_boundary', False)
+                        and self._phase not in ('failed', 'closed')
+                        and ((method is None and key in self._in)
+                             or method in _READ
+                             or method == 'turn/interrupt' and params.get('threadId') == self._sid)):
+                    # Native permission replies, reads and cancellation do not
+                    # pick a payer; the fixed inference endpoint owns admission.
+                    pass
+                elif (self._phase == "open" and self._intent is not None
                         and method is not None and self._intent_allows(self._intent, method, params)):
                     pass
                 else:
@@ -363,12 +448,13 @@ class StableTransport(LiveTransport):
                                                    "attestation/")) or method == "account/logout"):
                             raise TransportUncertain("Authentication cannot cross this managed connection.")
                         if key is not None:
-                            if self._phase != "open" or self._intent is not None:
+                            if ((self._phase != "open" or self._intent is not None)
+                                    and not getattr(self, 'request_boundary', False)):
                                 raise TransportUncertain("Server requested new work during billing fence.")
                             if key in self._in or len(self._in) >= _MAX_PENDING:
                                 raise TransportUncertain("Ambiguous server request.")
                             self._in[key] = method
-                        elif self._phase == "frozen":
+                        elif self._phase == "frozen" and not getattr(self, 'request_boundary', False):
                             self._dirty = True
                     else:
                         if key not in self._out:

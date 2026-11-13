@@ -13,6 +13,7 @@ import time
 from urllib.parse import urlsplit
 
 from . import native
+from .broker import GrantNotCreated
 from .claude_http_policy import VERSION, RequestRoutes, WalletRoute, _endpoint, _require
 from .credentials import IntegrationError
 
@@ -60,8 +61,12 @@ class WalletGrant:
         # An expiry is conservatively measured BEFORE the request, not after a
         # potentially delayed response. This is admission, not a spending cap.
         issued = self.wall_clock()
-        grant = await self.broker.request('POST', '/native/sessions', token=device, data={
-            **selection, 'billing_mode': 'wallet', 'confirmed': True, 'pricing_fingerprint': fingerprint})
+        try:
+            grant = await self.broker.request('POST', '/native/sessions', token=device, data={
+                **selection, 'billing_mode': 'wallet', 'confirmed': True, 'pricing_fingerprint': fingerprint})
+        except GrantNotCreated:
+            self.state = 'rejected'
+            raise
         if isinstance(grant, dict) and isinstance(grant.get('token'), str) and re.fullmatch(
                 r'ov_native_[A-Za-z0-9_-]{16,128}', grant['token']):
             self.token, self.state = grant['token'], 'issued'
@@ -96,7 +101,7 @@ class WalletGrant:
 
     @property
     def released(self):
-        return self.state in {'new', 'checking', 'closed'}
+        return self.state in {'new', 'checking', 'closed', 'rejected'}
 
 
 class Controller:

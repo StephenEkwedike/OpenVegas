@@ -114,3 +114,90 @@ class LocalKeys:
         data = bytes(self.pending)
         self.pending.clear()
         return data
+
+
+class EscapeObserver:
+    """Observe cancel presses without consuming/replaying native input bytes."""
+    def __init__(self):
+        self.state, self.sequence, self.question = 'text', bytearray(), None
+        self.paste = False
+        self.bel = False
+        self.submitted = False
+        self.early = False
+        self.awaiting = False
+
+    def advertise(self, question):
+        """Bind only an uninterrupted Enter/Escape to its first queued turn."""
+        if question is None:
+            return []
+        if self.awaiting and self.state in ('escape', 'csi'):
+            self.question, self.awaiting = question, False
+        if self.early:
+            self.early = False
+            return [question]
+        return []
+
+    def _cancel(self):
+        self.submitted = False
+        if self.question is not None:
+            self.awaiting = False
+            return [self.question]
+        self.early = self.early or self.awaiting
+        self.awaiting = False
+        return []
+
+    def feed(self, data, question):
+        cancelled = []
+        for byte in data:
+            if self.state == 'string':
+                if byte == 7 and self.bel:
+                    self.state = 'text'
+                elif byte == 27:
+                    self.state = 'string_escape'
+            elif self.state == 'string_escape':
+                self.state = 'text' if byte == 92 else 'string'
+            elif self.state == 'escape':
+                if byte == 91:
+                    self.state, self.sequence = 'csi', bytearray()
+                elif byte in (93, 80, 94, 95, 88):
+                    self.state, self.bel = 'string', byte == 93
+                    self.early = self.submitted = self.awaiting = False
+                elif byte == 79:
+                    self.state = 'ss3'
+                    self.early = self.submitted = self.awaiting = False
+                else:
+                    self.state = 'text'  # Alt chords are not bare Escape.
+                    self.early = self.submitted = self.awaiting = False
+            elif self.state == 'ss3':
+                self.state = 'text'
+            elif self.state == 'csi':
+                if len(self.sequence) < 128:
+                    self.sequence.append(byte)
+                if 64 <= byte <= 126:
+                    value = bytes(self.sequence)
+                    if value in (LocalKeys.START[2:], LocalKeys.END[2:]):
+                        self.paste = value == LocalKeys.START[2:]
+                    elif (not self.paste and value in (
+                            b'27u', b'27;1u', b'27;1:1u', b'27;1:2u', b'27;1;27~')):
+                        cancelled.extend(self._cancel())
+                        self.state = 'text'
+                        continue
+                    self.early = self.awaiting = False
+                    self.submitted = not self.paste and value in (b'13u', b'13;1u', b'13;1:1u', b'27;1;13~')
+                    self.state = 'text'
+            elif byte == 27:
+                self.state = 'escape'
+                self.question = None if self.paste else question
+                self.awaiting = not self.paste and question is None and self.submitted
+            else:
+                # A new edit/submission invalidates an unbound cancellation.
+                # Never apply an old Escape to an identical resubmission.
+                self.early = self.awaiting = False
+                self.submitted = not self.paste and byte in (10, 13)
+        return cancelled
+
+    def flush(self):
+        if self.state != 'escape':
+            return []
+        self.state = 'text'
+        return self._cancel()

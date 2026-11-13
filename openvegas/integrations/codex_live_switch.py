@@ -14,7 +14,7 @@ import inspect
 import os
 import re
 import secrets
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -22,12 +22,13 @@ from time import monotonic
 
 from . import codex_handoff_policy as policy
 from . import native
-from .broker import Broker
+from .broker import Broker, GrantNotCreated
 from .credentials import IntegrationError
 
 HISTORY_PAGE_SIZE = 128
 HISTORY_MAX_PAGES = 64
 HISTORY_TIMEOUT = 10
+SWITCH_SECONDS = 3.5
 
 
 def require(value, message):
@@ -87,6 +88,7 @@ class GrantBoundary:
 
     def __init__(self, broker, selection):
         self._broker = broker
+        self._catalog_backend = getattr(broker, "backend", None)
         self.selection = selection
         self.state = "new"
         self._grant_digest = None
@@ -100,6 +102,33 @@ class GrantBoundary:
     @property
     def backend(self):
         return self._broker.backend
+
+    @asynccontextmanager
+    async def native_catalog_stream(self, *, token, client_version):
+        """One fixed, read-only metadata route for this boundary's issued grant."""
+        from .host_adapter import require_version
+
+        require_version("codex", client_version)
+
+        def check():
+            require(
+                self.state == "issued" and isinstance(token, str)
+                and hashlib.sha256(token.encode()).digest() == self._grant_digest
+                and isinstance(self._catalog_backend, str)
+                and self._broker.backend == self._catalog_backend
+                and str(self._broker.http.base_url).rstrip("/") == self._catalog_backend.rstrip("/"),
+                "Metadata read requires the same backend and active issued grant.",
+            )
+
+        check()
+        async with self._broker.http.stream(
+            "GET", "/integrations/native/codex/catalog", params={"client_version": client_version},
+            follow_redirects=False,
+            headers={"Authorization": "Bearer " + token, "Accept-Encoding": "identity"},
+        ) as response:
+            check()
+            yield response
+            check()
 
     async def request(self, method, path, *, token=None, data=None):
         call = method, path
@@ -139,7 +168,11 @@ class GrantBoundary:
                 "Unverified or repeated wallet grant refused.",
             )
             self.state = "issue_unknown"
-            result = await self._broker.request(method, path, token=token, data=data)
+            try:
+                result = await self._broker.request(method, path, token=token, data=data)
+            except GrantNotCreated:
+                self.state = "rejected"
+                raise
             bearer = result.get("token") if isinstance(result, dict) else None
             if isinstance(bearer, str) and re.fullmatch(r"ov_native_[A-Za-z0-9_-]{16,128}", bearer):
                 self._grant_digest = hashlib.sha256(bearer.encode()).digest()
@@ -183,7 +216,7 @@ class GrantBoundary:
 
     def require_released(self):
         require(
-            self.state in ("new", "quoting", "quoted", "closed"),
+            self.state in ("new", "quoting", "quoted", "closed", "rejected"),
             "Wallet grant issuance or closure is unconfirmed. No automatic return or retry.",
         )
 
@@ -194,7 +227,8 @@ class LiveSwitch:
     owner operates only on owned native backends. check_owner is synchronous;
     target preparation is responsible for route-auth verification and confirmed
     release of the previous grant. Neither credentials nor prompts enter the
-    transport. A source refusal can thaw only before a detach attempt.
+    transport. A source refusal can thaw only before a detach attempt; an
+    exact no-grant acknowledgement can restore a freshly verified host endpoint.
     """
 
     def __init__(self, transport, owner):
@@ -231,8 +265,13 @@ class LiveSwitch:
                 self.phase = "source_history"
                 history = await owner.history(owner.source_endpoint, ticket.identifier)
                 owner.check_owner(ticket, generation)
-            except IntegrationError:
-                await t.thaw(generation)
+            except (IntegrationError, asyncio.CancelledError):
+                # Before detach the original payer is intact. Reject held input
+                # instead of aborting a usable chat on a slow idle/history read.
+                from .codex_billing_route import _settle
+                self.uncertain = True
+                await _settle(asyncio.create_task(t.thaw(generation)))
+                self.uncertain = False
                 raise
             self.uncertain = True  # Includes cancellation *during* detach.
             try:
@@ -255,7 +294,16 @@ class LiveSwitch:
             await owner.retire_source(ticket, source)
             owner.check_owner(ticket, generation)
             self.phase = "target_prepare"
-            endpoint = await owner.prepare_target(ticket, source)
+            rejected = None
+            try:
+                endpoint = await owner.prepare_target(ticket, source)
+            except GrantNotCreated as exc:
+                require(ticket.source == 'host' and ticket.target == 'v'
+                        and callable(getattr(t, 'admit_rejected', None)),
+                        'Original payer restoration is unavailable; input remains held.')
+                self.phase = 'source_restore'
+                endpoint = await owner.restore_rejected_wallet(ticket, source)
+                rejected = exc
             require(endpoint != source._runtime, "Source endpoint cannot be its own successor.")
             owner.check_owner(ticket, generation)
             self.phase = "attach"
@@ -269,11 +317,19 @@ class LiveSwitch:
             )
             owner.check_owner(ticket, generation)
             self.phase = "admit"
-            await t.admit(generation, commit=lambda: owner.commit(ticket))
+            if rejected is None:
+                await t.admit(generation, commit=lambda: owner.commit(ticket))
+            else:
+                await t.admit_rejected(generation, commit=lambda: owner.restore_commit(ticket))
             self.uncertain = False
-            self.phase = "committed"
+            self.phase = "committed" if rejected is None else 'refused_restored'
+            if rejected is not None:
+                raise rejected
         except asyncio.CancelledError:
-            self.uncertain = self.phase != "preflight"
+            # Mutation uncertainty is set before detach, not inferred from a
+            # timer. A completed pre-detach thaw remains a safe refusal.
+            if self.phase == 'freeze' and t.state not in ('open', 'frozen'):
+                self.uncertain = True
             raise
         except TransportRefused:
             raise IntegrationError(
@@ -308,6 +364,8 @@ class IntentGuard:
             return False
         released = self.owner.transport.release_intent(self.generation, self.token)
         self.owner.intent = None
+        if not (self.owner.task and not self.owner.task.done()):
+            self.owner.finish_switch_window()
         return released
 
 
@@ -326,6 +384,40 @@ class RuntimeOwner:
         self.grant = None
         self.intent = None
         self._selection = None
+        self.switch_status = None
+        self.switch_deadline = None
+        self._switch_timer = None
+
+    def start_switch_window(self):
+        self.switch_deadline = monotonic() + SWITCH_SECONDS
+        self.switch_status = 'pending'
+        self._switch_timer = asyncio.get_running_loop().call_later(SWITCH_SECONDS, self.expire_switch)
+        self.s.wallet_status_changed.set()
+
+    def expire_switch(self):
+        if self.switch_status != 'pending':
+            return
+        self.switch_status = 'timed_out'
+        self.s.emit('Switch not completed in time. No new payer confirmed; input stays held '
+                    'until the current billing check is safely settled. No automatic retry.')
+        self.s.wallet_status_changed.set()
+        task = self.task if self.task and not self.task.done() else self.s.provisional_task
+        if task is not None and task is not asyncio.current_task() and not task.done():
+            task.cancel()
+
+    def finish_switch_window(self, *, committed=False):
+        if self._switch_timer is not None:
+            self._switch_timer.cancel()
+            self._switch_timer = None
+        if committed or not self.switch.uncertain:
+            self.switch_status = None
+            self.switch_deadline = None
+        self.s.wallet_status_changed.set()
+
+    def require_switch_window(self):
+        if self.switch_deadline is not None and monotonic() >= self.switch_deadline:
+            self.expire_switch()
+            raise IntegrationError('Switch deadline expired; no late payer commit.')
 
     async def run(self, argv):
         from .codex_billing_route import host_server
@@ -365,6 +457,9 @@ class RuntimeOwner:
                 s.emit(s.codex_unavailable + ' Starting the original host without handoff.')
                 return await s._terminal_child([s.executable, *s.launch_spec.original_argv], self.env)
             async with LiveTransport(self.source_endpoint, on_notice=s.emit) as self.transport:
+                if hasattr(self.transport, 'pending_changed'):
+                    self.transport.require_cancel_ack = True
+                    self.transport.pending_changed = s.wallet_status_changed.set
                 self.switch = LiveSwitch(self.transport, self)
                 s.codex_endpoint, s.live_owner = self.source_endpoint, self
                 try:
@@ -419,6 +514,7 @@ class RuntimeOwner:
         except (TransportRefused, TransportUncertain):
             raise IntegrationError("Cannot guard this native input route. No switch started.") from None
         self.intent = IntentGuard(self, t.generation, token, target)
+        self.start_switch_window()
         return self.intent
 
     def begin(self, item):
@@ -435,16 +531,26 @@ class RuntimeOwner:
             await self.switch.change(ticket)
             if not self.ending and self.s.child.returncode is None:
                 await self.replace_wallet(ticket.target)
-        except IntegrationError:
+        except (IntegrationError, asyncio.CancelledError) as exc:
+            if isinstance(exc, asyncio.CancelledError) and self.switch_status != 'timed_out':
+                raise
             self.s.local_error = True
+            if self.switch.uncertain:
+                self.switch_status = 'blocked'
             # No arbitrary native/transport diagnostics in the user's terminal.
             message = (
                 "Live billing transition is uncertain. No fallback or retry; exit and inspect the grant."
                 if self.switch.uncertain
-                else "Live switch refused. Original payer unchanged; no retry."
+                else ("No $V is available. Host billing restored; waiting question was not sent."
+                      if self.switch.phase == 'refused_restored'
+                      else "Switch not completed. Original payer unchanged. Finish or cancel the task, "
+                           "then request the switch again; waiting questions were not sent.")
             )
             self.s.provisional_reason = message
             self.s.emit(message + " Stage: " + self.switch.phase + ".")
+            if (self.switch.phase == 'refused_restored' and not self.switch.uncertain
+                    and not self.ending and self.s.child.returncode is None):
+                await self.replace_wallet('host')
             if self.switch.uncertain and self.wallet_task and self.source_endpoint:
                 # The front is aborted. Do not leave a known grant usable
                 # merely because the disconnected TUI has not exited yet.
@@ -455,9 +561,10 @@ class RuntimeOwner:
                 await self.stop_server()
         finally:
             self._selection = None
-            self.s.wallet_status_changed.set()
+            self.finish_switch_window()
 
     def check_owner(self, ticket, generation):
+        self.require_switch_window()
         s = self.s
         require(
             not self.ending
@@ -584,7 +691,8 @@ class RuntimeOwner:
             policy.assert_same_policy(self.original, source)
         else:
             self.original = source
-        await self.replace_wallet(None)
+        # The HUD belongs to the unchanged outer terminal lease, not the
+        # retiring app-server. Its status reads the atomically committed payer.
         if self.grant is None:
             await self.stop_server()
         else:
@@ -695,10 +803,38 @@ class RuntimeOwner:
             task = self.wallet_task = asyncio.create_task(launch())
             done, _ = await asyncio.wait((ready, task), return_when=asyncio.FIRST_COMPLETED)
             if task in done:
-                await task
+                try:
+                    await task
+                except GrantNotCreated:
+                    # The launcher has completed, closed its broker and positively
+                    # acknowledged no grant. No wallet runtime was started.
+                    self.wallet_task = self.release = None
+                    raise
                 raise IntegrationError("No verified wallet endpoint was produced.")
             ep = ready.result()
         return ep
+
+    async def restore_rejected_wallet(self, ticket, source):
+        from .codex_billing_route import host_server
+
+        require(ticket.source == 'host' and ticket.target == 'v'
+                and self.wallet_task is None and self.grant is None
+                and self.source_endpoint is None,
+                'Wallet refusal did not establish a clean original-payer boundary.')
+        endpoint = await self.servers.enter_async_context(
+            host_server(self.executable, self.env, cwd=self.cwd))
+        self.source_endpoint = endpoint
+        await policy.verify_target(endpoint, source, model=ticket.host_model)
+        return endpoint
+
+    def restore_commit(self, ticket):
+        self.require_switch_window()
+        require(self.s.mode == ticket.source == 'host', 'Original payer identity changed.')
+        self.s.intent_revision += 1
+        self.s.codex_endpoint = self.source_endpoint
+        self.s.transition_state = 'MODE_COMMITTED'
+        self.finish_switch_window(committed=True)
+        self.switch_status = 'refreshing'
 
     async def verify_attached(self, ticket, endpoint, source):
         await policy.verify_attached_target(
@@ -711,12 +847,15 @@ class RuntimeOwner:
         )
 
     def commit(self, ticket):
+        self.require_switch_window()
         s = self.s
         s.intent_revision += 1  # Invalidate pending menu/hook checks on the old payer.
         s.mode, s.codex_endpoint = ticket.target, self.source_endpoint
         if ticket.target == "v":
             s.restore_model = ticket.host_model
         s.transition_state = "MODE_COMMITTED"
+        self.finish_switch_window(committed=True)
+        self.switch_status = 'refreshing'
         s.emit(
             "Native payer now "
             + ("$V" if s.mode == "v" else "host")
