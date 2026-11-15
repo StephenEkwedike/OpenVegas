@@ -565,7 +565,8 @@ await scheduled.shift()(); assert.deepEqual(notices,['OpenVegas billing controls
 for (const kind of ['plugin','bridge','sdk']) await events['command.run']($,{args:'v',origin:{kind}});
 assert.equal(seen.length,1);
 const reply=await events['command.run']($,{args:'v',origin:{kind:'composer'}});
-assert.deepEqual(reply,{text:'Payer: v. No prompt sent.'});
+assert.deepEqual(reply,{});
+assert.deepEqual(notices,['OpenVegas billing controls ready.','Payer: v. No prompt sent.']);
 assert.deepEqual(seen,[{event:'ready',value},{event:'start',action:'v'},{event:'observe',challenge:'fresh',value}]);
 """
     driver = tmp_path / "driver.mjs"

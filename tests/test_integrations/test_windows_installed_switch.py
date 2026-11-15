@@ -322,6 +322,22 @@ def test_split_primary_device_query_replies_once_without_typing_a_command():
     assert stream.replies == ['\x1b[?6c']
 
 
+@pytest.mark.parametrize('code,reason', [(0, None), (23, conpty.Failure.BANK),
+                                         (26, conpty.Failure.LAUNCH_EXCEPTION), (1, conpty.Failure.EXIT_CODE)])
+def test_console_requires_confirmed_launcher_exit(code, reason):
+    class Done:
+        def isalive(self):
+            return False
+
+    term = conpty.Terminal(Done(), exit_code=lambda: code)
+    if reason is None:
+        term.require_success()
+    else:
+        with pytest.raises(conpty.CheckpointMiss) as exc:
+            term.require_success()
+        assert exc.value.reason is reason
+
+
 def test_terminal_failure_labels_are_closed_and_no_generic_banner_accepts_trust():
     assert conpty.screen_failure('switch', 'Control check: native-root.') is conpty.Failure.ROOT
     assert conpty.screen_failure('switch', 'Switch refused. Control check: wallet-prepare.') is conpty.Failure.WALLET_PREPARE

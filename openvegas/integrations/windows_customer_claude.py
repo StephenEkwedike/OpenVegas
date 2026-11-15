@@ -39,6 +39,11 @@ async function metadata($) {
 async function verifyReady($) {
   if ((await send($, {event:'ready', value:await metadata($)})).message !== 'ready') throw Error();
 }
+function localResult($, message) {
+  // Returning {text} retains the command, arguments and stdout in the next model request.
+  try { $.ui.log(message); } catch { /* No model-facing fallback if the display is unavailable. */ }
+  return {};
+}
 export function register(on) {
   on('session.start', async ($, e, next) => {
     const result = await next(e);
@@ -56,7 +61,7 @@ export function register(on) {
     const action = (e.args ?? '').trim().toLowerCase();
     if (e.origin.kind !== 'composer') return {};
     if (!['v','host','status'].includes(action))
-      return {text:'Use /ov-billing v, host, or status from the native composer.'};
+      return localResult($, 'Use /ov-billing v, host, or status from the native composer.');
     try {
       // Only a person's explicit status check repeats readiness, never a payer mutation.
       if (action === 'status') await verifyReady($);
@@ -70,8 +75,8 @@ export function register(on) {
         ['Switch refused; payer unchanged. No prompt sent.', 'Billing control busy; no new switch started.',
          'Billing outcome unconfirmed; inference held. No automatic retry.',
          'Billing change pending or unconfirmed; check status.'].includes(msg));
-      return {text:known ? msg : 'Local control unconfirmed. Check status.'};
-    } catch { return {text:'Local control unconfirmed. Check status; no automatic retry.'}; }
+      return localResult($, known ? msg : 'Local control unconfirmed. Check status.');
+    } catch { return localResult($, 'Local control unconfirmed. Check status; no automatic retry.'); }
   });
 }
 """

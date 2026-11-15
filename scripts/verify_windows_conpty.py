@@ -56,6 +56,7 @@ class Failure(Enum):
     EXIT_TIMEOUT = 'exit-timeout'
     EXIT_CODE = 'exit-nonzero'
     BANK = 'bank-receipt'
+    LAUNCH_EXCEPTION = 'launcher-cleanup'
 
 
 class CheckpointMiss(RuntimeError):
@@ -97,7 +98,7 @@ def screen_failure(stage, frame):
 
 
 class Terminal:
-    def __init__(self, process):
+    def __init__(self, process, *, exit_code=None):
         import pyte
 
         class Screen(pyte.Screen):
@@ -119,6 +120,7 @@ class Terminal:
                 super().reset_mode(*modes, **kwargs)
 
         self.process = process
+        self.exit_code = exit_code if exit_code is not None else getattr(process, 'get_exitstatus', None)
         self.screen = Screen(140, 42)
         self.vt = pyte.Stream(self.screen)
         self.before_input = ''
@@ -195,9 +197,9 @@ class Terminal:
             time.sleep(.05)
         if self.process.isalive():
             raise CheckpointMiss(Failure.EXIT_TIMEOUT)
-        status = self.process.get_exitstatus()
+        status = self.exit_code()
         if status != 0:
-            raise CheckpointMiss(Failure.BANK if status == 23 else Failure.EXIT_CODE)
+            raise CheckpointMiss({23: Failure.BANK, 26: Failure.LAUNCH_EXCEPTION}.get(status, Failure.EXIT_CODE))
 
 
 @contextmanager
@@ -216,6 +218,10 @@ def isolated_console(script, args, env, cwd):
     dll.TerminateJobObject.argtypes = (W.HANDLE, W.UINT)
     dll.TerminateProcess.argtypes = (W.HANDLE, W.UINT)
     dll.GetProcessId.argtypes = dll.CloseHandle.argtypes = (W.HANDLE,)
+    dll.WaitForSingleObject.argtypes = (W.HANDLE, W.DWORD)
+    dll.WaitForSingleObject.restype = W.DWORD
+    dll.GetExitCodeProcess.argtypes = (W.HANDLE, ctypes.POINTER(W.DWORD))
+    dll.GetExitCodeProcess.restype = W.BOOL
     job = dll.CreateJobObjectW(None, None)
     if not job:
         raise ctypes.WinError(ctypes.get_last_error())
@@ -232,7 +238,16 @@ def isolated_console(script, args, env, cwd):
             dll.TerminateProcess(process.fd, 1)
             raise RuntimeError('Cannot contain the test process tree.')
         owned = True
-        terminal = Terminal(process)
+        def exit_code():
+            # Use the verified retained child handle, not PTY pipe EOF or a PID lookup.
+            if dll.WaitForSingleObject(process.fd, 1000) != 0:
+                raise CheckpointMiss(Failure.EXIT_TIMEOUT)
+            code = W.DWORD()
+            if not dll.GetExitCodeProcess(process.fd, ctypes.byref(code)):
+                raise CheckpointMiss(Failure.EXIT_CODE)
+            return code.value
+
+        terminal = Terminal(process, exit_code=exit_code)
         terminal.expect(r'OV-QA-READY', 'private console startup')
         # Child cannot start the host or its helpers until job ownership is established.
         terminal.type_line('OV-QA-START')

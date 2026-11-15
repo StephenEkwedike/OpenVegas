@@ -168,6 +168,7 @@ jobs:
               'wallet-prepare', 'wallet-outcome', 'request-boundary',
               'supplier-not-reached', 'supplier-protocol', 'control-as-prompt', 'answer-not-rendered',
               'unsolicited-request', 'prompt-shape', 'exit-timeout', 'exit-nonzero', 'bank-receipt',
+              'launcher-cleanup',
           )
           stages = (
               'isolation', 'fixture-canonical', 'fixture-configure', 'conpty', 'native-start', 'composer',
