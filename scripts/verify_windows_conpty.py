@@ -57,6 +57,12 @@ class Failure(Enum):
     EXIT_CODE = 'exit-nonzero'
     BANK = 'bank-receipt'
     LAUNCH_EXCEPTION = 'launcher-cleanup'
+    RECEIPT = 'receipt-write'
+    BRIDGE = 'bridge-at-exit'
+    SESSION_CLOSE = 'session-shutdown'
+    SERVER_CLOSE = 'native-process-exit'
+    CONSOLE = 'console-restore'
+    GRANT_CLOSE = 'grant-close'
 
 
 class CheckpointMiss(RuntimeError):
@@ -199,7 +205,9 @@ class Terminal:
             raise CheckpointMiss(Failure.EXIT_TIMEOUT)
         status = self.exit_code()
         if status != 0:
-            raise CheckpointMiss({23: Failure.BANK, 26: Failure.LAUNCH_EXCEPTION}.get(status, Failure.EXIT_CODE))
+            raise CheckpointMiss({23: Failure.BANK, 26: Failure.LAUNCH_EXCEPTION, 31: Failure.RECEIPT,
+                                  32: Failure.BRIDGE, 33: Failure.SESSION_CLOSE, 34: Failure.SERVER_CLOSE,
+                                  35: Failure.CONSOLE, 36: Failure.GRANT_CLOSE}.get(status, Failure.EXIT_CODE))
 
 
 @contextmanager

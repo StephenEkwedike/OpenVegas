@@ -110,6 +110,11 @@ jobs:
         run: |
           python -B -m pytest "--junitxml=$env:RUNNER_TEMP/images.xml" tests/test_integrations/test_windows_native_image.py tests/test_integrations/test_inference_router_windows.py --deselect=tests/test_integrations/test_inference_router_windows.py::test_refuse_wrong_os *> $null
           exit $LASTEXITCODE
+      - name: Native Windows private receipt flush and reopen
+        if: ${{ !cancelled() && steps.isolation.outcome == 'success' && (env.QA_FOREGROUND == 'both' || env.QA_FOREGROUND == '') }}
+        run: |
+          python -B -m pytest "--junitxml=$env:RUNNER_TEMP/receipt.xml" tests/test_integrations/test_inference_router_shutdown_receipt_windows.py::test_native_windows_private_flushed_receipt_survives_reopen *> $null
+          exit $LASTEXITCODE
       - name: Installed customer controls in foreground ConPTY
         if: ${{ !cancelled() && steps.isolation.outcome == 'success' }}
         env:
@@ -169,6 +174,8 @@ jobs:
               'supplier-not-reached', 'supplier-protocol', 'control-as-prompt', 'answer-not-rendered',
               'unsolicited-request', 'prompt-shape', 'exit-timeout', 'exit-nonzero', 'bank-receipt',
               'launcher-cleanup',
+              'receipt-write', 'bridge-at-exit', 'session-shutdown', 'native-process-exit',
+              'console-restore', 'grant-close',
           )
           stages = (
               'isolation', 'fixture-canonical', 'fixture-configure', 'conpty', 'native-start', 'composer',
@@ -197,6 +204,8 @@ jobs:
               if focus not in ('both', *installed):
                   sys.exit(1)
               required = {'customer': tuple(installed.values()) if focus == 'both' else (installed[focus],)}
+          if focus in ('', 'both'):
+              required['receipt'] = ('test_native_windows_private_flushed_receipt_survives_reopen',)
 
           def bad(case):
               return any(case.find(tag) is not None for tag in ('failure', 'error', 'skipped'))
@@ -210,7 +219,7 @@ jobs:
                   cases = list(ET.parse(report).getroot().iter('testcase'))
               except Exception:  # A parser error can contain untrusted report text.
                   cases = []
-              if any(bad(case) for case in cases) or (focus and len(cases) != len(names)):
+              if any(bad(case) for case in cases) or ((focus or group == 'receipt') and len(cases) != len(names)):
                   ok = False
               for name in names:
                   matches = [case for case in cases if case.get('name') == name]
@@ -218,8 +227,10 @@ jobs:
                   foreground = group == 'customer' and name in installed.values()
                   if foreground and case is not None and case.get('classname') != 'tests.test_integrations.test_windows_installed_switch':
                       case = None
+                  if group == 'receipt' and case is not None and case.get('classname') != 'tests.test_integrations.test_inference_router_shutdown_receipt_windows':
+                      case = None
                   if case is not None and not bad(case):
-                      if foreground:
+                      if foreground or group == 'receipt':
                           print(f'::notice::Passed: {name}')
                       continue
                   ok = False

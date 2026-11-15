@@ -32,6 +32,31 @@ def refused_check(message):
     return None
 
 
+def cleanup_exit(exc):
+    # Fixed codes only. Never serialize exception text, stack, paths, or data.
+    known = {
+        ('inference_router_shutdown_receipt', 'save_unresolved_dispatches'): 31,
+        ('windows_customer_codex', 'bridge'): 32,
+        ('inference_router_session', 'launch'): 33,
+        ('windows_customer_codex', 'server_process'): 34,
+        ('windows_terminal', 'console_modes'): 35,
+        ('windows_customer', 'close'): 36,
+    }
+    found = 26
+    for _ in range(6):
+        if exc is None:
+            break
+        tb = exc.__traceback__
+        while tb:
+            frame = tb.tb_frame
+            mod = frame.f_globals.get('__name__', '')
+            if mod.startswith('openvegas.integrations.'):
+                found = known.get((mod.rsplit('.', 1)[-1], frame.f_code.co_name), found)
+            tb = tb.tb_next
+        exc = exc.__cause__ or exc.__context__
+    return found
+
+
 class Bank:
     """Strict in-memory HTTP oracle. Events contain only predeclared operation names."""
     def __init__(self, host, catalog=None):
@@ -190,5 +215,5 @@ def main(host, exe, port):
 if __name__ == '__main__':
     try:
         sys.exit(main(*sys.argv[1:]))
-    except Exception:
-        sys.exit(26)
+    except Exception as exc:
+        sys.exit(cleanup_exit(exc))
