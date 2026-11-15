@@ -33,26 +33,28 @@ def isolation(paths):
     # Do not install/alter a firewall rule from the test.
     ps = r'''
 $ErrorActionPreference='Stop'
-$p=@([Console]::In.ReadToEnd() | ConvertFrom-Json)
-if (@(Get-NetFirewallProfile | Where-Object { -not $_.Enabled }).Count) {exit 2}
-foreach($exe in $p) {
- $rules=@(Get-NetFirewallApplicationFilter -PolicyStore ActiveStore |
-   Where-Object {$_.Program -ieq $exe} | Get-NetFirewallRule |
-   Where-Object {$_.Enabled -eq 'True' -and $_.Direction -eq 'Outbound' -and
-                 $_.Action -eq 'Block' -and $_.Profile -eq 'Any'})
- $ok=$false
- foreach($r in $rules) {
-  $a=@($r | Get-NetFirewallAddressFilter)
-  if ($a.Count -eq 1 -and ($a[0].RemoteAddress -join ',') -eq 'Any') {$ok=$true}
- }
- if(-not $ok) {exit 3}
+$inputObject=ConvertFrom-Json -InputObject ([Console]::In.ReadToEnd())
+$programs=@($inputObject.programs)
+$profiles=@(Get-NetFirewallProfile -ErrorAction Stop)
+if (!$programs.Count -or !$profiles.Count -or @($profiles | Where-Object {$_.Enabled -ne 'True'}).Count) {exit 2}
+$n=0
+foreach($exe in $programs) {
+ $n++
+ $rules=@(Get-NetFirewallRule -PolicyStore ActiveStore -Name "OpenVegas-QA-helper-$n" -ErrorAction Stop)
+ if ($rules.Count -ne 1) {exit 3}
+ $r=$rules[0]
+ $p=@($r | Get-NetFirewallApplicationFilter -ErrorAction Stop)
+ $a=@($r | Get-NetFirewallAddressFilter -ErrorAction Stop)
+ if ($r.Enabled -ne 'True' -or $r.Direction -ne 'Outbound' -or $r.Action -ne 'Block' -or
+     $r.Profile -ne 'Any' -or $p.Count -ne 1 -or $p[0].Program -ine $exe -or
+     $a.Count -ne 1 -or (@($a[0].RemoteAddress) -join ',') -ne 'Any') {exit 4}
 }
 exit 0
 '''
     system = Path(os.environ["SystemRoot"])
     result = subprocess.run([str(system/"System32/WindowsPowerShell/v1.0/powershell.exe"),
                              "-NoProfile","-NonInteractive","-Command",ps],
-                            input=json.dumps(sorted(set(map(str,paths)))),text=True,
+                            input=json.dumps({"programs": sorted(set(map(str,paths)))}),text=True,
                             stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=40)
     need(result.returncode==0)
 

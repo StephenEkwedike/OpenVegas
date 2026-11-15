@@ -103,7 +103,7 @@ jobs:
               throw 'A required native test image is missing'
             }
             $n++
-            $id = if ($exe -in $hosts) { "OpenVegas-QA-$([IO.Path]::GetFileName($exe))" } else { "OpenVegas-QA-helper-$n" }
+            $id = "OpenVegas-QA-helper-$n"
             New-NetFirewallRule -Name $id -DisplayName $id -Profile Any -Enabled True -Direction Outbound -Action Block -Program $exe -ErrorAction Stop | Out-Null
             $active = Get-NetFirewallRule -PolicyStore ActiveStore -Name $id -ErrorAction Stop
             $app = $active | Get-NetFirewallApplicationFilter
