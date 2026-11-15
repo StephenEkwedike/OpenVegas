@@ -9,7 +9,7 @@ jobs:
   windows-offline:
     if: github.repository == 'StephenEkwedike/OpenVegas' && !github.event.repository.private
     runs-on: windows-2022
-    timeout-minutes: 20
+    timeout-minutes: 40
     env:
       CI: 'true'
       DISABLE_TELEMETRY: '1'
@@ -45,6 +45,22 @@ jobs:
           path: packs
       - name: Verify and unpack reviewed customer files without installation
         run: python -IB scripts/windows_managed_startup.py unpack
+      - uses: actions/checkout@v5
+        with:
+          ref: add579ab7211283c0b7a18173616ff4310f5d230
+          path: baseline
+          persist-credentials: false
+      - name: Stage exact seven-file frozen overlay and build dependencies
+        run: python -B -m scripts.windows_fixture_build stage
+      - name: Build separate QA executable and compare embedded product code
+        run: python -B -m scripts.qa_managed_build
+      - name: Retain only the separately named offline QA executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: offline-windows-qa-managed-only
+          retention-days: 3
+          if-no-files-found: error
+          path: ${{ env.OV_QA_MANAGED }}
       - name: Get standalone native publisher images and pin all three executables
         run: |
           $dir = (New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'native-hosts')).FullName
@@ -99,7 +115,7 @@ jobs:
           $git = Join-Path $env:ProgramFiles 'Git'
           $tools = @((Get-Command python.exe).Source, (Get-Command node.exe).Source, $env:OV_WINDOWS_BASH_EXE,
             (Join-Path $git 'usr/bin/bash.exe'), (Join-Path $git 'usr/bin/sh.exe'), (Join-Path $git 'cmd/git.exe'))
-          $programs = @(($hosts + $helpers + $tools + @($env:OV_QA_PE)) | Sort-Object -Unique)
+          $programs = @(($hosts + $helpers + $tools + @($env:OV_QA_PE, $env:OV_QA_MANAGED)) | Sort-Object -Unique)
           $n = 0
           foreach ($exe in $programs) {
             if (!$exe -or ![IO.Path]::IsPathFullyQualified($exe) -or !(Test-Path -LiteralPath $exe -PathType Leaf)) {
@@ -116,7 +132,12 @@ jobs:
               throw 'Effective executable-specific outbound block missing'
             }
           }
-      - name: Unnamed Codex round trip on the verified title candidate
+      - name: Managed stdio unnamed round trip
         env:
           OV_WINDOWS_CONPTY_ISOLATED: '1'
-        run: python -B -m scripts.windows_managed_startup rehearsal
+        run: python -B -m scripts.qa_managed_run roundtrip
+      - name: Managed stdio interrupted wallet retry
+        if: ${{ !cancelled() && steps.isolation.outcome == 'success' }}
+        env:
+          OV_WINDOWS_CONPTY_ISOLATED: '1'
+        run: python -B -m scripts.qa_managed_run retry
