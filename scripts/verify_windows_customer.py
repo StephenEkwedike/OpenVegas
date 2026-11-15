@@ -19,6 +19,16 @@ DEVICE = 'ov_device_windows_qa_not_a_credential'
 GRANT = 'ov_native_fixture_windows_conpty_only'
 BALANCE = '73.25'
 SESSION = 'windows-qa-synthetic'
+CONTROL_RECEIPT = 'control-result'
+CONTROL_CHECKS = frozenset(('native-route', 'native-inventory', 'native-root', 'native-model',
+                            'native-workspace', 'native-fence', 'session-lease', 'wallet-prepare',
+                            'wallet-outcome', 'request-boundary'))
+
+
+def refused_check(message):
+    if isinstance(message, str) and 'Control check: ' in message:
+        return next((code for code in CONTROL_CHECKS if message.endswith('Control check: ' + code + '.')), None)
+    return None
 
 
 class Bank:
@@ -150,6 +160,20 @@ def main(host, exe, port):
         return 22
     bank = Bank(host, bundled_catalog(exe) if host == 'codex' else None)
     windows_customer.Broker = bank.broker
+    if host == 'codex':
+        from openvegas.emotes._windows_state import private_windows_directory
+        command = windows_customer.Customer.command
+
+        async def observe_result(owner, action, **kwargs):
+            message = await command(owner, action, **kwargs)
+            code = refused_check(message)
+            if code and action in ('v', 'host'):
+                # QA-only negative evidence: never record native text or infer success.
+                with private_windows_directory(root / 'tmp') as state:
+                    state.atomic_write(CONTROL_RECEIPT, code.encode('ascii'))
+            return message
+
+        windows_customer.Customer.command = observe_result
     upstream = LocalSupplier(bank, int(port))
     inference_router_fixture.configured = lambda adapter=None: upstream
     # Use the installed Click command, with real stdin/out, not a CliRunner.

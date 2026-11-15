@@ -167,6 +167,11 @@ jobs:
               'native-model', 'native-workspace', 'native-fence', 'session-lease', 'command-unavailable',
               'wallet-prepare', 'wallet-outcome', 'request-boundary',
           )
+          stages = (
+              'isolation', 'fixture-canonical', 'fixture-configure', 'conpty', 'native-start', 'composer',
+              'switch-v', 'switch-host', 'status-0', 'status-1', 'status-2',
+              'answer-0', 'answer-1', 'answer-2', 'shutdown',
+          )
           required = {
               'images': ('test_launches_official_windows_image[codex-0.166.0]',
                          'test_launches_official_windows_image[claude-2.1.322]',
@@ -216,9 +221,14 @@ jobs:
                       continue
                   ok = False
                   suffix = ''
-                  if foreground and case is not None and case.find('failure') is not None:
+                  if foreground and case is not None and any(case.find(tag) is not None for tag in ('failure', 'error')):
                       props = case.findall("./properties/property[@name='qa_failure_label']")
                       if len(props) == 1:
                           suffix = next((': ' + literal for literal in labels if props[0].get('value') == literal), '')
+                      if not suffix:
+                          history = case.findall("./properties/property[@name='qa_stage']")
+                          if history:
+                              suffix = next((': stage=' + literal for literal in stages
+                                             if history[-1].get('value') == literal), '')
                   print(f'::error::Failed: {name}{suffix}')
           sys.exit(0 if ok else 1)

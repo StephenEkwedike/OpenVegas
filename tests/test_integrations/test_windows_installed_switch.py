@@ -127,7 +127,9 @@ def drive(host, sink, port, checkpoint):
     conpty.require_hosted_lane()
     with (pinned_windows_image(host, entry, VERSIONS[host]) as exe,
           launcher.fresh_environment(host) as (env, cwd)):
+        checkpoint('fixture-canonical')
         env, cwd = canonical_fixture(launcher, host, env, cwd)
+        checkpoint('fixture-configure')
         configure(host, exe, env, cwd)
         checkpoint('conpty')
         with conpty.isolated_console(Path(qa.__file__), [host, exe, str(port)], env, cwd) as term:
@@ -153,7 +155,20 @@ def drive(host, sink, port, checkpoint):
                     time.sleep(1)
                     checkpoint('switch-' + mode)
                     term.type_line(prefix + ('use ' if host == 'codex' else '') + mode)
-                    term.expect(r'Payer:\s*' + mode + r'\.\s*No prompt sent\.', 'confirmed switch', diagnose='switch')
+                    try:
+                        term.expect(r'Payer:\s*' + mode + r'\.\s*No prompt sent\.', 'confirmed switch', diagnose='switch')
+                    except conpty.CheckpointMiss:
+                        if host == 'codex':
+                            from openvegas.emotes._windows_state import private_windows_directory
+                            with private_windows_directory(Path(env['TMP'])) as state:
+                                try:
+                                    value = state.read(qa.CONTROL_RECEIPT, 32)
+                                except FileNotFoundError:
+                                    value = b''
+                            for check in qa.CONTROL_CHECKS:
+                                if value == check.encode('ascii'):
+                                    raise conpty.CheckpointMiss(check) from None
+                        raise
                 checkpoint('status-' + str(i))
                 if host == 'claude':
                     refusal = conpty.screen_failure('claude-start', term.frame())
@@ -267,6 +282,9 @@ def test_terminal_failure_labels_are_closed_and_no_generic_banner_accepts_trust(
     assert conpty.screen_failure('claude-start', 'Claude Code for testing') is None
     assert conpty.screen_failure('claude-control', 'Unknown skill: ov-billing') is conpty.Failure.COMMAND
     assert conpty.screen_failure('claude-control', 'unrelated unknown command') is None
+    assert qa.refused_check('Local control unconfirmed. Control check: native-root.') == 'native-root'
+    assert qa.refused_check('Control check: some private dynamic text.') is None
+    assert qa.refused_check('Payer: v. No prompt sent.') is None
     with pytest.raises(ValueError):
         conpty.CheckpointMiss('private-text')
 
