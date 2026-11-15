@@ -65,6 +65,7 @@ jobs:
           if ((git rev-parse HEAD) -ne $env:GITHUB_SHA) { throw 'Unexpected candidate revision' }
           $pin = Join-Path $env:RUNNER_TEMP 'openvegas-conpty-pin.txt'
           'pywinpty==2.0.15 --hash=sha256:9a6bcec2df2707aaa9d08b86071970ee32c5026e10bcc3cc5f6f391d85baf7ca' | Set-Content -LiteralPath $pin -Encoding ascii
+          'pyte==0.8.2 --hash=sha256:85db42a35798a5aafa96ac4d8da78b090b2c933248819157fc0e6f78876a0135' | Add-Content -LiteralPath $pin -Encoding ascii
           python -m pip --isolated install --no-deps --only-binary=:all: --require-hashes -r $pin
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python -m pip --isolated install --only-binary=:all: -c requirements.lock keyring python-dotenv prompt-toolkit 'setuptools>=77.0.3' wheel

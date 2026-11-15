@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 import time
+from collections import Counter
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -24,46 +25,70 @@ def require_hosted_lane():
 
 class Terminal:
     def __init__(self, process):
+        import pyte
+
+        class Screen(pyte.Screen):
+            def write_process_input(self, data):
+                process.write(data.replace('\x9b', '\x1b['))
+
+            def report_device_status(self, mode=0, **kwargs):
+                if not kwargs.get('private'):
+                    super().report_device_status(mode)
+
+            def set_mode(self, *modes, **kwargs):
+                if kwargs.get('private') and set(modes) & {47, 1047, 1049}:
+                    self.erase_in_display(2)
+                super().set_mode(*modes, **kwargs)
+
+            def reset_mode(self, *modes, **kwargs):
+                if kwargs.get('private') and set(modes) & {47, 1047, 1049}:
+                    self.erase_in_display(2)
+                super().reset_mode(*modes, **kwargs)
+
         self.process = process
-        self.pending = ''
+        self.screen = Screen(140, 42)
+        self.vt = pyte.Stream(self.screen)
+        self.before_input = ''
         self.query_tail = ''
+
+    def frame(self):
+        return '\n'.join(line.rstrip() for line in self.screen.display)
 
     def read(self):
         chunk = self.process.read(16384, blocking=False)
         if chunk:
             output = self.query_tail + chunk
-            for query, response in (('\x1b[6n', '\x1b[1;1R'), ('\x1b[?u', '\x1b[?0u'),
-                                    ('\x1b]11;?\x07', '\x1b]11;rgb:0000/0000/0000\x07')):
+            for query, response in (('\x1b[?u', '\x1b[?0u'),
+                                    ('\x1b]11;?\x07', '\x1b]11;rgb:0000/0000/0000\x07'),
+                                    ('\x1b]11;?\x1b\\', '\x1b]11;rgb:0000/0000/0000\x1b\\')):
                 if output.find(query, max(0, len(self.query_tail) - len(query) + 1)) != -1:
                     self.process.write(response)
             self.query_tail = output[-8:]
+            self.vt.feed(chunk)
         return chunk
 
     def expect(self, pattern, stage, *, timeout=45):
         deadline = time.monotonic() + timeout
-        tail = plain = ''
+        regex = re.compile(pattern, re.I)
+        old = Counter(m.group() for m in regex.finditer(self.before_input))
         while time.monotonic() < deadline:
-            chunk = self.pending or self.read()
-            self.pending = ''
-            if chunk:
-                tail = (tail + chunk)[-65536:]
-                # Only recognize visible text, not a title or a control sequence.
-                plain = re.sub(r'\x1b\][^\x07\x1b]*(?:\x07|\x1b\\|$)|\x1b\[[0-?]*[ -/]*[@-~]', '', tail)
-                match = re.search(pattern, plain, re.I)
-                if match:
-                    # A single native read can include both supervisor and composer banners.
-                    self.pending = plain[match.end():]
-                    return match.group()
-            elif not self.process.isalive():
+            visible = Counter(m.group() for m in regex.finditer(self.frame()))
+            fresh = visible - old
+            if fresh:
+                return next(iter(fresh))
+            old &= visible
+            if self.read():
+                continue
+            if not self.process.isalive():
                 break
-            else:
-                time.sleep(.025)
+            time.sleep(.025)
         # Do not put transcripts, paths, credentials, or prompts in pytest/JUnit.
         raise RuntimeError('Missing terminal checkpoint: ' + stage)
 
     def type_line(self, line):
         if not line.isascii() or not line.isprintable():
             raise ValueError('Expected a printable QA input line.')
+        self.before_input = self.frame()
         self.process.write(line)
         # Native composers can distinguish a paste from a later Enter key.
         time.sleep(.15)

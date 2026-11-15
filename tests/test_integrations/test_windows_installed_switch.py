@@ -185,8 +185,26 @@ def test_console_keeps_coalesced_composer_and_answers_split_query():
             return next(self.chunks)
 
         def write(self, value):
-            assert value == '\x1b[1;1R'
+            assert value == '\x1b[2;12R'
 
     terminal = conpty.Terminal(Stream())
     for text in ('Windows managed Claude', 'Claude Code', 'Payer: host'):
         assert terminal.expect(text, 'test') == text
+
+
+def test_console_requires_new_visible_ack_not_erased_or_stale_text():
+    class Stream:
+        chunks = iter(['Payer: v. No prompt sent.', '\r\x1b[2Kchecking',
+                       '\x1b[2;10HNo prompt sent.\x1b[2;1HPayer: v.'])
+
+        def read(self, *_, **kwargs):
+            return next(self.chunks)
+
+        def write(self, _):
+            pass
+
+    console = conpty.Terminal(Stream())
+    console.read()
+    console.type_line('openvegas use v')
+    assert console.expect(r'Payer: v\.\s*No prompt sent\.', 'switch') == 'Payer: v.No prompt sent.'
+    assert 'checking' in console.frame()
