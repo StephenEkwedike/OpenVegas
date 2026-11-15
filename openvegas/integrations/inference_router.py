@@ -12,6 +12,7 @@ import json
 import os
 import secrets
 import socket
+import sys
 from contextlib import asynccontextmanager, nullcontext, suppress
 from dataclasses import dataclass, field
 
@@ -43,6 +44,16 @@ class DirectConnect(connect):
 
     def process_redirect(self, exc):
         return exc
+
+
+def native_tcp_peer_auth():
+    if sys.platform == 'linux':
+        from .inference_router_linux import LinuxTCPPeerAuth
+        return LinuxTCPPeerAuth()
+    if sys.platform == 'win32':
+        from .inference_router_windows import WindowsTCPPeerAuth
+        return WindowsTCPPeerAuth()
+    return DarwinTCPPeerAuth()
 
 
 class DarwinTCPPeerAuth:
@@ -440,14 +451,16 @@ class InferenceRouter:
                             'Search response could not be verified. Original outcome retained; no retry or fallback.')
                         started = True
                         return
-                    await send({'type': 'http.response.start', 'status': response.status_code,
-                                'headers': response_headers})
-                    started = True
-                    await send({'type': 'http.response.body', 'body': bytes(completed.buffer)})
+                    # Alpha is fully buffered. A later client disconnect affects
+                    # delivery, not the verified outcome of the original dispatch.
                     if response.status_code == 200 and success:
                         outcome = 'completed'
                     elif completed.request_rejected(response.status_code):
                         outcome = 'rejected'
+                    started = True
+                    await send({'type': 'http.response.start', 'status': response.status_code,
+                                'headers': response_headers})
+                    await send({'type': 'http.response.body', 'body': bytes(completed.buffer)})
                     return
                 await send({'type': 'http.response.start', 'status': response.status_code,
                             'headers': response_headers})

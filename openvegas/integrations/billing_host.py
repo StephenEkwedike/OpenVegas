@@ -13,7 +13,6 @@ import re
 import secrets
 import shutil
 import tempfile
-import termios
 import tomllib
 from contextlib import AsyncExitStack, ExitStack
 from dataclasses import dataclass, field
@@ -23,11 +22,15 @@ from uuid import UUID
 
 import click
 
+if os.name == 'posix':
+    import termios
+
 from . import native
 from .billing_choices import model_choices, wallet_ceiling
 from .broker import Broker
 from .credentials import IntegrationError
 from .host_adapter import HostLaunchSpec
+from .native_child_environment import external_child_environment
 from .use import SOCKET, TOKEN
 
 ARM_SECONDS = 60
@@ -1165,10 +1168,17 @@ class Supervisor:
 
 
 def main(host, args):
+    if os.name == 'nt':
+        from .windows_billing_host import launch
+        try:
+            return launch(host, args)
+        except IntegrationError as exc:
+            click.echo(str(exc), err=True)
+            return 1
     from .inference_router_fixture import configured
     if configured() is not None:
         click.echo('Offline native acceptance: synthetic loopback billing only.', err=True)
-    env = dict(native.host_environment() or os.environ)
+    env = external_child_environment(native.host_environment() or os.environ)
     # Noninteractive/admin invocations stay completely outside the supervisor.
     from .host_invocation import passthrough
     if not os.isatty(0) or passthrough(host, args):

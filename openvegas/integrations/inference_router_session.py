@@ -11,13 +11,13 @@ import asyncio
 import json
 import re
 import time
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 
 import click
 
 from .credentials import IntegrationError
-from .inference_router import DarwinTCPPeerAuth, InferenceRouter, serve
+from .inference_router import InferenceRouter, native_tcp_peer_auth, serve
 from .inference_router_adapter import launch_overlay
 from .inference_router_controls import RouterBillingCoordinator, RouterControlPort
 from .inference_router_shutdown_receipt import save_unresolved_dispatches
@@ -50,7 +50,7 @@ class RouterSession:
             raise IntegrationError('Native peer authentication is only verified for Codex.')
         if local_auth == 'header' and adapter.host != 'claude':
             raise IntegrationError('Native header authentication is only verified for Claude.')
-        self._peer = DarwinTCPPeerAuth() if local_auth == 'peer' else None
+        self._peer = native_tcp_peer_auth() if local_auth == 'peer' else None
 
         def commit(ticket, grant):
             if ticket.target == 'v' and (not isinstance(grant, WalletAccess)
@@ -125,7 +125,11 @@ class RouterSession:
         if effective_policy_verified is not True or self._url is not None or self._closed:
             raise IntegrationError('Native launch policy must be verified before using the router.')
         try:
-            async with serve(self.router) as url:
+            async with AsyncExitStack() as transport:
+                close_peer = getattr(self._peer, 'close', None)
+                if close_peer is not None:
+                    transport.callback(close_peer)
+                url = await transport.enter_async_context(serve(self.router))
                 updated, argv = launch_overlay(self.adapter.host, version, url, env, args,
                     local_capability=self.router.capability if self.router.auth_mode == 'header' else None,
                     peer_authenticated=self.router.auth_mode == 'peer')

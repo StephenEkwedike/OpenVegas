@@ -269,12 +269,49 @@ def pets(apply, upgrade, review_pack):
 @click.option("--game-handoff", is_flag=True, help="Add OpenVegas Games: same-terminal game handoff for ordinary codex/claude, without changing the default.")
 @click.option("--attach", is_flag=True, help="Activate game handoff in THIS terminal shell. No new window/tab. Exit the coding host first, then launch it normally again.")
 @click.option("--check", "check_connection", is_flag=True, help="Check this shell's game connection without opening a game or accessing a wallet.")
-def terminal(apply, make_default, restore_default, game_handoff, attach, check_connection):
-    """One-time VS Code setup for plain claude/codex commands, not $V billing."""
-    from .terminal_profile import configure
+@click.option('--host', 'windows_host', type=click.Choice(['codex', 'claude']),
+              help='With --attach on native Windows, run this host in the current console.')
+@click.option('--windows-fixture-port', type=click.IntRange(1, 65535),
+              help='Isolated Windows rehearsal ONLY: local synthetic upstream, no real wallet. Use an offline disposable VM.')
+@click.option('--managed-billing', 'windows_managed', is_flag=True,
+              help='Opt in to native Windows billing controls. Starts on host; an explicit local switch requests wallet access.')
+@click.option('--windows-session', help='ID printed by a running synthetic Windows rehearsal.')
+@click.option('--payer', type=click.Choice(['status', 'host', 'v']),
+              help='Inspect or change only the synthetic payer of --windows-session.')
+def terminal(apply, make_default, restore_default, game_handoff, attach, check_connection,
+             windows_host, windows_fixture_port, windows_managed, windows_session, payer):
+    """Manage terminal setup, or attach a native Windows host."""
+    if windows_managed or any(v is not None for v in (windows_host, windows_fixture_port, windows_session, payer)):
+        if os.name != 'nt' or any((apply, make_default, restore_default, game_handoff, check_connection)):
+            raise click.UsageError('Windows host/control options require native Windows and no profile options.')
+        try:
+            if windows_managed and (not attach or not windows_host or windows_fixture_port is not None
+                                    or windows_session is not None or payer is not None):
+                raise click.UsageError('Use --managed-billing only with --attach --host codex|claude.')
+            if windows_session is not None or payer is not None:
+                if not (windows_session and payer) or attach or windows_host or windows_fixture_port:
+                    raise click.UsageError('Use --windows-session ID and --payer status|host|v together, alone.')
+                from .windows_terminal import request
+                result = asyncio.run(request(windows_session, payer))
+                click.echo('Synthetic Windows payer: ' + result)
+                if result in ('held', 'refused'):
+                    raise click.exceptions.Exit(1)
+                return
+            if not attach or not windows_host:
+                raise click.UsageError('Use --attach --host codex|claude.')
+            from .windows_billing_host import launch
+            if windows_managed:
+                raise click.exceptions.Exit(launch(windows_host, managed=True))
+            raise click.exceptions.Exit(launch(windows_host, fixture_port=windows_fixture_port))
+        except (IntegrationError, OSError) as exc:
+            raise click.ClickException(str(exc) if isinstance(exc, IntegrationError)
+                                       else 'Windows native terminal unavailable.') from None
     if check_connection:
         if apply or make_default or restore_default or game_handoff or attach:
             raise click.UsageError("Use --check by itself in the existing terminal shell.")
+        if os.name == 'nt':
+            click.echo(json.dumps({'available': False, 'message': 'Windows game handoff is not enabled.'}))
+            raise click.exceptions.Exit(1)
         from .terminal_handoff import check
         result = asyncio.run(check())
         click.echo(json.dumps(result, indent=2))
@@ -285,7 +322,7 @@ def terminal(apply, make_default, restore_default, game_handoff, attach, check_c
         if apply or make_default or restore_default or game_handoff:
             raise click.UsageError("Use --attach by itself in the existing terminal shell.")
         if os.name != "posix":
-            raise click.ClickException("Same-terminal handoff currently requires macOS/Linux.")
+            raise click.ClickException("On native Windows, use --attach --host codex or claude. Game handoff is not enabled.")
         from .terminal_relay import run
         if os.getenv("OPENVEGAS_TERMINAL_SOCKET"):
             raise click.ClickException("This terminal already has game handoff enabled.")
@@ -302,6 +339,7 @@ def terminal(apply, make_default, restore_default, game_handoff, attach, check_c
         return
     if sys.platform != "darwin":
         raise click.ClickException("This VS Code profile installer currently supports macOS only.")
+    from .terminal_profile import configure
     env = dict(host_environment() or os.environ)
     try:
         home = Path(env.get("HOME", str(Path.home())))
