@@ -169,6 +169,10 @@ def interact(host, term, fixture, control, checkpoint):
     locator = term.expect(r"--windows-session\s+[0-9a-f]{32}", "rehearsal locator", timeout=65)
     sid = locator.split()[-1]
     check(re.fullmatch("[0-9a-f]{32}", sid))
+    if host == "codex":
+        from scripts.windows_fixture_onboard import run as onboard
+        onboard(term, checkpoint)
+
     checkpoint("rehearsal-composer")
     # Stop before sending ANY input at a trust, auth, or first-run UI.
     term.expect(r"\? for shortcuts|Type your message|shortcuts for help", "native composer",

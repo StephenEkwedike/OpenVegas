@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import time
 from contextlib import ExitStack
 from pathlib import Path
 
@@ -72,8 +73,13 @@ def child(host, node, js, port=None):
     if port is not None:
         require(port.isascii() and port.isdigit() and 0 < int(port) < 65536)
         mode = ["--windows-fixture-port", port]
-    return subprocess.run([node, js, "integration", "terminal", "--attach", "--host", host, *mode],
+    rc = subprocess.run([node, js, "integration", "terminal", "--attach", "--host", host, *mode],
                           shell=False, timeout=440).returncode
+    bucket = {0: "zero", 1: "one", 2: "two", 127: "notfound", 3221225781: "dllmissing"}.get(rc, "other")
+    print("OV-QA-FG-EXIT-" + bucket, flush=True)
+    time.sleep(1)
+    return rc
+
 
 
 def environment(host, root, image, bash, parent, *, managed=True):

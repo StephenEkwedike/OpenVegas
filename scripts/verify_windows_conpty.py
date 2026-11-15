@@ -25,6 +25,15 @@ def require_hosted_lane():
 
 
 class Failure(Enum):
+    FG_ZERO = "foreground-exit-zero"
+    FG_ONE = "foreground-exit-one"
+    FG_TWO = "foreground-exit-two"
+    FG_OTHER = "foreground-exit-other"
+    SHELL_MENTION = "shell-setup-message"
+
+    MISSING = "file-or-command-not-found"
+    INVALID = "startup-argument-invalid"
+
     EDITOR = 'editor-not-stable'
     FOOTER = 'editor-footer-missing'
     ECHO = 'editor-echo-missing'
@@ -91,6 +100,12 @@ def screen_failure(stage, frame):
     text = ' '.join(frame.casefold().split())
     if stage in ('claude-start', 'claude-control'):
         for reason, literals in (
+            (Failure.SHELL_MENTION, ("git-bash", "git bash", "claude_code_git_bash_path")),
+            (Failure.MISSING, ("enoent", "the system cannot find", "is not recognized as", "no such file or directory")),
+            (Failure.INVALID, ("einval", "invalid argument", "err_invalid_arg")),
+            (Failure.FG_ZERO, ("ov-qa-fg-exit-zero",)), (Failure.FG_ONE, ("ov-qa-fg-exit-one",)),
+            (Failure.FG_TWO, ("ov-qa-fg-exit-two",)), (Failure.FG_OTHER, ("ov-qa-fg-exit-other", "ov-qa-fg-exit-notfound", "ov-qa-fg-exit-dllmissing")),
+
             (Failure.KNOWNFOLDER, ('known folder', 'knownfolder', 'failed to get appdata', 'cannot find the appdata')),
             (Failure.NOENV, ('environment variable not found', 'missing environment variable')),
             (Failure.ACCESS, ('access is denied', 'permission denied', 'os error 5)')),
