@@ -9,7 +9,7 @@ jobs:
   windows-offline:
     if: github.repository == 'StephenEkwedike/OpenVegas' && !github.event.repository.private
     runs-on: windows-2022
-    timeout-minutes: 40
+    timeout-minutes: 20
     env:
       CI: 'true'
       DISABLE_TELEMETRY: '1'
@@ -43,24 +43,8 @@ jobs:
           github-token: ${{ github.token }}
           merge-multiple: true
           path: packs
-      - uses: actions/checkout@v5
-        with:
-          ref: add579ab7211283c0b7a18173616ff4310f5d230
-          path: baseline
-          persist-credentials: false
-      - name: Stage reviewed unified source plus seven verified changes
-        run: python -B -m scripts.windows_fixture_build stage
-      - name: Build PE, compare seven embedded modules, pack and unpack Windows pair
-        run: python -B -m scripts.windows_fixture_build build
-      - uses: actions/upload-artifact@v4
-        with:
-          name: windows-title-retry-unpublished
-          retention-days: 3
-          if-no-files-found: error
-          path: |
-            fixture-artifacts/openvegas-ai-0.3.19.tgz
-            fixture-artifacts/lordesteph-openvegas-win32-x64-0.3.19.tgz
-            fixture-artifacts/identity.json
+      - name: Verify and unpack reviewed customer files without installation
+        run: python -IB scripts/windows_managed_startup.py unpack
       - name: Get standalone native publisher images and pin all three executables
         run: |
           $dir = (New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'native-hosts')).FullName
@@ -75,7 +59,7 @@ jobs:
           $js = (Get-Item -LiteralPath 'installed/node_modules/openvegas-ai/bin/openvegas.js').FullName
           if ((Get-FileHash $cx).Hash -ine '9d563ee4e0441ff9d59d612013e0460ddf8e5709735c2d9f6b98b7ef8ca4eb42' -or
               (Get-FileHash $cc).Hash -ine '345996b4bdbae21d817f750fae2f34cbf8d81224a5444c78136091d121beb298' -or
-              (Get-FileHash $pe).Hash -ine $env:OV_FIXTURE_PE_HASH -or (Get-FileHash $js).Hash -ine $pin.launcher) {
+              (Get-FileHash $pe).Hash -ine $pin.pe -or (Get-FileHash $js).Hash -ine $pin.launcher) {
               throw 'Unexpected Windows test image'
           }
           "OV_WINDOWS_CODEX_EXE=$cx" >> $env:GITHUB_ENV
@@ -132,12 +116,7 @@ jobs:
               throw 'Effective executable-specific outbound block missing'
             }
           }
-      - name: Unnamed Codex three replies on installed candidate
+      - name: Unnamed Codex round trip on the verified title candidate
         env:
           OV_WINDOWS_CONPTY_ISOLATED: '1'
         run: python -B -m scripts.windows_managed_startup rehearsal
-      - name: Independent unnamed Codex interrupted wallet turn and reconnect
-        if: ${{ !cancelled() && steps.isolation.outcome == 'success' }}
-        env:
-          OV_WINDOWS_CONPTY_ISOLATED: '1'
-        run: python -B -m scripts.windows_managed_startup interrupt

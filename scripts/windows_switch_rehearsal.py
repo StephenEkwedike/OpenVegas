@@ -76,6 +76,9 @@ class Fixture:
             check(self.armed is None and len(self.rows) == i and not self.bad)
             self.armed = i
 
+    def helper_policy_ok(self):
+        return not (self.excess_titles or self.denied_wallet)
+
     def turn(self, mode, body, previous=(), root=None):
         with self.lock:
             i = len(self.rows)
@@ -145,17 +148,19 @@ class Fixture:
                         self.after_seal+=1
                     if mode=="v":
                         self.denied_wallet+=1
-                    if self.denied_titles>=12:
+                    over_cap = self.denied_titles >= 12
+                    if over_cap:
+                        # Deny and retain the failure, without retiring an unrelated root nonce.
                         self.excess_titles+=1
-                    check(self.denied_titles<12)
-                    self.denied_titles+=1
+                    else:
+                        self.denied_titles+=1
                     # A wallet helper is a permanent final gate failure. Refuse it
                     # immediately; never let it consume the separate root nonce.
                     if scope["type"]=="websocket":
                         check((await receive())["type"]=="websocket.connect")
                         await send({"type":"websocket.close","code":1008})
                     else:
-                        await send({"type":"http.response.start","status":403,"headers":[]})
+                        await send({"type":"http.response.start","status":400 if over_cap else 403,"headers":[]})
                         await send({"type":"http.response.body","body":b"{}"})
                     self.issue.set("none")
                     return
@@ -341,7 +346,7 @@ def interact(host, term, fixture, control, checkpoint):
     expected = ["host"] if fixture.interrupt else list(MODES)
     check(fixture.rows == expected and fixture.sealed != fixture.interrupt and fixture.armed is None)
     checkpoint("rehearsal-helper-policy")
-    check(not fixture.denied_wallet and not fixture.bad and not fixture.extra_root)
+    check(fixture.helper_policy_ok() and not fixture.bad and not fixture.extra_root)
 
 
 def payer(node, app, env, cwd, sid, action, expected):
@@ -386,11 +391,12 @@ async def run(host, drive, checkpoint, stats, *, interrupt=False):
                       f"final_frame={int(fixture.sent[fixture.answers[-1]].is_set())} root_answers={len(fixture.rows)} "
                       f"extra_root={fixture.extra_root} title_over_cap={fixture.excess_titles} "
                       f"title_after_seal={fixture.after_seal}",flush=True)
-                reason=fixture.first_fault or ("wallet-helper" if fixture.denied_wallet else "none")
+                reason=fixture.first_fault or ("helper-limit" if fixture.excess_titles else
+                                               "wallet-helper" if fixture.denied_wallet else "none")
                 print(f"::notice::wire codex denied_titles={fixture.denied_titles} denied_wallet={fixture.denied_wallet} root={int(fixture.root is not None)} fault={reason}",flush=True)
             stats.update(supplier_answers=len(fixture.rows), linked=max(0, len(fixture.rows)-1),
                          rendered=fixture.rendered, switch_acks=fixture.switch_acks,
-                         status_checks=fixture.status_checks, rejected=int(fixture.bad or bool(fixture.denied_wallet)))
+                         status_checks=fixture.status_checks, rejected=int(fixture.bad or not fixture.helper_policy_ok()))
         if host == "codex":
             check(fixture.clean_exit and fixture.sealed != interrupt and not fixture.extra_root
-                  and not fixture.denied_wallet and not fixture.bad)
+                  and fixture.helper_policy_ok() and not fixture.bad)
