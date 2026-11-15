@@ -23,9 +23,10 @@ SESSION = 'windows-qa-synthetic'
 
 class Bank:
     """Strict in-memory HTTP oracle. Events contain only predeclared operation names."""
-    def __init__(self, host, catalog=None):
+    def __init__(self, host, catalog=None, diagnostic=None):
         self.host, self.model = host, MODELS[host]
         self.catalog = catalog
+        self.diagnostic = diagnostic
         self.events = []
         self.state = 'initial'
         self.selection = {'host': host, 'provider': {'codex': 'openai', 'claude': 'anthropic'}[host],
@@ -75,6 +76,9 @@ class Bank:
         else:
             return self.reject()
         self.events.append(op)
+        if self.diagnostic is not None:
+            with self.diagnostic.open('a', encoding='ascii') as out:
+                out.write('bank_' + op + ':1\n')
         return httpx.Response(200, json=value)
 
     def reject(self):
@@ -134,7 +138,30 @@ class LocalSupplier:
                 + parsed.path + ('?' + parsed.query if parsed.query else ''))
 
 
-def main(host, exe, port):
+def diagnostics(path):
+    from openvegas.integrations.credentials import IntegrationError
+    modules = {'windows_customer', 'windows_customer_codex', 'windows_customer_claude',
+               'codex_handoff_policy', 'windows_session_lease', 'session_ownership',
+               '_windows_state', 'codex_billing_route', 'codex_live_switch', 'inference_router_wallet',
+               'inference_router_controls', 'claude_live_switch', 'windows_billing_host'}
+    seen = set()
+
+    def trace(frame, event, arg):
+        if event == 'call':
+            if frame.f_globals.get('__name__', '').rsplit('.', 1)[-1] not in modules:
+                return None
+            frame.f_trace_lines = False
+        if event == 'exception' and isinstance(arg[1], (IntegrationError, OSError, ValueError, KeyError)):
+            label = f"{frame.f_globals['__name__'].rsplit('.', 1)[-1]}:{frame.f_lineno}"
+            if len(seen) < 100 and label not in seen:
+                seen.add(label)
+                with path.open('a', encoding='ascii') as out:
+                    out.write(label + '\n')
+        return trace
+    return trace
+
+
+def main(host, exe, port, diagnostic):
     import openvegas
     from openvegas.integrations.inference_router_fixture import SYNTHETIC_KEY
     from openvegas.integrations import commands, inference_router_fixture, windows_customer
@@ -148,10 +175,11 @@ def main(host, exe, port):
     print('OV-QA-READY', flush=True)
     if input() != 'OV-QA-START':
         return 22
-    bank = Bank(host, bundled_catalog(exe) if host == 'codex' else None)
+    bank = Bank(host, bundled_catalog(exe) if host == 'codex' else None, Path(diagnostic))
     windows_customer.Broker = bank.broker
     upstream = LocalSupplier(bank, int(port))
     inference_router_fixture.configured = lambda adapter=None: upstream
+    sys.settrace(diagnostics(Path(diagnostic)))
     # Use the installed Click command, with real stdin/out, not a CliRunner.
     code = commands.terminal.main(args=['--attach', '--host', host, '--managed-billing'],
                                   standalone_mode=False)

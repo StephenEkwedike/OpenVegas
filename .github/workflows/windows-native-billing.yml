@@ -231,6 +231,10 @@ jobs:
                   if ($sites) { Write-Output "::error::$label driver: $($sites -join ', ')" }
                   $frames = [regex]::Match($bad.InnerText, 'QA frames: ((?:[a-z_]+:\d+,?){1,12})')
                   if ($frames.Success) { Write-Output "::error::$label managed: $($frames.Groups[1].Value)" }
+                  $source = $case.SelectSingleNode("properties/property[@name='qa_source']")
+                  if ($source -and $source.value -match '^(?:[a-z_]+:\d{1,5},?){1,24}$') { Write-Output "::error::$label observations: $($source.value)" }
+                  $screen = [regex]::Match($bad.InnerText, 'QA screen: (busy|refused|held|unconfirmed|trust|signin)')
+                  if ($screen.Success) { Write-Output "::error::$label screen: $($screen.Groups[1].Value)" }
                 }
                 Write-Output "::error::$group / $label / $($bad.LocalName) / $($locations -join ', ')"
               }

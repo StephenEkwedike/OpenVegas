@@ -75,8 +75,12 @@ def configure(host, exe, env, cwd):
     from openvegas.integrations.inference_router_fixture import SYNTHETIC_KEY
     env.update(PATH=str(Path(exe).parent) + os.pathsep + env['PATH'],
                TERM='xterm-256color', PYTHON_DOTENV_DISABLED='1', OPENVEGAS_LOAD_PROJECT_ENV='0')
-    for key in ('PROGRAMFILES', 'PROGRAMDATA'):
-        env[key] = os.environ[key]
+    for key in ('PROGRAMFILES', 'PROGRAMDATA', 'PROGRAMFILES(X86)', 'PROGRAMW6432',
+                'SYSTEMDRIVE', 'ALLUSERSPROFILE', 'COMMONPROGRAMFILES', 'COMMONPROGRAMFILES(X86)'):
+        if key in os.environ:
+            env[key] = os.environ[key]
+    root = Path(env['USERPROFILE'])
+    env.update(HOMEDRIVE=root.drive, HOMEPATH=str(root)[len(root.drive):])
     if host == 'codex':
         home = Path(env['CODEX_HOME'])
         (home / 'auth.json').write_text(json.dumps({'OPENAI_API_KEY': SYNTHETIC_KEY}))
@@ -95,7 +99,7 @@ def configure(host, exe, env, cwd):
             'projects': {str(cwd): {'hasTrustDialogAccepted': True}}}), encoding='utf-8')
 
 
-def drive(host, sink, port, checkpoint):
+def drive(host, sink, port, checkpoint, diagnostic):
     from openvegas.integrations import windows_billing_host as launcher
     from openvegas.integrations.inference_router_adapter import VERSIONS
     from openvegas.integrations.windows_native_image import pinned_windows_image
@@ -107,7 +111,7 @@ def drive(host, sink, port, checkpoint):
           launcher.fresh_environment(host) as (env, cwd)):
         configure(host, exe, env, cwd)
         checkpoint('conpty')
-        with conpty.isolated_console(Path(qa.__file__), [host, exe, str(port)], env, cwd) as term:
+        with conpty.isolated_console(Path(qa.__file__), [host, exe, str(port), str(diagnostic)], env, cwd) as term:
             checkpoint('native-start')
             term.expect(r'Windows managed ' + host, 'managed launch')
             term.expect(r'OpenAI Codex|Claude Code|shortcuts|for help', 'native composer')
@@ -115,6 +119,8 @@ def drive(host, sink, port, checkpoint):
             for i, mode in enumerate(('host', 'v', 'host')):
                 prefix = 'openvegas ' if host == 'codex' else '/ov-billing '
                 if i:
+                    # The native TUI draws text deltas before the completed-turn event.
+                    time.sleep(1)
                     checkpoint('switch-' + mode)
                     term.type_line(prefix + ('use ' if host == 'codex' else '') + mode)
                     term.expect(r'Payer:\s*' + mode + r'\.\s*No prompt sent\.', 'confirmed switch')
@@ -138,13 +144,20 @@ def drive(host, sink, port, checkpoint):
 @pytest.mark.skipif(sys.platform != 'win32', reason='requires disposable Windows ConPTY runner')
 @pytest.mark.parametrize('host', ['codex', 'claude'])
 @pytest.mark.asyncio
-async def test_installed_customer_switch(host, request):
+async def test_installed_customer_switch(host, request, tmp_path):
     def checkpoint(name):
         request.node.user_properties.append(('qa_stage', name))
 
     conpty.require_hosted_lane()
-    async with supplier(host) as (sink, port):
-        await asyncio.to_thread(drive, host, sink, port, checkpoint)
+    diagnostic = tmp_path / 'sources.txt'
+    try:
+        async with supplier(host) as (sink, port):
+            await asyncio.to_thread(drive, host, sink, port, checkpoint, diagnostic)
+    finally:
+        if diagnostic.exists() and diagnostic.stat().st_size < 10000:
+            rows = diagnostic.read_text(encoding='ascii').splitlines()
+            if all(re.fullmatch(r'[a-z_]+:\d{1,5}', line) for line in rows):
+                request.node.user_properties.append(('qa_source', ','.join(rows[-24:])))
     if host == 'codex':
         assert not sink.rejections and [r['payer'] for r in sink.rows] == ['host', 'v', 'host']
         assert all(r['wire_model'] == qa.MODELS['codex'] and r['wire_effort'] == 'low' for r in sink.rows)

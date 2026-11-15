@@ -41,6 +41,13 @@ class Terminal:
                 match = re.search(pattern, plain, re.I)
                 if match:
                     return match.group()
+                for label, marker in (
+                    ('busy', 'Local control busy'), ('refused', 'Switch refused; payer unchanged'),
+                    ('held', 'Billing outcome unconfirmed'), ('unconfirmed', 'Local control unconfirmed'),
+                    ('trust', 'trust this folder'), ('signin', 'Sign in with ChatGPT'),
+                ):
+                    if marker.casefold() in plain.casefold():
+                        raise RuntimeError('QA screen: ' + label)
             elif not self.process.isalive():
                 break
             else:
