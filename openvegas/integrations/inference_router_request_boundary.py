@@ -9,12 +9,21 @@ from __future__ import annotations
 import asyncio
 import os
 from dataclasses import dataclass
+from types import MappingProxyType
 
 from websockets.protocol import State
 
 from . import codex_handoff_policy as policy
 from .codex_billing_route import _OWNED_SERVERS, _POLICY_CONTEXT
-from .codex_live_transport import TransportRefused, TransportUncertain, _path, _send
+from .codex_live_transport import (
+    _LIMITS,
+    _MAX_FRAME,
+    TransportRefused,
+    TransportUncertain,
+    _frame,
+    _path,
+    _send,
+)
 from .codex_stable_transport import StableTransport
 from .native_owned_process import OwnedProcess
 
@@ -49,6 +58,19 @@ class RequestStableTransport(StableTransport):
     """Reuse the native input/cancellation relay, not the old work inventory."""
 
     request_boundary = True
+    # Codex can fetch large native history pages at startup. Only the owned
+    # backend reader gets the larger envelope, never the sending TUI.
+    backend_limits = MappingProxyType({**_LIMITS, 'max_size': 16 * 1024 * 1024, 'max_queue': 1})
+    _large_history_reads = frozenset({'thread/read', 'thread/list', 'thread/turns/list', 'thread/items/list'})
+
+    def _read_backend_frame(self, raw):
+        frame = _frame(raw)
+        oversized = len(raw) > _MAX_FRAME or (
+            len(raw) > _MAX_FRAME // 4 and not raw.isascii() and len(raw.encode('utf-8')) > _MAX_FRAME)
+        if oversized and ('method' in frame or 'result' not in frame or self._phase not in {'open', 'frozen'}
+                          or self._out.get(frame.get('id')) not in self._large_history_reads):
+            raise TransportUncertain('Oversized native message is not a pending history read.')
+        return frame
 
     def assert_request_connection(self, generation):
         self._check(generation, 'frozen')

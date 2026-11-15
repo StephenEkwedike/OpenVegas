@@ -67,13 +67,18 @@ class ClaudeGenerationObserver:
             'modules': ['./observer.js']})
         module = (assets / 'claude-generation-observer.js').read_text().replace(
             '__OPENVEGAS_BILLING_ARGV__', json.dumps(billing))
-        (self.plugin_dir / 'hooks/observer.js').write_text(module)
+        self.write_module(module)
         os.chmod(self.plugin_dir / 'hooks/observer.js', 0o600)
         self.argv = ('--plugin-dir', str(self.plugin_dir))
-        self.env = {'OV_BOUNDARY_CONTROL': str(self._request),
+        self.env = {'OPENVEGAS_CLAUDE_COMMAND_OWNER': 'openvegas-generation',
+                    'OV_BOUNDARY_CONTROL': str(self._request),
                     'OV_BOUNDARY_RESPONSE': str(self._response)}
         self._lock = asyncio.Lock()
         self._closed = False
+
+    def write_module(self, module):
+        ownership = Path(__file__).with_name('assets') / 'claude-command-ownership.js'
+        (self.plugin_dir / 'hooks/observer.js').write_text(ownership.read_text() + module)
 
     @staticmethod
     def _write(path, value):

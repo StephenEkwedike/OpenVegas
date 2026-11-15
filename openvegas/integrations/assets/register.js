@@ -15,6 +15,7 @@ const GAMES = [
 ];
 const GAME_MARKS = ['21', '00', '777', 'A/K', 'P/B', 'RUN', 'AIM'];
 let theme = 'felt';
+let managedHud = false;
 let gameRequestPending = false;
 let gameTable = null;
 let gameTableFailed = false;
@@ -252,6 +253,7 @@ function balance() {
 }
 
 function billing() {
+  if (managedHud) return 'Current payer: see terminal HUD';
   if (!state) return 'billing unavailable';
   if (state?.billing_mode === 'openvegas_v') {
     return '$V API billing | ' + money(state.spending?.used_or_reserved_v) + '/' +
@@ -266,6 +268,7 @@ function display(value) {
 }
 
 function shortBilling() {
+  if (managedHud) return 'payer: see terminal HUD';
   if (!state) return 'billing unavailable';
   if (state.billing_mode === 'openvegas_v') return '$V API billing';
   if (state.billing_mode === 'openvegas_v_unavailable') return '$V unavailable; no fallback';
@@ -387,6 +390,11 @@ async function startDemo($, signal) {
 
 export function register(on) {
   on('session.start', async ($, e, next) => {
+    // Presentation/dispatch hint only. Never read a token, account or IPC path.
+    managedHud = false;
+    try {
+      managedHud = await $.env.get('OPENVEGAS_CLAUDE_COMMAND_OWNER') === 'openvegas-generation';
+    } catch { /* Older standalone mod hosts need no private observer. */ }
     gameGraphics?.reset();
     gameTable = null; gameTableFailed = false; gameRequestPending = false;
     reviewArt = null; reviewEpoch++;
@@ -408,9 +416,11 @@ export function register(on) {
     sparklesEnabled = (await $.store.get('sparklesEnabled')) !== false;
     if (!dispatchAlive(epoch, next.signal)) return next(e);
     startClocks($);
-    await $.command.register({ name: 'openvegas', description: 'OpenVegas controls and animations',
+    // Only the supervised observer can attach the native session ID to a switch.
+    // Its private launch owns the shared name; ordinary plugin installs keep it.
+    if (!managedHud) await offerNativeCommand($, { name: 'openvegas', description: 'OpenVegas controls and animations',
       argumentHint: '[' + CONTROLS.actions.map(action => action.name).join('|') + '|demo|pause]', immediate: true });
-    await $.command.register({ name: 'pets', description: 'Open or hide OpenVegas animations',
+    await offerNativeCommand($, { name: 'pets', description: 'Open or hide OpenVegas animations',
       argumentHint: '[off]', immediate: true });
     return next(e);
   });
@@ -500,14 +510,18 @@ export function register(on) {
     return next(e);
   });
   on('command.run', { command: 'openvegas' }, async ($, e, next) => {
+    const owner = await nativeCommandOwner($, 'openvegas');
+    if (!owner) return next(e);
     const epoch = session;
     const requested = (e.args || '').trim().toLowerCase();
     const action = CONTROLS.aliases[requested] || requested;
     if (action === 'quota') return { text: 'Host quota is not available from this command. Check the host usage display; the OpenVegas HUD can show a low-quota warning when the host supplies usage data.' };
-    if (action === 'use v' || action === 'use host') {
+    const switchTarget = /^use[ \t]+(v|host)$/.exec(action);
+    if (switchTarget) {
+      if (managedHud || owner === 'openvegas-generation') return next(e);
       if (activeTurn || gameRequestPending) return { text: 'Finish the active turn or game before switching billing.' };
       try {
-        const result = await $.process.run([...HELPER, '--action', action === 'use v' ? 'use-v' : 'use-host'], { timeoutMs: 4000 });
+        const result = await $.process.run([...HELPER, '--action', 'use-' + switchTarget[1]], { timeoutMs: 4000 });
         const value = JSON.parse(result.stdout);
         return { text: display(value.text || 'Billing unchanged.') };
       } catch { return { text: 'Billing switch unavailable in this session. No billing change or prompt sent.' }; }
@@ -606,6 +620,7 @@ export function register(on) {
     if (action === 'billing') {
       await refresh($);
       if (!dispatchAlive(epoch, next?.signal)) return {};
+      if (managedHud) return { text: billing() + '. No billing settings were changed.' };
       if (!state) return { text: 'Billing information unavailable. No billing settings were changed.' };
       return { text: billing() + '. $V cannot refill subscription quota. ' + (state?.gateway_available ?
         'Use /openvegas use v for confirmed direct API billing, or /openvegas use host to switch back.' :
@@ -633,6 +648,7 @@ export function register(on) {
     return {};
   });
   on('command.run', { command: 'pets' }, async ($, e, next) => {
+    if (await nativeCommandOwner($, 'pets') !== 'openvegas') return next(e);
     const epoch = session;
     if (!dispatchAlive(epoch, next?.signal)) return {};
     const action = (e.args || '').trim();
@@ -686,7 +702,8 @@ export function register(on) {
     if (closed || e.props?.hasSurvey) return other;
     const columns = e.props?.bodyColumns || 40;
     const palette = THEMES[theme];
-    const summary = (columns < 52 ? 'OV / ' : 'OPENVEGAS / ') + activityLabel() + ' / ' + balance() + ' / ' + shortBilling() +
+    const readout = managedHud ? 'wallet and payer: see terminal HUD' : balance() + ' / ' + shortBilling();
+    const summary = (columns < 52 ? 'OV / ' : 'OPENVEGAS / ') + activityLabel() + ' / ' + readout +
       (paused ? ' | paused' : '');
     const shimmer = sparkleText();
     return Box({ flexDirection: 'column', children: [
@@ -782,7 +799,7 @@ export function register(on) {
         link('game-guide', '/ui/how-to-play', 'Existing game guide'));
     } else if (panel === 'wallet') {
       details.push(line('wallet-heading', 'WALLET', { bold: true, color: palette.color }),
-        line('wallet-billing', state ? billing() : 'Wallet and billing information unavailable.'),
+        line('wallet-billing', managedHud || state ? billing() : 'Wallet and billing information unavailable.'),
         line('wallet-separation', '$V cannot refill subscription quota. Activity earns no credits.'),
         link('wallet-link', '/ui/balance', 'Wallet and history'));
     } else if (panel === 'cosmetics') {

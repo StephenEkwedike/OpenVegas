@@ -122,8 +122,8 @@ jobs:
         env:
           EXPECTED_TARGET: ${{ matrix.target }}
         run: |
-          python -c "import json,os; r=json.load(open('dist/native-candidate/candidate.json')); assert r['version']=='0.3.19' and r['os']+'-'+r['arch']==os.environ['EXPECTED_TARGET']; assert r['source_sha256']=='d06f59169b9d8fd45a51663dc7d36c3f989df3bc7c3a42a793685fdac381fc22'"
-          python -B dist/git-source/scripts/verify_native_router_candidate.py verify --frozen dist/frozen --freeze-sha256 ef56c31b384be905cca6b292b656b94bb4e8d78e719b398c2f13dc0e6e16f230 --candidate dist/native-candidate --output dist/native-candidate/independent-verified.json
+          python -c "import json,os; r=json.load(open('dist/native-candidate/candidate.json')); assert r['version']=='0.3.19' and r['os']+'-'+r['arch']==os.environ['EXPECTED_TARGET']; assert r['source_sha256']=='f85cb9440c8d20ac65df5c2ff4275c80df9df4676672dd76dca6cbab8779bf79'"
+          python -B dist/git-source/scripts/verify_native_router_candidate.py verify --frozen dist/frozen --freeze-sha256 fcd2cd871db37822e13b72949f16ed7d00052aa800b3c003fffd9117e691caeb --candidate dist/native-candidate --output dist/native-candidate/independent-verified.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -226,3 +226,39 @@ jobs:
           export OV_EXPECT_LIBRARY="$RUNNER_TEMP/openvegas-linker-probe"
           LD_LIBRARY_PATH="$OV_EXPECT_LIBRARY" node node_modules/openvegas-ai/bin/openvegas.js --_terminal-relay -- /bin/sh -c 'test "$LD_LIBRARY_PATH" = "$OV_EXPECT_LIBRARY" && node --version'
           env -u LD_LIBRARY_PATH -u LD_LIBRARY_PATH_ORIG node node_modules/openvegas-ai/bin/openvegas.js --_terminal-relay -- /bin/sh -c 'test -z "${LD_LIBRARY_PATH-}" && node --version'
+      - name: Install pinned official native clients for QA only
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --prefix hosts --registry=https://registry.npmjs.org --ignore-scripts --include=optional --no-audit --no-fund --no-package-lock --save-exact @openai/codex@0.166.0 @anthropic-ai/claude-code@2.1.322
+      - name: Exercise installed customer launcher with both actual native clients
+        shell: python
+        run: |
+          import json, os, pathlib, re, shutil, subprocess, tempfile
+          root = pathlib.Path.cwd()
+          bins = (root / 'hosts/node_modules/.bin').resolve(strict=True)
+          app = (root / 'installed/node_modules/openvegas-ai/bin/openvegas.js').resolve(strict=True)
+          node = pathlib.Path(shutil.which('node')).resolve(strict=True)
+          with tempfile.TemporaryDirectory() as scratch:
+              home = pathlib.Path(scratch)
+              env = {k: os.environ[k] for k in ('PATH','SYSTEMROOT','WINDIR','PATHEXT','COMSPEC','SYSTEMDRIVE','ProgramFiles','ProgramFiles(x86)','ProgramW6432') if k in os.environ}
+              env.update(PATH=str(bins)+os.pathsep+env['PATH'], HOME=scratch, USERPROFILE=scratch,
+                         TMP=scratch, TEMP=scratch, TMPDIR=scratch, XDG_CONFIG_HOME=str(home/'config'),
+                         APPDATA=str(home/'roaming'), LOCALAPPDATA=str(home/'local'), CI='true',
+                         CODEX_HOME=str(home/'.codex'), CLAUDE_CONFIG_DIR=str(home/'.claude'),
+                         DISABLE_TELEMETRY='1', DISABLE_AUTOUPDATER='1', CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC='1',
+                         OPENVEGAS_LOAD_PROJECT_ENV='0', OPENVEGAS_BACKEND_URL='http://127.0.0.1:1')
+              for host,version in [('codex','0.166.0'),('claude','2.1.322')]:
+                  exe = shutil.which(host,path=env['PATH'])
+                  if not exe or pathlib.Path(exe).parent != bins: raise SystemExit('Missing pinned host shim: '+host)
+                  with subprocess.Popen([exe,'--version'],env=env,cwd=home,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL) as p:
+                      output = p.communicate(timeout=40)[0].decode('utf8','replace')
+                      if p.returncode or not re.search(r'(?<![\d.])'+re.escape(version)+r'(?![\d.])',output): raise SystemExit('Pinned native version failed: '+host)
+                  print(host,version,'actual executable passed')
+              q = subprocess.run([node,app,'--local','go','--host','both','--dry-run'],cwd=home,env=env,
+                                 stdin=subprocess.DEVNULL,capture_output=True,text=True,timeout=180)
+              rows = q.stdout.splitlines()
+              for row in ('codex 0.166.0: mcp_text_only','claude 2.1.322: mod_and_mcp'):
+                  if row not in rows: raise SystemExit('Installed native setup plan not verified: '+row)
+              if q.returncode: raise SystemExit('Installed customer dry run failed')
+              print('Both native plans verified without setup, login, or a model turn.')

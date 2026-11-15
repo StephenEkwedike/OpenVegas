@@ -66,7 +66,7 @@ export function register(on) {
   });
   on('command.run', { command: 'openvegas' }, async ($, e, next) => {
     const match = /^use[ \t]+(v|host)$/i.exec((e.args ?? '').trim());
-    if (!match) return next(e);
+    if (!match || !await nativeCommandOwner($, 'openvegas')) return next(e);
     await billing($, match[1].toLowerCase());
     return {};
   });
@@ -77,8 +77,6 @@ export function register(on) {
     const responsePath = await $.env.get('OV_BOUNDARY_RESPONSE');
     const generation = await $.env.get('OV_BOUNDARY_GENERATION');
     if (!requestPath || !responsePath || !generation) return result;
-    await $.command.register({ name: 'openvegas', description: 'OpenVegas local controls',
-      argumentHint: '[use v|use host]', immediate: true });
     let answered = null, observing = false;
     $.clock.every(50, async () => {
       if (observing) return;
@@ -95,6 +93,8 @@ export function register(on) {
         answered = request.nonce;
       } finally { observing = false; }
     });
+    await offerNativeCommand($, { name: 'openvegas', description: 'OpenVegas local controls',
+      argumentHint: '[use v|use host]', immediate: true });
     return result;
   });
 }
@@ -125,7 +125,7 @@ class ClaudeRouterObserver(ClaudeGenerationObserver):
             hooks = json.loads((self.plugin_dir / 'hooks/hooks.json').read_text())
             command = hooks['hooks']['UserPromptSubmit'][0]['hooks'][0]['command']
             module = _MODULE.replace('__BILLING__', json.dumps(shlex.split(command)))
-            (self.plugin_dir / 'hooks/observer.js').write_text(module)
+            self.write_module(module)
             self.generation = secrets.token_hex(16)
             self.env['OV_BOUNDARY_GENERATION'] = self.generation
         except BaseException:

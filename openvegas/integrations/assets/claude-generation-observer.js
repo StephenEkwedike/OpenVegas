@@ -160,8 +160,6 @@ export function register(on) {
     const responsePath = await $.env.get('OV_BOUNDARY_RESPONSE');
     const generation = await $.env.get('OV_BOUNDARY_GENERATION');
     if (!requestPath || !responsePath || !generation) return result;
-    await $.command.register({ name: 'openvegas', description: 'OpenVegas local controls',
-      argumentHint: '[use v|use host]', immediate: true });
     let answered = null;
     let observing = false;
     $.clock.every(50, async () => {
@@ -217,20 +215,23 @@ export function register(on) {
         settings_digest: await digest(settings), tools_digest: await digest(tools) };
       // Async getters can interleave with native task/turn/tool events. Retry
       // observation rather than publishing an internally inconsistent snapshot.
+      const controlsReady = !!await nativeCommandOwner($, 'openvegas');
       if (revision !== workRevision) return;
       await $.fs.write(responsePath, JSON.stringify({ generation, nonce: request.nonce,
-        snapshot, draft, composer_ready: filled.isFilled === true, controls_ready: true,
+        snapshot, draft, composer_ready: filled.isFilled === true, controls_ready: controlsReady,
         boundary_ready: boundaryReady, work, pending, untransferable }));
       answered = request.nonce;
       } finally {
         observing = false;
       }
     });
+    await offerNativeCommand($, { name: 'openvegas', description: 'OpenVegas local controls',
+      argumentHint: '[use v|use host]', immediate: true });
     return result;
   });
   on('command.run', { command: 'openvegas' }, async ($, e, next) => {
     const match = /^(?:use)[ \t]+(v|host)$/i.exec((e.args ?? '').trim());
-    if (!match) return next(e);
+    if (!match || !await nativeCommandOwner($, 'openvegas')) return next(e);
     await billing($, match[1].toLowerCase());
     return {};
   });

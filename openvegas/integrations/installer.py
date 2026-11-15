@@ -107,7 +107,8 @@ def companion_art():
 
 def mod_source(command, site):
     graphics = "import { GAME_ART } from './game-art-module.js';\n" + (ASSETS / "game-graphics.js").read_text(encoding="utf-8")
-    return graphics + (ASSETS / "register.js").read_text(encoding="utf-8").replace(
+    ownership = (ASSETS / "claude-command-ownership.js").read_text(encoding="utf-8")
+    return graphics + ownership + (ASSETS / "register.js").read_text(encoding="utf-8").replace(
         "__OPENVEGAS_HELPER__", json.dumps(command)).replace(
         "__OPENVEGAS_SITE__", json.dumps(site)).replace(
         "__OPENVEGAS_CONTROLS__", json.dumps({"actions": action_catalog(), "aliases": ALIASES,

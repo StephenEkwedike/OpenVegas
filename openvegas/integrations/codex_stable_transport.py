@@ -51,6 +51,9 @@ class BackendDetachProof:
 class StableTransport(LiveTransport):
     """Experimental until real native race, cache and failure acceptance passes."""
 
+    backend_limits = _LIMITS
+    _read_backend_frame = staticmethod(_frame)
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._upstream = self._up_task = None
@@ -219,7 +222,7 @@ class StableTransport(LiveTransport):
     async def _connect_backend(self):
         epoch, phase, front, generation = self._epoch, self._phase, self._client, self._generation
         path, inode, endpoint = self._up, self._inode, self._source_endpoint
-        up = await unix_connect(path, uri="ws://localhost/", proxy=None, **_LIMITS)
+        up = await unix_connect(path, uri="ws://localhost/", proxy=None, **self.backend_limits)
         try:
             async with self._lock:
                 if (epoch != self._epoch or generation != self._generation
@@ -433,7 +436,7 @@ class StableTransport(LiveTransport):
                 async with self._lock:
                     if epoch != self._epoch or upstream is not self._upstream:
                         return
-                    frame = _frame(raw)
+                    frame = self._read_backend_frame(raw)
                     key, method = frame.get("id"), frame.get("method")
                     if not method and key in self._internal:
                         future = self._internal[key]

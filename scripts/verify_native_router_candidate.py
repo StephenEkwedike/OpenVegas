@@ -298,7 +298,8 @@ def verify_assets(binary: Path, blobs: dict[str, bytes], selected: dict[str, str
     for name in sorted(selected):
         if name.endswith(".py"):
             continue
-        if name not in archive.toc or archive.extract(name) != blobs[name]:
+        member = name.replace("/", "\\") if binary.name.endswith(".exe") else name
+        if member not in archive.toc or archive.extract(member) != blobs[name]:
             raise ValueError("Packaged native asset differs from frozen source: " + name)
         result[name] = digest(blobs[name])
     return result

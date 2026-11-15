@@ -46,6 +46,30 @@ class DirectConnect(connect):
         return exc
 
 
+async def _host_upgrade_limited(scope, send, response):
+    if 'websocket.http.response' not in scope.get('extensions', {}):
+        await send({'type': 'websocket.close', 'code': 1008})
+        return
+    from email.utils import format_datetime, parsedate_to_datetime
+
+    headers = [(b'content-type', b'application/json')]
+    hints = response.headers.get_all('retry-after')
+    if len(hints) == 1:
+        hint = hints[0]
+        valid = 1 <= len(hint) <= 10 and hint.isascii() and hint.isdigit()
+        if not valid and len(hint) == 29 and hint.isascii():
+            try:
+                valid = format_datetime(parsedate_to_datetime(hint), usegmt=True) == hint
+            except (TypeError, ValueError, OverflowError):
+                pass
+        if valid:
+            headers.append((b'retry-after', hint.encode('ascii')))
+    await send({'type': 'websocket.http.response.start', 'status': 429, 'headers': headers})
+    await send({'type': 'websocket.http.response.body', 'body': json.dumps({'error': {
+        'type': 'rate_limit_error', 'message': 'Host is rate limited. No prompt was sent on this connection.'
+    }}).encode()})
+
+
 def native_tcp_peer_auth():
     if sys.platform == 'linux':
         from .inference_router_linux import LinuxTCPPeerAuth
@@ -494,7 +518,7 @@ class InferenceRouter:
             self.state.finish(lease, outcome)
 
     async def _websocket(self, scope, receive, send, path, headers):
-        from websockets.exceptions import WebSocketException
+        from websockets.exceptions import InvalidStatus, WebSocketException
 
         slot, tasks, outcome = None, [], 'rejected'
         try:
@@ -559,8 +583,15 @@ class InferenceRouter:
                 for task in done:
                     await task
                 await send({'type': 'websocket.close', 'code': 1000})
-        except (IntegrationError, RouterStateError, ValueError, OSError, WebSocketException):
-            await self._error(scope, send, 409, 'Native persistent transport is not ready to change payer.')
+        except (IntegrationError, RouterStateError, ValueError, OSError, WebSocketException) as exc:
+            # The host rejected the upgrade before any response.create could be sent.
+            # Never extend this classification to errors on an established socket.
+            if (slot is not None and slot.connecting and slot.mode == 'host'
+                    and isinstance(exc, InvalidStatus) and exc.response.status_code == 429):
+                outcome = 'rejected'
+                await _host_upgrade_limited(scope, send, exc.response)
+            else:
+                await self._error(scope, send, 409, 'Native persistent transport is not ready to change payer.')
         finally:
             for task in tasks:
                 task.cancel()
