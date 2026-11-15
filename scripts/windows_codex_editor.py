@@ -9,7 +9,14 @@ FOOTERS = {"codex": r"\? for shortcuts|shortcuts for help|[0-9]{1,3}% context le
 
 
 def ready(frame, host):
-    return bool(re.search(FOOTERS[host], frame, re.I) and re.search(PROMPT, frame))
+    if re.search(r"(?im)^\s*[>\u203a\u276f]\s*\d+[.)]\s|press enter to|enter.{0,3}continue|trust this|folder access|select a|choose a", frame):
+        return False
+    if re.search(FOOTERS[host], frame, re.I) and re.search(PROMPT, frame):
+        return True
+    # The green public driver uses the native title then settles, not a mandatory
+    # footer. Only accept a native chat glyph (never an ASCII menu selection).
+    return host == "codex" and bool(re.search(r"OpenAI\s+Codex", frame, re.I) and
+                                    re.search(r"(?m)^\s*[\u203a\u276f](?!\s*\d+[.)])(?:\s|$)", frame))
 
 
 def enter(term, text, checkpoint, purpose, *, host="codex"):
@@ -29,12 +36,14 @@ def enter(term, text, checkpoint, purpose, *, host="codex"):
         if ready(frame, host):
             if since is None:
                 since = time.monotonic()
-            if time.monotonic() - since >= .45:
+            if time.monotonic() - since >= .75:
                 break
         else:
             since = None
         time.sleep(.025)
     else:
+        if hasattr(pty, 'pane_failure'):
+            raise pty.CheckpointMiss(pty.pane_failure(frame))
         raise pty.CheckpointMiss(pty.Failure.EDITOR if re.search(FOOTERS[host], frame, re.I)
                                  else pty.Failure.FOOTER)
     checkpoint(purpose + "-echo")
@@ -47,6 +56,8 @@ def enter(term, text, checkpoint, purpose, *, host="codex"):
         if exc.reason is pty.Failure.UNKNOWN:
             raise pty.CheckpointMiss(pty.Failure.ECHO) from None
         raise
+    time.sleep(.15)
+    term.read()
     term.before_input = guard()
     checkpoint(purpose + "-response")
     term.process.write("\r")

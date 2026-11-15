@@ -175,7 +175,7 @@ def interact(host, term, fixture, control, checkpoint):
 
     checkpoint("rehearsal-composer")
     # Stop before sending ANY input at a trust, auth, or first-run UI.
-    term.expect(r"\? for shortcuts|Type your message|shortcuts for help", "native composer",
+    term.expect(r"OpenAI\s+Codex|\? for shortcuts|Type your message|shortcuts for help", "native composer",
                 timeout=85, diagnose="claude-start")
     for i, mode in enumerate(MODES):
         checkpoint("rehearsal-control-" + str(i))

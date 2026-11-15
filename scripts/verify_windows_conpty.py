@@ -25,6 +25,16 @@ def require_hosted_lane():
 
 
 class Failure(Enum):
+    BLANK = 'post-login-empty-frame'
+    SANDBOX_TEXT = 'post-login-sandbox-text'
+    SCREEN_TEXT = 'post-login-accessibility-text'
+    MODEL_TEXT = 'post-login-model-selection'
+    TRUST_TEXT = 'post-login-folder-access'
+    TASK_TEXT = 'post-login-task-list'
+    ERROR_TEXT = 'post-login-error-text'
+    SELECT_TEXT = 'post-login-numbered-menu'
+    CONFIRM_TEXT = 'post-login-enter-instruction'
+    TITLE = 'native-title-without-editor'
     FG_ZERO = "foreground-exit-zero"
     FG_ONE = "foreground-exit-one"
     FG_TWO = "foreground-exit-two"
@@ -94,6 +104,24 @@ class CheckpointMiss(RuntimeError):
     def __init__(self, reason):
         self.reason = Failure(reason)
         super().__init__('Missing native checkpoint: ' + self.reason.value)
+
+
+def pane_failure(frame):
+    text = ' '.join(frame.casefold().split())
+    if not text:
+        return Failure.BLANK
+    for reason, cues in (
+        (Failure.TRUST_TEXT, ('folder access', 'trust and continue', 'open restricted', 'trust this')),
+        (Failure.SCREEN_TEXT, ('screen reader', 'accessibility', 'reduced motion')),
+        (Failure.MODEL_TEXT, ('try new model', 'use existing model', 'just got an upgrade')),
+        (Failure.TASK_TEXT, ('agent command center', 'no tasks yet', 'new task')),
+        (Failure.SANDBOX_TEXT, ('sandbox',)), (Failure.ERROR_TEXT, ('error:', 'failed to', 'cannot ', 'unable to')),
+        (Failure.CONFIRM_TEXT, ('press enter', 'enter to', 'enter continue', 'enter confirm')),
+        (Failure.SELECT_TEXT, ('1. ', '2. ')), (Failure.TITLE, ('openai codex',)),
+    ):
+        if any(cue in text for cue in cues):
+            return reason
+    return Failure.EDITOR
 
 
 def screen_failure(stage, frame):
