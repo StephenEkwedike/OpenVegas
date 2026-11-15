@@ -1,24 +1,20 @@
-name: Windows native billing QA (offline)
-run-name: ${{ contains(github.event.head_commit.message, '[qa-foreground:') && 'Targeted Windows foreground QA (not full certification)' || 'Windows native billing QA (offline)' }}
-
+name: Windows repaired customer foreground (offline)
 on:
   push:
-    branches: ['codex/qa-windows-native-billing-20261114']
-
+    branches: ['codex/qa-repaired-win32-0319-foreground']
 permissions:
   contents: read
-
+  actions: read
 jobs:
   windows-offline:
     runs-on: windows-2022
     timeout-minutes: 20
     env:
       CI: 'true'
-      PYTEST_ADDOPTS: '-q -p no:cacheprovider --tb=short --show-capture=no'
-      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
+      PYTEST_ADDOPTS: '-q -p no:cacheprovider --tb=no --show-capture=no'
       DISABLE_TELEMETRY: '1'
       DISABLE_AUTOUPDATER: '1'
-      QA_FOREGROUND: ${{ contains(github.event.head_commit.message, '[qa-foreground:claude]') && 'claude' || contains(github.event.head_commit.message, '[qa-foreground:codex]') && 'codex' || contains(github.event.head_commit.message, '[qa-foreground:both]') && 'both' || '' }}
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
     defaults:
       run:
         shell: pwsh
@@ -34,6 +30,20 @@ jobs:
         with:
           node-version: '22'
           architecture: x64
+      - name: Check assembly run, artifact ID and ZIP digest
+        run: python -IB scripts/qa_artifact_provenance.py
+      - uses: actions/download-artifact@v4
+        with:
+          name: customer-tarballs-unpublished
+          run-id: 43742060705
+          github-token: ${{ github.token }}
+          path: packs
+      - name: Pin the actual customer files and install the exact pair offline
+        run: |
+          python -IB scripts/qa_customer_image.py packs
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm.cmd install --offline --ignore-scripts --no-fund --no-audit --no-package-lock --cache ./empty-cache --prefix ./installed ./packs/openvegas-ai-0.3.19.tgz ./packs/lordesteph-openvegas-win32-x64-0.3.19.tgz
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
       - name: Install focused test dependencies
         run: >-
           python -m pip --isolated install --only-binary=:all: --no-cache-dir
@@ -60,7 +70,7 @@ jobs:
             $exe = (Get-Item -LiteralPath $paths[0]).FullName
             "OV_WINDOWS_$($spec.id)_EXE=$exe" >> $env:GITHUB_ENV
           }
-      - name: Install isolated customer candidate and pinned ConPTY driver
+      - name: Install pinned ConPTY driver and test-only dependencies
         run: |
           if ((git rev-parse HEAD) -ne $env:GITHUB_SHA) { throw 'Unexpected candidate revision' }
           $pin = Join-Path $env:RUNNER_TEMP 'openvegas-conpty-pin.txt'
@@ -70,11 +80,14 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           python -m pip --isolated install --only-binary=:all: -c requirements.lock keyring python-dotenv prompt-toolkit 'setuptools>=77.0.3' wheel
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          python -m pip --isolated install --no-deps --no-build-isolation .
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           $bash = Join-Path $env:ProgramFiles 'Git/bin/bash.exe'
           if (!(Test-Path -LiteralPath $bash -PathType Leaf)) { throw 'Expected runner Git Bash' }
           "OV_WINDOWS_BASH_EXE=$bash" >> $env:GITHUB_ENV
+      - name: Verify installed customer PE, JS and both native SHA-256 pins
+        run: |
+          python -IB scripts/qa_customer_image.py installed
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          "OV_QA_NODE=$((Get-Command node.exe).Source)" >> $env:GITHUB_ENV
       - name: Block outbound traffic from native hosts, helpers and Python
         id: isolation
         run: |
@@ -88,7 +101,7 @@ jobs:
           $git = Join-Path $env:ProgramFiles 'Git'
           $tools = @((Get-Command python.exe).Source, (Get-Command node.exe).Source, $env:OV_WINDOWS_BASH_EXE,
             (Join-Path $git 'usr/bin/bash.exe'), (Join-Path $git 'usr/bin/sh.exe'), (Join-Path $git 'cmd/git.exe'))
-          $programs = @(($hosts + $helpers + $tools) | Sort-Object -Unique)
+          $programs = @(($hosts + $helpers + $tools + @($env:OV_QA_PE)) | Sort-Object -Unique)
           $n = 0
           foreach ($exe in $programs) {
             if (!$exe -or ![IO.Path]::IsPathFullyQualified($exe) -or !(Test-Path -LiteralPath $exe -PathType Leaf)) {
@@ -105,144 +118,14 @@ jobs:
               throw 'Effective executable-specific outbound block missing'
             }
           }
-      - name: Native image, bundled catalog and peer ownership
-        if: ${{ success() && env.QA_FOREGROUND == '' }}
-        run: |
-          python -B -m pytest "--junitxml=$env:RUNNER_TEMP/images.xml" tests/test_integrations/test_windows_native_image.py tests/test_integrations/test_inference_router_windows.py --deselect=tests/test_integrations/test_inference_router_windows.py::test_refuse_wrong_os *> $null
-          exit $LASTEXITCODE
-      - name: Native Windows private receipt flush and reopen
-        if: ${{ !cancelled() && steps.isolation.outcome == 'success' && (env.QA_FOREGROUND == 'both' || env.QA_FOREGROUND == '') }}
-        run: |
-          python -B -m pytest "--junitxml=$env:RUNNER_TEMP/receipt.xml" tests/test_integrations/test_inference_router_shutdown_receipt_windows.py::test_native_windows_private_flushed_receipt_survives_reopen *> $null
-          exit $LASTEXITCODE
-      - name: Installed customer controls in foreground ConPTY
-        if: ${{ !cancelled() && steps.isolation.outcome == 'success' }}
+      - name: Real installed customer in foreground ConPTY, both native hosts
+        id: foreground
         env:
           OV_WINDOWS_CONPTY_ISOLATED: '1'
         run: |
-          $fixture = 'tests/test_integrations/test_windows_installed_switch.py'
-          $cases = @($fixture, 'tests/test_integrations/test_windows_customer.py')
-          if ($env:QA_FOREGROUND) {
-            $hostsToTest = if ($env:QA_FOREGROUND -eq 'both') { 'claude', 'codex' } else { $env:QA_FOREGROUND }
-            $cases = @(foreach ($client in $hostsToTest) { "${fixture}::test_installed_customer_switch[$client]" })
-          }
-          python -B -m pytest "--junitxml=$env:RUNNER_TEMP/customer.xml" @cases *> $null
+          $fixture = 'tests/test_integrations/test_windows_installed_switch.py::test_installed_customer_switch'
+          python -B -m pytest "--junitxml=$env:RUNNER_TEMP/customer.xml" "${fixture}[codex]" "${fixture}[claude]" *> $null
           exit $LASTEXITCODE
-      - name: Native session lease and owner crash recovery
-        if: ${{ !cancelled() && steps.isolation.outcome == 'success' && env.QA_FOREGROUND == '' }}
-        run: |
-          python -B -m pytest "--junitxml=$env:RUNNER_TEMP/lease.xml" tests/test_integrations/test_windows_session_lease.py *> $null
-          exit $LASTEXITCODE
-      - name: Terminal control, CLI and native console restoration
-        id: terminal
-        if: ${{ !cancelled() && steps.isolation.outcome == 'success' && env.QA_FOREGROUND == '' }}
-        run: |
-          python -B -m pytest "--junitxml=$env:RUNNER_TEMP/terminal.xml" tests/test_integrations/test_windows_terminal_host.py tests/test_integrations/test_inference_router_session.py::test_peer_cleanup_error_cannot_skip_wallet_revocation *> $null
-          exit $LASTEXITCODE
-      - name: Installed Codex app-server against synthetic loopback
-        if: ${{ !cancelled() && steps.isolation.outcome == 'success' && env.QA_FOREGROUND == '' }}
-        env:
-          OV_WINDOWS_CODEX_PAYER_PROBE: '1'
-        run: |
-          $env:OV_WINDOWS_CODEX_ENTRY = $env:OV_WINDOWS_CODEX_EXE
-          python -B -m pytest "--junitxml=$env:RUNNER_TEMP/codex.xml" tests/test_integrations/test_windows_codex_payer_roundtrip.py *> $null
-          exit $LASTEXITCODE
-      - name: Installed Claude stream against synthetic loopback
-        if: ${{ !cancelled() && steps.isolation.outcome == 'success' && env.QA_FOREGROUND == '' }}
-        run: |
-          python -B -m pytest "--junitxml=$env:RUNNER_TEMP/claude.xml" tests/test_integrations/test_windows_claude_stream_native.py *> $null
-          exit $LASTEXITCODE
-      - name: Require selected named native passes and reject skips
-        if: ${{ !cancelled() && steps.isolation.outcome == 'success' }}
-        shell: python
-        run: |
-          import os
-          import sys
-          import xml.etree.ElementTree as ET
-          from pathlib import Path
-
-          installed = {
-              'codex': 'test_installed_customer_switch[codex]',
-              'claude': 'test_installed_customer_switch[claude]',
-          }
-          labels = (
-              'child-exited', 'no-reply', 'trust-dialog', 'login-dialog', 'api-key-dialog',
-              'startup-dialog', 'git-bash-error', 'native-option-error', 'switch-busy',
-              'switch-held', 'switch-refused', 'native-route', 'native-inventory', 'native-root',
-              'native-model', 'native-workspace', 'native-fence', 'session-lease', 'command-unavailable',
-              'wallet-prepare', 'wallet-outcome', 'request-boundary',
-              'supplier-not-reached', 'supplier-protocol', 'control-as-prompt', 'answer-not-rendered',
-              'unsolicited-request', 'prompt-shape', 'exit-timeout', 'exit-nonzero', 'bank-receipt',
-              'launcher-cleanup',
-              'receipt-write', 'bridge-at-exit', 'session-shutdown', 'native-process-exit',
-              'console-restore', 'grant-close',
-          )
-          stages = (
-              'isolation', 'fixture-canonical', 'fixture-configure', 'conpty', 'native-start', 'composer',
-              'switch-v', 'switch-host', 'status-0', 'status-1', 'status-2',
-              'answer-0', 'answer-1', 'answer-2', 'shutdown', 'supplier-receipts',
-          )
-          required = {
-              'images': ('test_launches_official_windows_image[codex-0.166.0]',
-                         'test_launches_official_windows_image[claude-2.1.322]',
-                         'test_native_windows_child_socket_only',
-                         'test_session_close_denies_pending_request_and_retires_handle_after_inspection'),
-              'lease': ('test_default_lease_directory_independent_of_launcher_env',
-                        'test_second_process_refused_until_owner_exit'),
-              'terminal': ('test_windows_terminal_cli_separates_launch_and_controls',
-                           'test_native_windows_console_restore', 'test_windows_locator_and_profile_are_private',
-                           'test_owned_child_routes_and_switches_without_restart[codex]',
-                           'test_owned_child_routes_and_switches_without_restart[claude]',
-                           'test_peer_cleanup_error_cannot_skip_wallet_revocation'),
-              'codex': tuple(f'test_windows_codex_payer_roundtrip[{effort}-{model}]'
-                             for effort in ('low', 'high') for model in ('gpt-6-astra', 'gpt-6.1-sol', 'gpt-6.1-terra')),
-              'claude': ('test_pinned_claude_stream_json_round_trip',),
-              'customer': (*installed.values(), 'test_bad_bank_request_cannot_issue_or_revoke'),
-          }
-          focus = os.environ.get('QA_FOREGROUND', '')
-          if focus:
-              if focus not in ('both', *installed):
-                  sys.exit(1)
-              required = {'customer': tuple(installed.values()) if focus == 'both' else (installed[focus],)}
-          if focus in ('', 'both'):
-              required['receipt'] = ('test_native_windows_private_flushed_receipt_survives_reopen',)
-
-          def bad(case):
-              return any(case.find(tag) is not None for tag in ('failure', 'error', 'skipped'))
-
-          ok = True
-          for group, names in required.items():
-              try:
-                  report = Path(os.environ['RUNNER_TEMP']) / (group + '.xml')
-                  if report.stat().st_size > 16 * 1024 * 1024:
-                      raise ValueError
-                  cases = list(ET.parse(report).getroot().iter('testcase'))
-              except Exception:  # A parser error can contain untrusted report text.
-                  cases = []
-              if any(bad(case) for case in cases) or ((focus or group == 'receipt') and len(cases) != len(names)):
-                  ok = False
-              for name in names:
-                  matches = [case for case in cases if case.get('name') == name]
-                  case = matches[0] if len(matches) == 1 else None
-                  foreground = group == 'customer' and name in installed.values()
-                  if foreground and case is not None and case.get('classname') != 'tests.test_integrations.test_windows_installed_switch':
-                      case = None
-                  if group == 'receipt' and case is not None and case.get('classname') != 'tests.test_integrations.test_inference_router_shutdown_receipt_windows':
-                      case = None
-                  if case is not None and not bad(case):
-                      if foreground or group == 'receipt':
-                          print(f'::notice::Passed: {name}')
-                      continue
-                  ok = False
-                  suffix = ''
-                  if foreground and case is not None and any(case.find(tag) is not None for tag in ('failure', 'error')):
-                      props = case.findall("./properties/property[@name='qa_failure_label']")
-                      if len(props) == 1:
-                          suffix = next((': ' + literal for literal in labels if props[0].get('value') == literal), '')
-                      if not suffix:
-                          history = case.findall("./properties/property[@name='qa_stage']")
-                          if history:
-                              suffix = next((': stage=' + literal for literal in stages
-                                             if history[-1].get('value') == literal), '')
-                  print(f'::error::Failed: {name}{suffix}')
-          sys.exit(0 if ok else 1)
+      - name: Report each named result without raw native or JUnit data
+        if: ${{ !cancelled() && steps.isolation.outcome == 'success' && steps.foreground.outcome != 'skipped' }}
+        run: python -IB scripts/qa_foreground_results.py

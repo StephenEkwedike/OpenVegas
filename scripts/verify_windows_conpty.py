@@ -16,8 +16,8 @@ from pathlib import Path
 def require_hosted_lane():
     required = {
         'CI': 'true', 'GITHUB_ACTIONS': 'true', 'RUNNER_ENVIRONMENT': 'github-hosted',
-        'GITHUB_EVENT_NAME': 'push', 'GITHUB_WORKFLOW': 'Windows native billing QA (offline)',
-        'GITHUB_REF': 'refs/heads/codex/qa-windows-native-billing-20261114',
+        'GITHUB_EVENT_NAME': 'push', 'GITHUB_WORKFLOW': 'Windows repaired customer foreground (offline)',
+        'GITHUB_REF': 'refs/heads/codex/qa-repaired-win32-0319-foreground',
         'OV_WINDOWS_CONPTY_ISOLATED': '1',
     }
     if sys.platform != 'win32' or any(os.environ.get(k) != v for k, v in required.items()):
@@ -25,6 +25,9 @@ def require_hosted_lane():
 
 
 class Failure(Enum):
+    LOCAL_GATE = 'managed-ownership-selection-routing-refused'
+    MANAGED_START = 'managed-billing-unavailable'
+    HOST_MISSING = 'pinned-host-entry-not-found'
     EXITED = 'child-exited'
     UNKNOWN = 'no-reply'
     TRUST = 'trust-dialog'

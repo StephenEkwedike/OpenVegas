@@ -14,6 +14,7 @@ import pytest
 
 from scripts import verify_windows_conpty as conpty
 from scripts import verify_windows_customer as qa
+from scripts.qa_loopback_bank import bank_for
 from tests.test_integrations import test_windows_claude_stream_native as claude
 from tests.test_integrations import test_windows_codex_payer_roundtrip as codex
 
@@ -139,7 +140,7 @@ def canonical_fixture(launcher, host, env, cwd):
     return launcher._fixture_env(host, root, Path(env['SystemRoot'])), str(work)
 
 
-def drive(host, sink, port, checkpoint):
+def drive(host, sink, bank, bank_port, checkpoint):
     from openvegas.integrations import windows_billing_host as launcher
     from openvegas.integrations.inference_router_adapter import VERSIONS
     from openvegas.integrations.windows_native_image import pinned_windows_image
@@ -154,6 +155,7 @@ def drive(host, sink, port, checkpoint):
         checkpoint('fixture-configure')
         configure(host, exe, env, cwd)
         if host == 'codex':
+            bank.catalog = qa.bundled_catalog(exe, env=env, cwd=cwd)
             # Out-of-band observations from the owned app-server, not provider
             # headers. Files exist only inside the disposable job profile.
             from openvegas.emotes._windows_state import private_windows_directory
@@ -173,9 +175,20 @@ def drive(host, sink, port, checkpoint):
                 return result
             sink.lookup = witnessed
         checkpoint('conpty')
-        with conpty.isolated_console(Path(qa.__file__), [host, exe, str(port)], env, cwd) as term:
+        script = Path(qa.__file__).with_name('qa_customer_console.py')
+        args = [host, os.environ['OV_QA_NODE'], os.environ['OV_QA_APP'], str(bank_port)]
+        with conpty.isolated_console(script, args, env, cwd) as term:
             checkpoint('native-start')
-            term.expect(r'Windows managed ' + host, 'managed launch')
+            refusals = {
+                'Windows native ownership, selection or routing could not be verified.': conpty.Failure.LOCAL_GATE,
+                'Managed Windows billing unavailable. No automatic payer fallback.': conpty.Failure.MANAGED_START,
+                'Native Windows host not found on an absolute PATH entry.': conpty.Failure.HOST_MISSING,
+            }
+            banner = term.expect('|'.join(map(re.escape, ['Windows managed ' + host, *refusals])),
+                                 'managed launch', diagnose='managed-start')
+            for message, reason in refusals.items():
+                if message.casefold() == banner.casefold():
+                    raise conpty.CheckpointMiss(reason)
             checkpoint('composer')
             # Some ConPTY versions consume Claude's device-attributes probe,
             # delaying first paint for 60s. Do not extend switch deadlines.
@@ -277,8 +290,20 @@ async def test_installed_customer_switch(host, request):
 
     conpty.require_hosted_lane()
     try:
-        async with supplier(host) as (sink, port):
-            await asyncio.to_thread(drive, host, sink, port, checkpoint)
+        async with supplier(host) as (sink, port), bank_for(host, supplier_port=port) as (bank, hits, bank_port):
+            try:
+                await asyncio.to_thread(drive, host, sink, bank, bank_port, checkpoint)
+            finally:
+                rows = sink.rows if host == 'codex' else sink[0]
+                for key, value in [('supplier_answers', len(rows)), ('bank_http', len(hits)),
+                                   ('bank_issues', bank.events.count('issue')),
+                                   ('bank_revokes', bank.events.count('revoke'))]:
+                    request.node.user_properties.append((key, str(value)))
+            required = ['options', 'quote', 'issue', 'verify', *(['catalog'] if host == 'codex' else []), 'revoke']
+            if (bank.state != 'closed' or bank.events.count('balance') < 2
+                    or [op for op in bank.events if op != 'balance'] != required
+                    or not hits or any(status != 200 for status in hits)):
+                raise conpty.CheckpointMiss(conpty.Failure.BANK)
     except Exception as exc:
         # Do not lose an already observed supplier failure to a later teardown
         # error. The original error is still raised; neither gate is waived.

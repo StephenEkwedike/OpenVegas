@@ -165,11 +165,12 @@ class Bank:
         return client
 
 
-def bundled_catalog(exe):
+def bundled_catalog(exe, *, env=None, cwd=None):
     from openvegas.integrations.codex_billing_route import _catalog_digest, _filter_catalog
     from openvegas.integrations.windows_native_image import _IMAGES
     result = subprocess.run([exe, 'debug', 'models', '--bundled'], stdout=subprocess.PIPE,
-                            stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, check=True, timeout=40)
+                            stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, check=True, timeout=40,
+                            env=env, cwd=cwd)
     source = json.loads(result.stdout)
     rows = _filter_catalog(source, [MODELS['codex']])
     now = int(time.time())
