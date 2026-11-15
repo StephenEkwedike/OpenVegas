@@ -57,6 +57,7 @@ class Fixture:
         self.rendered = self.switch_acks = self.status_checks = 0
         self.lock = threading.Lock()
         self.root, self.denied_titles, self.first_fault = None, 0, None
+        self.denied_wallet = 0
         self.issue = ContextVar("wire-issue", default="wire")
 
     def arm(self, i):
@@ -106,9 +107,17 @@ class Fixture:
                 if source=="thread_title":
                     # Stock PE has no independent helper witness. Never synthesize
                     # a title, forward it, or credit it as a customer/root answer.
-                    self.issue.set("unexpected-helper")
-                    check(mode=="host" and self.root and root!=self.root and self.denied_titles<12)
+                    self.issue.set("helper-route")
+                    check(mode in ("host","v"))
+                    self.issue.set("helper-root")
+                    check(self.root and root!=self.root)
+                    self.issue.set("helper-limit")
+                    check(self.denied_titles<12)
                     self.denied_titles+=1
+                    # A wallet helper is a permanent final gate failure. Refuse it
+                    # immediately; never let it consume the separate root nonce.
+                    if mode=="v":
+                        self.denied_wallet+=1
                     if scope["type"]=="websocket":
                         check((await receive())["type"]=="websocket.connect")
                         await send({"type":"websocket.close","code":1008})
@@ -246,6 +255,8 @@ def interact(host, term, fixture, control, checkpoint):
     enter(term, "/exit", checkpoint, "exit", host=host)
     term.require_success()
     check(fixture.rows == list(MODES) and not fixture.bad and fixture.armed is None)
+    checkpoint("rehearsal-helper-policy")
+    check(not fixture.denied_wallet)
 
 
 def payer(node, app, env, cwd, sid, action, expected):
@@ -276,10 +287,10 @@ async def run(host, drive, checkpoint, stats):
             await asyncio.to_thread(drive, host, checkpoint, fixture, sock.getsockname()[1])
         finally:
             if host=="codex":
-                reason=fixture.first_fault or "none"
-                print(f"::notice::wire codex denied_titles={fixture.denied_titles} root={int(fixture.root is not None)} fault={reason}",flush=True)
+                reason=fixture.first_fault or ("wallet-helper" if fixture.denied_wallet else "none")
+                print(f"::notice::wire codex denied_titles={fixture.denied_titles} denied_wallet={fixture.denied_wallet} root={int(fixture.root is not None)} fault={reason}",flush=True)
             stats.update(supplier_answers=len(fixture.rows), linked=max(0, len(fixture.rows)-1),
                          rendered=fixture.rendered, switch_acks=fixture.switch_acks,
-                         status_checks=fixture.status_checks, rejected=int(fixture.bad))
+                         status_checks=fixture.status_checks, rejected=int(fixture.bad or bool(fixture.denied_wallet)))
             server.should_exit = True
             await asyncio.wait_for(serving, 10)

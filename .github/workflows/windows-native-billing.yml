@@ -116,11 +116,11 @@ jobs:
               throw 'Effective executable-specific outbound block missing'
             }
           }
-      - name: Exact Codex root turns with separate denial for unwitnessed host titles
+      - name: Measure deliberate root series independently of permanently failing helper policy
         env:
           OV_WINDOWS_CONPTY_ISOLATED: '1'
         run: python -B -m scripts.windows_managed_startup rehearsal
-      - name: Check whether Claude fixture profile alone can render a loopback answer
+      - name: Find a bounded minimal Claude profile setup with an actual loopback answer
         if: ${{ !cancelled() && steps.isolation.outcome == 'success' }}
         env:
           OV_WINDOWS_CONPTY_ISOLATED: '1'

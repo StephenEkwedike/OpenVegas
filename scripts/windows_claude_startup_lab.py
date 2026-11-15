@@ -12,7 +12,7 @@ from pathlib import Path
 from contextlib import ExitStack
 from secrets import token_hex
 
-CASES = ("profile",)
+CASES = ("profile-bash", "profile-term", "profile-folders", "profile-model", "profile-term-model")
 PIN = "345996b4bdbae21d817f750fae2f34cbf8d81224a5444c78136091d121beb298"
 
 
@@ -50,7 +50,7 @@ def run(case, fixture=None, port=None):
         ephemeral = held.enter_context(socket.socket())
         ephemeral.bind(("127.0.0.1",0))  # Bound but deliberately not listening.
         dirs = ["", "work", "claude", "codex", "roaming", "local", "tmp"]
-        folders = case != "profile"
+        folders = case == "profile-folders"
         if folders:
             dirs += ["AppData","AppData/Local","AppData/Roaming"]
         for rel in dirs:
@@ -65,20 +65,24 @@ def run(case, fixture=None, port=None):
                    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1",CLAUDE_CODE_DISABLE_TERMINAL_TITLE="1",
                    ANTHROPIC_API_KEY="invalid-local-lab-"+token_hex(12),
                    ANTHROPIC_BASE_URL="http://127.0.0.1:"+str(ephemeral.getsockname()[1]))
-        if case == "profile":
+        if case in CASES:
             need(fixture is not None and type(port) is int and 0 < port < 65536)
             env["ANTHROPIC_BASE_URL"]="http://127.0.0.1:"+str(port)+"/_host"
 
             (root/"claude/.claude.json").write_text(json.dumps({"hasCompletedOnboarding":True,"theme":"dark",
                 "customApiKeyResponses":{"approved":[env["ANTHROPIC_API_KEY"][-20:]]},
                 "projects":{(root/"work").as_posix():{"hasTrustDialogAccepted":True}}}), encoding="ascii")
+        if case == "profile-bash": env["CLAUDE_CODE_GIT_BASH_PATH"] = str(bash)
+        if case in ("profile-term","profile-term-model"): env["TERM"] = "xterm-256color"
+        if case in ("profile-model","profile-term-model"): env["ANTHROPIC_MODEL"] = "claude-sonnet-4-6"
+
         with pty.isolated_console(Path(__file__).resolve(), ["child",str(image)], env, str(root/"work")) as term:
             try:
                 term.expect(r"Claude\s+Code|Sonnet\s+4\.6|\? for shortcuts|Type your message|shortcuts for help",
                             "historical native title or composer",timeout=90, diagnose="claude-start")
             except pty.CheckpointMiss as exc:
                 return exc.reason.value
-            if case in ("green","profile"):
+            if case in CASES:
                 from scripts.windows_codex_editor import enter
                 fixture.arm(0)
                 try:
@@ -96,7 +100,7 @@ if __name__ == "__main__":
     need(len(sys.argv)==1)
     for case in CASES:
         try:
-            if case in ("green","profile"):
+            if case in CASES:
                 from scripts.windows_switch_rehearsal import run as serve
                 closed=[]
                 def drive(_,checkpoint,fixture,port):
@@ -108,3 +112,4 @@ if __name__ == "__main__":
         except Exception:
             outcome="setup-unconfirmed"
         print("::notice::publisher-lab claude case="+case+" outcome="+outcome, flush=True)
+        if outcome=="native-loopback-answer": break
