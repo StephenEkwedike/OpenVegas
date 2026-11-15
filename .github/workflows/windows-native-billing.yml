@@ -124,62 +124,6 @@ jobs:
         run: |
           python -B -m pytest "--junitxml=$env:RUNNER_TEMP/terminal.xml" tests/test_integrations/test_windows_terminal_host.py tests/test_integrations/test_inference_router_session.py::test_peer_cleanup_error_cannot_skip_wallet_revocation *> $null
           exit $LASTEXITCODE
-      - name: Classify console failure without child output
-        if: ${{ !cancelled() && steps.terminal.outcome == 'failure' }}
-        run: |
-          [xml]$xml = Get-Content -Raw -LiteralPath (Join-Path $env:RUNNER_TEMP 'terminal.xml')
-          if (!$xml.SelectSingleNode('//testcase[@name="test_native_windows_console_restore"]/failure')) { exit 0 }
-          @'
-          import subprocess, sys
-          # Diagnostic only: the original failed test and red gate remain authoritative.
-          stages = {10:"attach", 11:"read-mode", 12:"enter-guard", 13:"set-mode", 14:"set-page",
-                    15:"check-mutation", 16:"unwind", 17:"check-restoration", 0:"not-reproduced"}
-          probe = """
-          import ctypes, msvcrt, os
-          from ctypes import wintypes as W
-          from openvegas.integrations.windows_terminal import console_modes
-          stage = 10
-          try:
-              for fd, name in enumerate(('CONIN$', 'CONOUT$', 'CONOUT$')):
-                  source = os.open(name, os.O_RDWR)
-                  if source != fd:
-                      os.dup2(source, fd)
-                      os.close(source)
-              stage = 11
-              api = ctypes.WinDLL('kernel32.dll', winmode=0x800)
-              h = W.HANDLE(msvcrt.get_osfhandle(0))
-              def mode():
-                  value = W.DWORD()
-                  assert api.GetConsoleMode(h, ctypes.byref(value))
-                  return value.value
-              old, cp = mode(), api.GetConsoleOutputCP()
-              newcp = 437 if cp == 65001 else 65001
-              stage = 12
-              try:
-                  with console_modes():
-                      stage = 13
-                      assert api.SetConsoleMode(h, old ^ 1)
-                      stage = 14
-                      assert api.SetConsoleOutputCP(newcp)
-                      stage = 15
-                      assert mode() == old ^ 1 and api.GetConsoleOutputCP() == newcp
-                      stage = 16
-                      raise ValueError('test unwind')
-              except ValueError:
-                  pass
-              stage = 17
-              assert mode() == old and api.GetConsoleOutputCP() == cp
-          except BaseException:
-              os._exit(stage)
-          """
-          try:
-              run = subprocess.run([sys.executable, '-B', '-c', probe], creationflags=subprocess.CREATE_NEW_CONSOLE,
-                                   timeout=30, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-              label = stages.get(run.returncode, "child-start")
-          except (OSError, subprocess.TimeoutExpired):
-              label = "spawn-or-timeout"
-          print("::warning::Console diagnostic stage: " + label)
-          '@ | python -B -
       - name: Installed Codex app-server against synthetic loopback
         if: ${{ !cancelled() && steps.isolation.outcome == 'success' }}
         env:
@@ -219,24 +163,14 @@ jobs:
               $bad = $case.SelectSingleNode('failure|error|skipped')
               if ($bad) {
                 $ok = $false
-                # Publish only source locations and reviewed test names, never traceback values or fixture IO.
-                $locations = [regex]::Matches($bad.InnerText, '(?:tests|openvegas)[/\\][A-Za-z0-9_/\\.]+\.py:\d+') | ForEach-Object Value | Select-Object -Unique -Last 4
                 $label = $case.GetAttribute('name') -replace '[^a-zA-Z0-9_.\[\]-]', '_'
                 if ($group -eq 'customer') {
                   $stage = $case.SelectSingleNode("(properties/property[@name='qa_stage'])[last()]")
                   if ($stage -and $stage.value -match '^(isolation|conpty|native-start|switch-(v|host)|status-[012]|answer-[012]|shutdown)$') {
                     Write-Output "::error::$label checkpoint: $($stage.value)"
                   }
-                  $sites = [regex]::Matches($bad.InnerText, '(?:scripts[/\\])?verify_windows_[a-z]+\.py:\d+') | ForEach-Object Value | Select-Object -Unique -Last 3
-                  if ($sites) { Write-Output "::error::$label driver: $($sites -join ', ')" }
-                  $frames = [regex]::Match($bad.InnerText, 'QA frames: ((?:[a-z_]+:\d+,?){1,12})')
-                  if ($frames.Success) { Write-Output "::error::$label managed: $($frames.Groups[1].Value)" }
-                  $source = $case.SelectSingleNode("properties/property[@name='qa_source']")
-                  if ($source -and $source.value -match '^(?:[a-z_]+:\d{1,5},?){1,24}$') { Write-Output "::error::$label observations: $($source.value)" }
-                  $screen = [regex]::Match($bad.InnerText, 'QA screen: (busy|refused|held|unconfirmed|trust|signin|command-missing|setup|api-key-dialog|plugin-trust|git-bash|claude-login)')
-                  if ($screen.Success) { Write-Output "::error::$label screen: $($screen.Groups[1].Value)" }
                 }
-                Write-Output "::error::$group / $label / $($bad.LocalName) / $($locations -join ', ')"
+                Write-Output "::error::$group / $label / $($bad.LocalName)"
               }
             }
             $passed = @($cases | Where-Object { !$_.SelectSingleNode('failure|error|skipped') } | ForEach-Object { $_.GetAttribute('name') })

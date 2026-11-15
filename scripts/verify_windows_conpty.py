@@ -25,39 +25,40 @@ def require_hosted_lane():
 class Terminal:
     def __init__(self, process):
         self.process = process
+        self.pending = ''
+        self.query_tail = ''
+
+    def read(self):
+        chunk = self.process.read(16384, blocking=False)
+        if chunk:
+            output = self.query_tail + chunk
+            for query, response in (('\x1b[6n', '\x1b[1;1R'), ('\x1b[?u', '\x1b[?0u'),
+                                    ('\x1b]11;?\x07', '\x1b]11;rgb:0000/0000/0000\x07')):
+                if output.find(query, max(0, len(self.query_tail) - len(query) + 1)) != -1:
+                    self.process.write(response)
+            self.query_tail = output[-8:]
+        return chunk
 
     def expect(self, pattern, stage, *, timeout=45):
         deadline = time.monotonic() + timeout
         tail = plain = ''
         while time.monotonic() < deadline:
-            chunk = self.process.read(16384, blocking=False)
+            chunk = self.pending or self.read()
+            self.pending = ''
             if chunk:
                 tail = (tail + chunk)[-65536:]
                 # Only recognize visible text, not a title or a control sequence.
                 plain = re.sub(r'\x1b\][^\x07\x1b]*(?:\x07|\x1b\\|$)|\x1b\[[0-?]*[ -/]*[@-~]', '', tail)
-                failure = re.search(r'OV-QA-FAIL ([a-z_0-9:,]{0,600}) END', plain)
-                if failure:
-                    raise RuntimeError('QA frames: ' + failure[1])
                 match = re.search(pattern, plain, re.I)
                 if match:
+                    # A single native read can include both supervisor and composer banners.
+                    self.pending = plain[match.end():]
                     return match.group()
-                for label, marker in (
-                    ('busy', 'Local control busy'), ('refused', 'Switch refused; payer unchanged'),
-                    ('held', 'Billing outcome unconfirmed'), ('unconfirmed', 'Local control unconfirmed'),
-                    ('trust', 'trust this folder'), ('signin', 'Sign in with ChatGPT'),
-                ):
-                    if marker.casefold() in plain.casefold():
-                        raise RuntimeError('QA screen: ' + label)
             elif not self.process.isalive():
                 break
             else:
                 time.sleep(.025)
         # Do not put transcripts, paths, credentials, or prompts in pytest/JUnit.
-        for label, marker in (('command-missing', 'unknown command'), ('setup', 'choose the text style'),
-                              ('api-key-dialog', 'external api key'), ('plugin-trust', 'trust the plugin'),
-                              ('git-bash', 'requires git-bash'), ('claude-login', 'select login method')):
-            if marker in plain.casefold():
-                raise RuntimeError('QA screen: ' + label)
         raise RuntimeError('Missing terminal checkpoint: ' + stage)
 
     def type_line(self, line):

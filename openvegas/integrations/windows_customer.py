@@ -85,16 +85,21 @@ class Customer:
         self.busy = False
         if host == "codex":
             from .inference_router_wallet import codex_wallet_callbacks
+            from .windows_customer_codex import RootAdapter, RootIngress
 
             callbacks = codex_wallet_callbacks(
                 broker, active_model=self.model, version=VERSIONS[host]
             )
+            adapter = RootAdapter(
+                host, upstream, broker.backend + "/integrations/native", lambda: self.sid
+            )
         else:
             require(host == "claude")
             callbacks = claude_wallet_callbacks(broker, active_model=self.model)
+            adapter = ProviderAdapter(host, upstream, broker.backend + "/integrations/native")
         self.prepare, revoke = callbacks
         self.session = RouterSession(
-            ProviderAdapter(host, upstream, broker.backend + "/integrations/native"),
+            adapter,
             prepare_wallet=self.prepare,
             revoke_wallet=revoke,
             request_boundary=True,
@@ -102,6 +107,8 @@ class Customer:
             task_boundary=self.boundary,
             commit_guard=self.commit_guard,
         )
+        if host == "codex":
+            self.session.router = RootIngress(self.session.router, adapter.root)
 
     def model(self):
         require(self.current is not None)

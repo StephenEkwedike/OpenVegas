@@ -505,6 +505,7 @@ def test_claude_refuses_settings_routing_overrides(monkeypatch, tmp_path, settin
 
 
 def test_plugin_serves_only_a_composer_command_without_using_model(tmp_path):
+    import os
     import shutil
     import subprocess
 
@@ -535,9 +536,10 @@ const reply=await events['command.run']($,{args:'v',origin:{kind:'composer'}});
 assert.equal(reply.text,'local result');
 assert.deepEqual(seen,[{event:'ready',value},{event:'start',action:'v'},{event:'observe',challenge:'fresh',value}]);
 """
-    subprocess.run(
-        [exe, "--input-type=module", "-e", script], cwd=tmp_path, env={}, check=True, timeout=10
-    )
+    driver = tmp_path / "driver.mjs"
+    driver.write_text(script, encoding="utf-8")
+    env = {k: os.environ[k] for k in ("SystemRoot", "WINDIR", "TEMP", "TMP") if k in os.environ}
+    subprocess.run([exe, str(driver)], cwd=tmp_path, env=env, check=True, timeout=10)
 
 
 def test_workspace_comparison_does_not_follow_network_or_fold_directory_case():
@@ -674,3 +676,97 @@ def test_codex_inventory_never_silently_adopts_another_chat(case):
             threads.received({"id": 6, "result": {"status": "unsubscribed"}})
     with pytest.raises(IntegrationError):
         threads.verify(SID, report)
+
+
+@pytest.mark.parametrize("operation", ["ws", "responses", "compact", "search"])
+@pytest.mark.parametrize(
+    "claim", ["missing", "foreign", "conflict", "duplicate", "duplicate-json", "root"]
+)
+def test_pinned_root_required_before_any_billable_wallet_plan(operation, claim):
+    adapter = codex.RootAdapter(
+        "codex", codex.ORIGINS["apiKey"], "https://test.invalid/integrations/native", lambda: SID
+    )
+    direct = [("thread-id", SID if claim != "foreign" else OTHER)] if claim != "missing" else []
+    extra = []
+    if claim == "conflict":
+        extra.append(("x-codex-turn-metadata", json.dumps({"thread_id": OTHER})))
+    if claim == "duplicate":
+        extra.extend(direct)
+    if claim == "duplicate-json":
+        extra.append(("x-codex-turn-metadata", '{"thread_id":"other","thread_id":"' + SID + '"}'))
+    method, path, transport = {
+        "ws": ("GET", "/responses", [("upgrade", "websocket")]),
+        "responses": ("POST", "/responses", []),
+        "compact": ("POST", "/responses/compact", []),
+        "search": ("POST", "/alpha/search", []),
+    }[operation]
+    if claim == "root" and operation == "search":
+        direct = [("x-codex-turn-metadata", json.dumps({"thread_id": SID}))]
+    if claim == "root":
+        plan = adapter.request_plan(method, path, direct + extra + transport, "v", TOKEN)
+        assert dict(plan.headers)["authorization"] == "Bearer " + TOKEN
+    else:
+        with pytest.raises(IntegrationError):
+            adapter.request_plan(method, path, direct + extra + transport, "v", TOKEN)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mode,thread,embedded,admitted",
+    [
+        ("host", OTHER, OTHER, True),
+        ("v", SID, SID, True),
+        ("v", OTHER, OTHER, False),
+        ("v", SID, OTHER, False),
+        ("v", None, SID, False),
+        ("v", None, None, False),
+    ],
+)
+async def test_each_socket_create_checked_again_without_rewriting_bytes(
+    mode, thread, embedded, admitted
+):
+    observed = []
+
+    class Receiver:
+        state = SimpleNamespace(mode=mode)
+
+        async def __call__(self, scope, receive, send):
+            observed.append(await receive())
+
+    guard = codex.RootIngress(Receiver(), lambda: SID)
+    meta = {"thread_id": thread} if thread else {}
+    if embedded:
+        meta["x-codex-turn-metadata"] = json.dumps({"thread_id": embedded})
+    event = {
+        "type": "websocket.receive",
+        "text": json.dumps(
+            {
+                "type": "response.create",
+                "client_metadata": meta,
+                "input": [{"type": "text", "text": "ordinary"}],
+            }
+        ),
+    }
+    if admitted:
+        await guard({"type": "websocket"}, AsyncMock(return_value=event), AsyncMock())
+        assert observed == [event] and observed[0] is event
+    else:
+        with pytest.raises(IntegrationError):
+            await guard({"type": "websocket"}, AsyncMock(return_value=event), AsyncMock())
+        assert not observed
+
+
+def test_used_ephemeral_is_eligible_only_under_root_wire_containment():
+    inventory = codex.NativeThreads()
+    for key, sid, ephemeral in [(1, SID, False), (2, OTHER, True)]:
+        inventory.sent({"id": key, "method": "thread/start"})
+        inventory.received({"id": key, "result": {"thread": {"id": sid, "ephemeral": ephemeral}}})
+    inventory.work(OTHER)
+    report = {"data": [SID, OTHER]}
+    with pytest.raises(IntegrationError):
+        inventory.verify(SID, report)
+    inventory.verify(SID, report, bounded=True)
+    with pytest.raises(IntegrationError):
+        inventory.verify(
+            SID, {**report, "data": [SID, "eae0bbff-4e67-4563-842b-fbcee7246374"]}, bounded=True
+        )

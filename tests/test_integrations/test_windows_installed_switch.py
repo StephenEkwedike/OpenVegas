@@ -99,12 +99,14 @@ def configure(host, exe, env, cwd):
         home = Path(env['CLAUDE_CONFIG_DIR'])
         env.update(ANTHROPIC_MODEL=qa.MODELS['claude'], DISABLE_ERROR_REPORTING='1',
                    CLAUDE_CODE_GIT_BASH_PATH=os.environ['OV_WINDOWS_BASH_EXE'])
+        git_cmd = Path(os.environ['OV_WINDOWS_BASH_EXE']).parents[1] / 'cmd'
+        env['PATH'] += os.pathsep + str(git_cmd)
         (home / '.claude.json').write_text(json.dumps({'hasCompletedOnboarding': True, 'theme': 'dark',
             'customApiKeyResponses': {'approved': [SYNTHETIC_KEY[-20:]]},
             'projects': {str(cwd): {'hasTrustDialogAccepted': True}}}), encoding='utf-8')
 
 
-def drive(host, sink, port, checkpoint, diagnostic):
+def drive(host, sink, port, checkpoint):
     from openvegas.integrations import windows_billing_host as launcher
     from openvegas.integrations.inference_router_adapter import VERSIONS
     from openvegas.integrations.windows_native_image import pinned_windows_image
@@ -116,10 +118,10 @@ def drive(host, sink, port, checkpoint, diagnostic):
           launcher.fresh_environment(host) as (env, cwd)):
         configure(host, exe, env, cwd)
         checkpoint('conpty')
-        with conpty.isolated_console(Path(qa.__file__), [host, exe, str(port), str(diagnostic)], env, cwd) as term:
+        with conpty.isolated_console(Path(qa.__file__), [host, exe, str(port)], env, cwd) as term:
             checkpoint('native-start')
             term.expect(r'Windows managed ' + host, 'managed launch')
-            term.expect(r'OpenAI Codex|Claude Code|shortcuts|for help', 'native composer')
+            term.expect(r'OpenAI\s+Codex|Claude\s+Code|shortcuts|for help|Sonnet\s+4\.6', 'native composer')
             time.sleep(.75)
             for i, mode in enumerate(('host', 'v', 'host')):
                 prefix = 'openvegas ' if host == 'codex' else '/ov-billing '
@@ -149,20 +151,13 @@ def drive(host, sink, port, checkpoint, diagnostic):
 @pytest.mark.skipif(sys.platform != 'win32', reason='requires disposable Windows ConPTY runner')
 @pytest.mark.parametrize('host', ['codex', 'claude'])
 @pytest.mark.asyncio
-async def test_installed_customer_switch(host, request, tmp_path):
+async def test_installed_customer_switch(host, request):
     def checkpoint(name):
         request.node.user_properties.append(('qa_stage', name))
 
     conpty.require_hosted_lane()
-    diagnostic = tmp_path / 'sources.txt'
-    try:
-        async with supplier(host) as (sink, port):
-            await asyncio.to_thread(drive, host, sink, port, checkpoint, diagnostic)
-    finally:
-        if diagnostic.exists() and diagnostic.stat().st_size < 10000:
-            rows = diagnostic.read_text(encoding='ascii').splitlines()
-            if all(re.fullmatch(r'[a-z_]+:\d{1,5}', line) for line in rows):
-                request.node.user_properties.append(('qa_source', ','.join(rows[-24:])))
+    async with supplier(host) as (sink, port):
+        await asyncio.to_thread(drive, host, sink, port, checkpoint)
     if host == 'codex':
         assert not sink.rejections and [r['payer'] for r in sink.rows] == ['host', 'v', 'host']
         assert all(r['wire_model'] == qa.MODELS['codex'] and r['wire_effort'] == 'low' for r in sink.rows)
@@ -179,3 +174,18 @@ def test_bad_bank_request_cannot_issue_or_revoke():
         assert client.post('/integrations/native/sessions', json={},
                            headers={'authorization': 'Bearer ' + qa.DEVICE}).status_code == 403
         assert bank.state == 'initial'
+
+
+def test_console_keeps_coalesced_composer_and_answers_split_query():
+    class Stream:
+        chunks = iter(['Windows managed Claude\r\nClaude Code', '\x1b[', '6nPayer: host'])
+
+        def read(self, *_, **kwargs):
+            return next(self.chunks)
+
+        def write(self, value):
+            assert value == '\x1b[1;1R'
+
+    terminal = conpty.Terminal(Stream())
+    for text in ('Windows managed Claude', 'Claude Code', 'Payer: host'):
+        assert terminal.expect(text, 'test') == text

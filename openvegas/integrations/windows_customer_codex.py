@@ -7,6 +7,7 @@ import json
 import secrets
 import subprocess
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 
 import click
 from websockets.asyncio.server import serve
@@ -15,7 +16,8 @@ from websockets.protocol import State
 from .billing_host import exact_model, session_id
 from .codex_handoff_policy import _identity
 from .credentials import IntegrationError
-from .inference_router_adapter import VERSIONS
+from .inference_router import MAX_BODY
+from .inference_router_adapter import VERSIONS, ProviderAdapter
 from .inference_router_windows import WindowsTCPPeerAuth
 from .use import parse_command
 from .windows_customer import Selection, require
@@ -26,6 +28,79 @@ ORIGINS = {
     "apiKey": "https://api.openai.com/v1",
     "chatgpt": "https://chatgpt.com/backend-api/codex",
 }
+
+
+def _object(raw):
+    def unique(pairs):
+        value = dict(pairs)
+        require(len(value) == len(pairs))
+        return value
+
+    try:
+        value = json.loads(raw, object_pairs_hook=unique)
+    except (ValueError, TypeError, RecursionError):
+        raise IntegrationError(
+            "Native wallet request has no unambiguous thread identity."
+        ) from None
+    require(isinstance(value, dict))
+    return value
+
+
+def _root_proof(root, direct, metadata):
+    require(session_id(root) and len(direct) <= 1 and len(metadata) <= 1)
+    claims = list(direct)
+    if metadata:
+        require(isinstance(metadata[0], str) and len(metadata[0]) <= 16384)
+        claims.append(_object(metadata[0]).get("thread_id"))
+    require(bool(claims) and all(value == root for value in claims))
+
+
+@dataclass(frozen=True, repr=False)
+class RootAdapter(ProviderAdapter):
+    root: object
+
+    def request_plan(self, method, path, headers, mode, wallet_token=None):
+        pairs = tuple(headers.items() if isinstance(headers, dict) else headers)
+        plan = super().request_plan(method, path, pairs, mode, wallet_token)
+        if mode == "v" and plan.response_kind != "codex_catalog_envelope":
+            # Checked after the admission wait, before acquiring/sending the upstream lease.
+            _root_proof(
+                self.root(),
+                [v for k, v in pairs if k.lower() == "thread-id"],
+                [v for k, v in pairs if k.lower() == "x-codex-turn-metadata"],
+            )
+        return plan
+
+
+class RootIngress:
+    """A root-bound handshake is not authority for a sibling's next frame."""
+
+    def __init__(self, inner, root):
+        self.inner, self.root = inner, root
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+    authority = property(lambda s: s.inner.authority, lambda s, v: setattr(s.inner, "authority", v))
+    client = property(lambda s: s.inner.client, lambda s, v: setattr(s.inner, "client", v))
+
+    async def __call__(self, scope, receive, send):
+        async def bound():
+            event = await receive()
+            if event["type"] == "websocket.receive" and self.inner.state.mode == "v":
+                raw = event.get("text") if event.get("text") is not None else event.get("bytes")
+                require(isinstance(raw, (str, bytes)) and len(raw) <= MAX_BODY)
+                body = _object(raw)
+                meta = body.get("client_metadata")
+                require(body.get("type") == "response.create" and isinstance(meta, dict))
+                _root_proof(
+                    self.root(),
+                    [meta.get("thread_id")],
+                    [meta["x-codex-turn-metadata"]] if "x-codex-turn-metadata" in meta else [],
+                )
+            return event
+
+        return await self.inner(scope, bound if scope["type"] == "websocket" else receive, send)
 
 
 @asynccontextmanager
@@ -118,7 +193,7 @@ class NativeThreads:
             require(sid not in self.cold)
             self.roots.add(sid)
 
-    def verify(self, sid, loaded):
+    def verify(self, sid, loaded, *, bounded=False):
         ids = loaded.get("data")
         require(
             not self.pending
@@ -129,7 +204,7 @@ class NativeThreads:
             and len(set(ids)) == len(ids)
             and sid in ids
             and loaded.get("nextCursor") is None
-            and set(ids) - {sid} <= self.cold - self.used
+            and set(ids) - {sid} <= (self.cold if bounded else self.cold - self.used)
         )
 
 
@@ -256,7 +331,12 @@ async def selection(pipe, owner, params):
     sid = params.get("threadId")
     require(await route(pipe, owner.cwd, owner.session._url) == owner.session.adapter.host_base)
     loaded = await pipe.call("thread/loaded/list", {"limit": 32})
-    pipe.threads.verify(sid, loaded)
+    bounded = (
+        isinstance(owner.session.router, RootIngress)
+        and isinstance(owner.session.adapter, RootAdapter)
+        and owner.session.router.inner.adapter is owner.session.adapter
+    )
+    pipe.threads.verify(sid, loaded, bounded=bounded)
     thread = (await pipe.call("thread/read", {"threadId": sid, "includeTurns": False}))["thread"]
     native = _identity(thread, sid)
     # The TUI may have picked a new model for this turn without changing
