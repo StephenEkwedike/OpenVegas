@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .billing_host import exact_model, session_id, wallet_row
+from .runtime_directory import record_test_wallet_switch
 from .broker import Broker
 from .claude_generation_host import SWITCH_TIMEOUT, ManagedClaude
 from .claude_generation_observer import ClaudeGenerationObserver
@@ -317,6 +318,8 @@ class ManagedClaudeRouter(ManagedClaude):
                 self.s.original_model = self._model
                 self.s.intent_revision += 1
                 self.s.transition_state = 'MODE_COMMITTED'
+                if result.billing == 'v':
+                    record_test_wallet_switch('claude', self.s.identifier, self.session)
                 self._status('refreshing')
                 self.refresh_wallet(result.billing)
                 self.s.emit('Native payer now ' + ('$V' if result.billing == 'v' else 'host')

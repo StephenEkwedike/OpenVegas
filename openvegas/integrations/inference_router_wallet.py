@@ -12,6 +12,7 @@ from .credentials import IntegrationError
 from .host_adapter import require_version
 from .inference_router_controls import WalletPreparationRejected
 from .inference_router_session import WalletAccess
+from .runtime_directory import qa_grant_reference
 
 
 class CodexWalletGrant:
@@ -89,6 +90,7 @@ class CodexWalletGrant:
                    'catalog_hash': grant.get('catalog_hash'), 'identifiers': tuple(identifiers)}
         catalog = await _grant_catalog(boundary, token, **binding, grant_status=status)
         require(catalog is not None, 'Reviewed native model metadata is unavailable; no model substituted.')
+        self.qa_reference = qa_grant_reference(grant['session_id'])
         self.access = WalletAccess(token, issued + grant['expires_in'],
             validate_catalog=partial(_validate_grant_catalog, **binding), grant=self)
         return self.access

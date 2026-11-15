@@ -16,6 +16,7 @@ from . import native
 from .broker import GrantNotCreated
 from .claude_http_policy import VERSION, RequestRoutes, WalletRoute, _endpoint, _require
 from .credentials import IntegrationError
+from .runtime_directory import qa_grant_reference
 
 
 class WalletGrant:
@@ -86,6 +87,7 @@ class WalletGrant:
                      'session_id': grant['session_id'], 'host': 'claude', 'model': model,
                      'billing_mode': 'wallet'}.items())
                  and status.get('allowed_models') == grant['allowed_models'])
+        self.qa_reference = qa_grant_reference(grant['session_id'])
         self.route = route
         return route
 

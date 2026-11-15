@@ -6,6 +6,7 @@ infer customer consent from the fixture switch or an ordinary native launch.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import secrets
@@ -125,6 +126,28 @@ def _spawn(argv, env, cwd):
     return subprocess.Popen(argv, env=env, cwd=cwd, shell=False)
 
 
+def _prepare_rehearsal_claude(env, cwd):
+    from openvegas.emotes._windows_state import private_windows_directory
+    root = Path(env['USERPROFILE']).resolve(strict=True)
+    work = Path(cwd).resolve(strict=True)
+    if (work != root / 'work' or not re.fullmatch('ov-rehearsal-[0-9a-f]{32}', root.name)
+            or Path(env['CLAUDE_CONFIG_DIR']).resolve(strict=True) != root / 'claude'
+            or env.get('ANTHROPIC_API_KEY') != SYNTHETIC_KEY):
+        raise IntegrationError('Invalid disposable rehearsal workspace.')
+    with (private_windows_directory(work) as project,
+          private_windows_directory(root / 'claude') as profile):
+        if project.names(1) or profile.names(1):
+            raise IntegrationError('Disposable Claude workspace and profile must be empty.')
+        data = json.dumps({
+            'hasCompletedOnboarding': True, 'theme': 'dark',
+            'customApiKeyResponses': {'approved': [SYNTHETIC_KEY[-20:]]},
+            'projects': {work.as_posix(): {'hasTrustDialogAccepted': True}},
+        }, ensure_ascii=True).encode('ascii')
+        profile.atomic_write('.claude.json', data)
+        if profile.read('.claude.json', len(data)) != data:
+            raise IntegrationError('Disposable Claude setup could not be verified.')
+
+
 class WindowsConsoleHost:
     """Own one foreground process and one authenticated, request-scoped router."""
     def __init__(self):
@@ -184,6 +207,10 @@ async def run_routed(host, executable, port, env, cwd, directory, announce):
     # Only this isolated synthetic path uses an overlay, not a production policy assertion.
     async with session.launch(version=VERSIONS[host], env=env, args=[],
                               effective_policy_verified=_fixture_policy(host, env, cwd)) as (child_env, argv):
+        if host == 'claude':
+            _prepare_rehearsal_claude(env, cwd)
+            child_env = dict(child_env, TERM="xterm-256color")
+
         return await owner.run(session, [executable, *argv], child_env, cwd, directory, announce)
 
 

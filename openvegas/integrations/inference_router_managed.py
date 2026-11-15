@@ -25,6 +25,7 @@ from .inference_router_request_boundary import (
 )
 from .inference_router_session import RouterSession
 from .inference_router_wallet import codex_wallet_callbacks
+from .runtime_directory import record_test_wallet_switch
 
 
 async def original_upstream(executable, env, cwd):
@@ -195,6 +196,8 @@ class ManagedCodexRouter(RuntimeOwner):
                 self.switch.phase = 'releasing_native_input'
                 await self.transport.resume_same_backend(generation)
                 self.switch.phase = 'committed'
+                if result.billing == 'v':
+                    record_test_wallet_switch('codex', ticket.identifier, self.session)
                 self.finish_switch_window(committed=True)
                 self.s.emit('Native payer now ' + ('$V' if result.billing == 'v' else 'host')
                             + '; same chat, no prompt submitted.')

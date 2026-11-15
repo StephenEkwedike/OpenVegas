@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import {createHash} from 'node:crypto';
-import {createReadStream, readFileSync} from 'node:fs';
+import {createReadStream, lstatSync, readFileSync, realpathSync} from 'node:fs';
 import {createRequire} from 'node:module';
 import {dirname, join} from 'node:path';
 import {spawn} from 'node:child_process';
@@ -46,6 +46,26 @@ function fail(message) {
   finish(1);
 }
 const args = process.argv.slice(2);
+const qaFlag = '--_test-wallet-receipt-dir';
+let receiptDir;
+if (args.includes(qaFlag)) {
+  const dir = args[1];
+  let verified = false;
+  if (process.platform === 'darwin' && args[0] === qaFlag &&
+      args.lastIndexOf(qaFlag) === 0 && !args.includes('--local') &&
+      typeof dir === 'string' && /^\/private\/tmp\/ov-run-[a-f0-9]{16}$/.test(dir)) {
+    try {
+      const base = lstatSync('/private/tmp');
+      const leaf = lstatSync(dir);
+      verified = base.isDirectory() && base.uid === 0 && Boolean(base.mode & 0o1000) &&
+        leaf.isDirectory() && leaf.uid === process.geteuid() && (leaf.mode & 0o7777) === 0o700 &&
+        realpathSync(dir) === dir;
+    } catch {}
+  }
+  if (!verified) fail('invalid private Mac receipt directory. No command was run.');
+  receiptDir = dir;
+  args.splice(0, 2);
+}
 // A terminal installed for development can export a localhost account. The
 // public launcher must not silently adopt it (or a project's backend .env).
 const local = args[0] === '--local';
@@ -69,6 +89,10 @@ if (local) {
   env.OPENVEGAS_BACKEND_URL = 'https://app.openvegas.ai';
   env.OPENVEGAS_INTEGRATION_PROFILE = join(home, '.openvegas');
   env.OPENVEGAS_HOSTED_LAUNCH = '1';
+  if (receiptDir) {
+    env.OPENVEGAS_PRIVATE_RUNTIME_DIR = receiptDir;
+    env.OPENVEGAS_TEST_WALLET_RECEIPT = '1';
+  }
 }
 env.OPENVEGAS_LOAD_PROJECT_ENV = '0';
 if (!args.length && process.stdin.isTTY && process.stdout.isTTY && !process.env.CI) args.push('go');
