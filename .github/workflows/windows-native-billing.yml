@@ -167,11 +167,12 @@ jobs:
               'native-model', 'native-workspace', 'native-fence', 'session-lease', 'command-unavailable',
               'wallet-prepare', 'wallet-outcome', 'request-boundary',
               'supplier-not-reached', 'supplier-protocol', 'control-as-prompt', 'answer-not-rendered',
+              'unsolicited-request', 'prompt-shape', 'exit-timeout', 'exit-nonzero', 'bank-receipt',
           )
           stages = (
               'isolation', 'fixture-canonical', 'fixture-configure', 'conpty', 'native-start', 'composer',
               'switch-v', 'switch-host', 'status-0', 'status-1', 'status-2',
-              'answer-0', 'answer-1', 'answer-2', 'shutdown',
+              'answer-0', 'answer-1', 'answer-2', 'shutdown', 'supplier-receipts',
           )
           required = {
               'images': ('test_launches_official_windows_image[codex-0.166.0]',

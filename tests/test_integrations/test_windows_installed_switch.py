@@ -18,10 +18,10 @@ from tests.test_integrations import test_windows_claude_stream_native as claude
 from tests.test_integrations import test_windows_codex_payer_roundtrip as codex
 
 
-def deliberate_claude_input(payload, prompt):
+def claude_input_failure(payload, prompt):
     messages = payload['messages']
     if not messages or messages[-1].get('role') != 'user':
-        return False
+        return conpty.Failure.INPUT
     for msg in messages:
         if msg['role'] != 'user':
             continue
@@ -30,10 +30,11 @@ def deliberate_claude_input(payload, prompt):
         for block in blocks:
             if '/ov-billing' in block.lower() and not (
                     block.strip().startswith('<system-reminder>') and block.strip().endswith('</system-reminder>')):
-                return False
+                return conpty.Failure.FORWARDED
     content = messages[-1]['content']
-    return content == prompt if isinstance(content, str) else any(
+    correct = content == prompt if isinstance(content, str) else any(
         b.get('type') == 'text' and b.get('text') == prompt for b in content)
+    return None if correct else conpty.Failure.INPUT
 
 
 @asynccontextmanager
@@ -67,8 +68,10 @@ async def supplier(host):
                 else:
                     mode = {'/_host/v1/messages': 'host', '/integrations/native/v1/messages': 'v'}[path]
                     payload = json.loads(body)
-                    if armed != [len(seen)] or not deliberate_claude_input(payload, claude.PROMPTS[len(seen)]):
-                        faults.append('control-or-unsolicited')
+                    reason = (conpty.Failure.UNSOLICITED if armed != [len(seen)]
+                              else claude_input_failure(payload, claude.PROMPTS[len(seen)]))
+                    if reason:
+                        faults.append(reason)
                         raise ValueError
                     claude._validate_turn(len(seen), mode, payload, headers)
                     armed.clear()
@@ -206,18 +209,21 @@ def drive(host, sink, port, checkpoint):
                 else:
                     seen, faults, armed = sink
                     if faults or armed or len(seen) != i:
-                        raise conpty.CheckpointMiss(conpty.Failure.FORWARDED if 'control-or-unsolicited' in faults
-                                                    else conpty.Failure.PROTOCOL)
+                        raise conpty.CheckpointMiss(next((f for f in faults if isinstance(f, conpty.Failure)),
+                                                         conpty.Failure.PROTOCOL))
                     armed.append(i)
                     term.type_line(claude.PROMPTS[i])
                     try:
                         term.expect(re.escape(claude.ANSWERS[i]), 'native answer', diagnose='answer')
                     except conpty.CheckpointMiss:
-                        reason = (conpty.Failure.FORWARDED if 'control-or-unsolicited' in faults else
-                                  conpty.Failure.PROTOCOL if faults else conpty.Failure.DRAW if len(seen) > i else
-                                  conpty.Failure.NOT_REACHED)
+                        reason = next((f for f in faults if isinstance(f, conpty.Failure)), None) or (
+                            conpty.Failure.PROTOCOL if faults else conpty.Failure.DRAW if len(seen) > i else
+                            conpty.Failure.NOT_REACHED)
                         raise conpty.CheckpointMiss(reason) from None
             checkpoint('shutdown')
+            # Like the preceding switch, exit belongs after the completed turn,
+            # not the streamed text delta. Never send a second exit or confirm blindly.
+            time.sleep(1)
             term.type_line('/exit')
             term.require_success()
 
@@ -236,6 +242,7 @@ async def test_installed_customer_switch(host, request):
         except conpty.CheckpointMiss as exc:
             request.node.user_properties.append(('qa_failure_label', exc.reason.value))
             raise
+    checkpoint('supplier-receipts')
     if host == 'codex':
         assert not sink.rejections and [r['payer'] for r in sink.rows] == ['host', 'v', 'host']
         assert all(r['wire_model'] == qa.MODELS['codex'] and r['wire_effort'] == 'low' for r in sink.rows)
@@ -259,9 +266,9 @@ def test_claude_requires_deliberate_current_prompt_not_a_command():
         return {'messages': [{'role': 'user', 'content': [{'type': 'text', 'text': b} for b in blocks]}]}
 
     prompt = claude.PROMPTS[0]
-    assert deliberate_claude_input(message('<system-reminder>Available: /ov-billing</system-reminder>', prompt), prompt)
-    assert not deliberate_claude_input(message('/ov-billing status', prompt), prompt)
-    assert not deliberate_claude_input(message('not the current prompt'), prompt)
+    assert claude_input_failure(message('<system-reminder>Available: /ov-billing</system-reminder>', prompt), prompt) is None
+    assert claude_input_failure(message('/ov-billing status', prompt), prompt) is conpty.Failure.FORWARDED
+    assert claude_input_failure(message('not the current prompt'), prompt) is conpty.Failure.INPUT
 
 
 def test_console_keeps_coalesced_composer_and_answers_split_query():

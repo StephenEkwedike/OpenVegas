@@ -51,6 +51,11 @@ class Failure(Enum):
     PROTOCOL = 'supplier-protocol'
     FORWARDED = 'control-as-prompt'
     DRAW = 'answer-not-rendered'
+    UNSOLICITED = 'unsolicited-request'
+    INPUT = 'prompt-shape'
+    EXIT_TIMEOUT = 'exit-timeout'
+    EXIT_CODE = 'exit-nonzero'
+    BANK = 'bank-receipt'
 
 
 class CheckpointMiss(RuntimeError):
@@ -181,10 +186,18 @@ class Terminal:
     def require_success(self):
         deadline = time.monotonic() + 15
         while self.process.isalive() and time.monotonic() < deadline:
-            self.process.read(16384, blocking=False)
+            try:
+                self.read()
+            except (EOFError, OSError):
+                # ConPTY may close its output pipe before exit status is ready.
+                # Only the observed process exit below constitutes success.
+                pass
             time.sleep(.05)
-        if self.process.get_exitstatus() != 0:
-            raise RuntimeError('Managed launcher or synthetic grant audit failed.')
+        if self.process.isalive():
+            raise CheckpointMiss(Failure.EXIT_TIMEOUT)
+        status = self.process.get_exitstatus()
+        if status != 0:
+            raise CheckpointMiss(Failure.BANK if status == 23 else Failure.EXIT_CODE)
 
 
 @contextmanager
