@@ -116,12 +116,7 @@ jobs:
               throw 'Effective executable-specific outbound block missing'
             }
           }
-      - name: Codex managed status after confirmed native editor echo (original standalone image)
-        env:
-          OV_WINDOWS_CONPTY_ISOLATED: '1'
-        run: python -B -m scripts.windows_managed_startup managed
-      - name: Windows switch rehearsal, synthetic, not hosted (Codex publisher bundle)
-        if: ${{ !cancelled() && steps.isolation.outcome == 'success' }}
+      - name: Exact packaged switch rehearsal for both native clients (synthetic only)
         env:
           OV_WINDOWS_CONPTY_ISOLATED: '1'
         run: python -B -m scripts.windows_managed_startup rehearsal

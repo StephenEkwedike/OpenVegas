@@ -184,13 +184,12 @@ def interact(host, term, fixture, control, checkpoint):
         checkpoint("rehearsal-answer-" + str(i))
         fixture.arm(i)
         from scripts.windows_codex_editor import enter
-        check(host == "codex")
-        enter(term, fixture.prompts[i], checkpoint, "turn-" + str(i))
+        enter(term, fixture.prompts[i], checkpoint, "turn-" + str(i), host=host)
         term.expect(re.escape(fixture.answers[i]), "rendered synthetic answer", timeout=40, diagnose="claude-start")
         fixture.rendered += 1
         time.sleep(1)
     checkpoint("rehearsal-exit")
-    term.type_line("/exit")
+    enter(term, "/exit", checkpoint, "exit", host=host)
     term.require_success()
     check(fixture.rows == list(MODES) and not fixture.bad and fixture.armed is None)
 

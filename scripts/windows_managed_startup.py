@@ -150,7 +150,7 @@ def drive(host, checkpoint, fixture=None, port=None):
     root = Path(os.environ["RUNNER_TEMP"]).resolve(strict=True) / ("ov-startup-" + token_hex(16))
     require(not root.exists())
     exe = Path(os.environ["OV_WINDOWS_" + host.upper() + "_EXE"]).resolve(strict=True)
-    if fixture is not None:
+    if fixture is not None and host == "codex":
         exe = Path(os.environ["OV_QA_CODEX_BUNDLE_EXE"]).resolve(strict=True)
         require(exe.name == "codex.exe" and exe.parent.name == "bin"
                 and exe.parent.parent.name == "publisher-codex")
@@ -183,10 +183,10 @@ def main(args):
     if args == ["unpack"]:
         unpack(Path("packs"), Path("installed/node_modules"), json.loads(Path("qa-image-pins.json").read_bytes()))
         return 0
-    require(args in (["managed"], ["rehearsal"]) and sys.platform == "win32")
+    require(args == ["rehearsal"] and sys.platform == "win32")
     lane = args[0]
     ok = True
-    for host in ("codex",):
+    for host in HOSTS:
         stages = ["private-root"]
         stats = {}
         try:

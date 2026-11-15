@@ -25,6 +25,19 @@ def require_hosted_lane():
 
 
 class Failure(Enum):
+    EDITOR = 'editor-not-stable'
+    FOOTER = 'editor-footer-missing'
+    ECHO = 'editor-echo-missing'
+    READ = 'conpty-read-error'
+    RENDER = 'terminal-decoder-error'
+    KNOWNFOLDER = 'windows-known-folder-error'
+    ACCESS = 'filesystem-access-denied'
+    SANDBOX = 'sandbox-setup-dialog'
+    READER = 'screen-reader-dialog'
+    STARTUP = 'session-start-error'
+    NOENV = 'environment-value-missing'
+    PANIC = 'native-panic'
+    SHELL = 'shell-discovery-error'
     LOCAL_GATE = 'managed-ownership-selection-routing-refused'
     MANAGED_START = 'managed-billing-unavailable'
     HOST_MISSING = 'pinned-host-entry-not-found'
@@ -78,11 +91,22 @@ def screen_failure(stage, frame):
     text = ' '.join(frame.casefold().split())
     if stage in ('claude-start', 'claude-control'):
         for reason, literals in (
+            (Failure.KNOWNFOLDER, ('known folder', 'knownfolder', 'failed to get appdata', 'cannot find the appdata')),
+            (Failure.NOENV, ('environment variable not found', 'missing environment variable')),
+            (Failure.ACCESS, ('access is denied', 'permission denied', 'os error 5)')),
+            (Failure.STARTUP, ('failed to initialize', 'error starting session', 'failed to start session',
+                               'failed to start thread', 'error creating thread', 'failed to load configuration',
+                               'error loading config', 'failed to spawn', 'failed to resolve codex')),
+            (Failure.PANIC, ('panicked at', 'fatal error:', 'unhandled exception')),
+            (Failure.READER, ('are you using a screen reader', 'enable screen reader mode?')),
+            (Failure.SANDBOX, ('set up the windows sandbox', 'set up your sandbox', 'choose your sandbox')),
+            (Failure.SHELL, ('could not find powershell', 'powershell was not found', 'no shell found')),
             (Failure.BASH, ('requires git-bash', 'git bash not found', 'could not find git bash')),
             (Failure.ARGS, ('unknown option', 'unrecognized option', 'invalid option')),
             (Failure.TRUST, ('yes, i trust', 'do you trust', 'trust this folder', 'trust this workspace')),
             (Failure.KEY, ('use this api key', 'use this key instead', 'detected a custom api key')),
-            (Failure.LOGIN, ('select login method', 'choose a login method', 'sign in to continue')),
+            (Failure.LOGIN, ('select login method', 'choose a login method', 'sign in to continue',
+                             'sign in with chatgpt', 'sign in with your chatgpt', 'enter your api key')),
             (Failure.SETUP, ('choose the text style', 'choose a theme', 'select a theme')),
         ):
             if any(s in text for s in literals):
@@ -134,21 +158,38 @@ class Terminal:
         self.vt = pyte.Stream(self.screen)
         self.before_input = ''
         self.query_tail = ''
+        self.observation = ''
+        self.finding = None
 
     def frame(self):
         return '\n'.join(line.rstrip() for line in self.screen.display)
 
     def read(self):
-        chunk = self.process.read(16384, blocking=False)
+        try:
+            chunk = self.process.read(16384, blocking=False)
+        except (EOFError, OSError, RuntimeError):
+            if self.exit_code and self.exit_code() is not None:
+                raise CheckpointMiss(self.finding or Failure.EXITED) from None
+            raise CheckpointMiss(self.finding or Failure.READ) from None
         if chunk:
+            # Preserve only a closed diagnosis across rapid redraws and process exit.
+            plain = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', chunk)
+            sample = self.observation + plain
+            self.finding = self.finding or screen_failure('claude-start', sample)
+            self.observation = sample[-200:]
             output = self.query_tail + chunk
-            for query, response in (('\x1b[?u', '\x1b[?0u'),
+            for query, response in (('\x1b[?u', '\x1b[?0u\x1b[?1;2c'),
+                                    ('\x1b]10;?\x07', '\x1b]10;rgb:ffff/ffff/ffff\x07'),
+                                    ('\x1b]10;?\x1b\\', '\x1b]10;rgb:ffff/ffff/ffff\x1b\\'),
                                     ('\x1b]11;?\x07', '\x1b]11;rgb:0000/0000/0000\x07'),
                                     ('\x1b]11;?\x1b\\', '\x1b]11;rgb:0000/0000/0000\x1b\\')):
                 if output.find(query, max(0, len(self.query_tail) - len(query) + 1)) != -1:
                     self.process.write(response)
             self.query_tail = output[-8:]
-            self.vt.feed(chunk)
+            try:
+                self.vt.feed(chunk)
+            except Exception:
+                raise CheckpointMiss(self.finding or Failure.RENDER) from None
         return chunk
 
     def expect(self, pattern, stage, *, timeout=45, diagnose=None):
@@ -158,6 +199,8 @@ class Terminal:
         reason = None
         while time.monotonic() < deadline:
             frame = self.frame()
+            if diagnose and self.finding:
+                raise CheckpointMiss(self.finding)
             observed = screen_failure(diagnose, frame) if diagnose else None
             if observed and diagnose in ('claude-start', 'claude-control') and observed in (
                     Failure.TRUST, Failure.LOGIN, Failure.KEY, Failure.SETUP, Failure.ARGS, Failure.BASH):
@@ -177,7 +220,7 @@ class Terminal:
                 if self.process.isalive():
                     raise
             if not self.process.isalive():
-                reason = reason or Failure.EXITED
+                reason = self.finding or reason or Failure.EXITED
                 break
             time.sleep(.025)
         # Do not put transcripts, paths, credentials, or prompts in pytest/JUnit.
