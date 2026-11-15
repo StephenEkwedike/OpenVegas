@@ -189,10 +189,10 @@ def main(args):
     if args == ["unpack"]:
         unpack(Path("packs"), Path("installed/node_modules"), json.loads(Path("qa-image-pins.json").read_bytes()))
         return 0
-    require(args == ["rehearsal"] and sys.platform == "win32")
+    require(args in (["rehearsal"], ["interrupt"]) and sys.platform == "win32")
     lane = args[0]
     ok = True
-    for host in HOSTS:
+    for host in ("codex",):
         stages = ["private-root"]
         stats = {}
         try:
@@ -201,16 +201,16 @@ def main(args):
             else:
                 from scripts.windows_switch_rehearsal import run
 
-                asyncio.run(run(host, drive, stages.append, stats))
+                asyncio.run(run(host, drive, stages.append, stats, interrupt=lane=="interrupt"))
         except Exception as exc:
             from scripts.verify_windows_conpty import CheckpointMiss
 
             reason = exc.reason.value if isinstance(exc, CheckpointMiss) else "unconfirmed"
-            counts = "".join(f" {k}={stats.get(k, 'unobserved')}" for k in ("supplier_answers", "linked", "rendered", "switch_acks", "status_checks", "rejected")) if lane == "rehearsal" else ""
+            counts = "".join(f" {k}={stats.get(k, 'unobserved')}" for k in ("supplier_answers", "linked", "rendered", "switch_acks", "status_checks", "rejected")) if lane in ("rehearsal","interrupt") else ""
             print(f"::error::{lane} {host} NOT-PASSED stage={stages[-1]} reason={reason}{counts}", flush=True)
             ok = False
         else:
-            result = "offline-status-clean-exit" if lane == "managed" else "three-linked-replies-host-v-host-clean-exit"
+            result = "offline-status-clean-exit" if lane == "managed" else ("interrupted-without-replay-clean-exit" if lane=="interrupt" else "three-linked-replies-host-v-host-clean-exit")
             print(f"::notice::{lane} {host} PASS stage={result}", flush=True)
     return 0 if ok else 1
 

@@ -13,14 +13,20 @@ import types
 import zipfile
 from pathlib import Path
 
-BASE="c1f97e3e91fa45b0d784184b157dcd3398c5c294"
-OLD="c3685dc856a19eb8aea14c8dac45e864728411370fa1cf959a591013c63be570"
-NEW="844eddd4b98c3f9f84df6aef24d96af8b3282f805b71141fd5d99c3db592213f"
-MOD="openvegas/integrations/windows_billing_host.py"
-OLD_MOD="22163229ebdd6bc09b8c31797ae333f8b8722d54208fd5dbeed1a3ce52d87456"
-NEW_MOD="8d249cb1aa71c9488bfdeae08c7d7072b10819c29e4e1e3d072759b1704f56fb"
-PATCH="9fe4fef8218d4420f8497cbf39f9eb0eed152275546e1f83dd9d2c3fc00a9988"
-FREEZE="cee8e8074f92a34c06a81ad4f19f408abc4c77100dc17dc62f3b969200e25cb5"
+BASE='add579ab7211283c0b7a18173616ff4310f5d230'
+OLD='146604cd6eb6a9538ca303287ebaf27f024b48571ad7c10f439b0703ef36ee01'
+NEW='8005302f9fa777343fc1252534b6fb0552605d5974945011097a49d4faa3c434'
+PINS={
+    "openvegas/integrations/codex_stable_transport.py": "f2000295be52bbe26474f080f8880eebebce1159a610389979b803e84e148533",
+    "openvegas/integrations/codex_title_origin.py": "cf1cc4b2c99d6c9677a3f277c0eff4424f28b281e2009901e5558807db13bfef",
+    "openvegas/integrations/inference_router.py": "d03a94b61fb641eb18f6de7e74eb76e7f15fa536abd95386fc69475341fd8394",
+    "openvegas/integrations/inference_router_managed.py": "ea677def6f231abfb42c5a49e94e1ff6a8da61a8bee87a9f41d8703b165f8de4",
+    "openvegas/integrations/inference_router_state.py": "e4529b9221b4d8a63dc6d960f5d595767f59d6dd0b4e3b3b1a885c368f7a724c",
+    "openvegas/integrations/windows_customer.py": "1ffafff3a0e894addc80cd324ded216e23c2ccedf5ded55e8ffae31bd1bd4aad",
+    "openvegas/integrations/windows_customer_codex.py": "408d538159891ce5dfb986415d9157becc8c858065e5678e3dd5aa7e578b8163"
+}
+FREEZE='23fac8190de7dc03016a01c72be360383d8801483aef3766ed20c1a32dcfcf06'
+NEW_FREEZE='8c213c291cd3caa60779d200b3121c98178b233677d2d8b414e6c377d41f019d'
 MAIN="openvegas-ai-0.3.19.tgz"
 WIN="lordesteph-openvegas-win32-x64-0.3.19.tgz"
 
@@ -35,7 +41,7 @@ def files(root):
 
 def stage():
     repo=Path.cwd()
-    work=Path(os.environ["RUNNER_TEMP"])/"ov-one-module"
+    work=Path(os.environ["RUNNER_TEMP"])/"ov-title-candidate"
     work.mkdir()
     need(subprocess.check_output(["git","-C","baseline","rev-parse","HEAD"],text=True).strip()==BASE)
     zipname=work/"public.zip"
@@ -46,13 +52,20 @@ def stage():
     subprocess.run([sys.executable,"-IB",src/"scripts/ci_prepare_native_frozen.py",src,work/"frozen"],check=True)
     tree=work/"frozen/cli"
     expected=json.loads((work/"frozen/freeze.json").read_bytes())["inputs"]["cli"]
-    need(len(expected)==331 and files(tree)==expected and expected[MOD]==OLD_MOD)
+    need(files(tree)==expected)
     builder=runpy.run_path(str(tree/"scripts/build_cli_candidate.py"))
     need(builder["source_digest"]()==OLD)
-    patch=subprocess.check_output(["git","show","HEAD:scripts/windows-fixture-only.patch"])
-    need(hashlib.sha256(patch).hexdigest()==PATCH)
-    subprocess.run(["git","-c","core.autocrlf=false","apply","--no-index","--unidiff-zero","-"],input=patch,cwd=tree,check=True)
-    need(files(tree)=={**expected,MOD:NEW_MOD} and builder["source_digest"]()==NEW)
+    for path,h in PINS.items():
+        data=subprocess.check_output(["git","cat-file","blob","HEAD:qa-frozen/"+path])
+        need(hashlib.sha256(data).hexdigest()==h and expected.get(path)!=h)
+        (tree/path).write_bytes(data)
+    need(files(tree)==expected|PINS and builder["source_digest"]()==NEW)
+    fr=json.loads((work/"frozen/freeze.json").read_bytes())
+    fr["inputs"]["cli"].update(PINS)
+    fr["checkout_native_inputs"].update(PINS)
+    raw=(json.dumps(fr,sort_keys=True,indent=2)+"\n").encode()
+    need(hashlib.sha256(raw).hexdigest()==NEW_FREEZE)
+    (work/"frozen/freeze.json").write_bytes(raw)
     subprocess.run([sys.executable,"-m","pip","--isolated","install","--no-cache-dir","-c",tree/"requirements.lock",
                     "-r",src/"ci-build-requirements.txt"],cwd=work,check=True)
 
@@ -64,11 +77,11 @@ def constants(code):
 def build():
     from PyInstaller.archive.readers import CArchiveReader
     repo=Path.cwd()
-    work=Path(os.environ["RUNNER_TEMP"])/"ov-one-module"
+    work=Path(os.environ["RUNNER_TEMP"])/"ov-title-candidate"
     tree=work/"frozen/cli"
     b=runpy.run_path(str(tree/"scripts/build_cli_candidate.py"))
     expected=json.loads((work/"frozen/freeze.json").read_bytes())["inputs"]["cli"]
-    need(files(tree)=={**expected,MOD:NEW_MOD} and b["source_digest"]()==NEW)
+    need(sha(work/"frozen/freeze.json")==NEW_FREEZE and files(tree)==expected and b["source_digest"]()==NEW)
     name="openvegas-win32-x64"
     cmd=[sys.executable,"-m","PyInstaller","--clean","--noconfirm","--onefile","--name",name,
          "--distpath",str(work/"bin"),"--workpath",str(work/"obj"),"--specpath",str(work/"spec"),
@@ -84,8 +97,7 @@ def build():
     need(len(archives)==1)
     pyz=exe_archive.open_embedded_archive(archives[0])
     verified=0
-    for path in (MOD,"openvegas/integrations/windows_customer.py","openvegas/integrations/windows_customer_codex.py",
-                 "openvegas/integrations/windows_customer_claude.py","openvegas/integrations/inference_router_adapter.py"):
+    for path in sorted(PINS):
         member=path[:-3].replace("/",".")
         code=pyz.extract(member)
         need(isinstance(code,types.CodeType) and constants(code)==constants(compile((tree/path).read_bytes(),path,"exec")))
@@ -113,9 +125,9 @@ def build():
             need(changed==1)
     pins={**original,"source":NEW,"pe":pehash,MAIN:sha(out/MAIN),WIN:sha(out/WIN)}
     unpack(out,repo/"installed/node_modules",pins)
-    proof=dict(base_assembly=43747860497,qa_commit=os.environ["GITHUB_SHA"],old_pe=original["pe"],pe=pehash,
-               launcher=original["launcher"],old_source=OLD,source=NEW,product_module=NEW_MOD,
-               frozen_inputs=331,changed_inputs=[MOD],compiled_modules_verified=verified,main=pins[MAIN],platform=pins[WIN])
+    proof=dict(base_assembly=43755105032,base_commit=BASE,freeze_sha256=NEW_FREEZE,qa_commit=os.environ["GITHUB_SHA"],old_pe=original["pe"],pe=pehash,
+               launcher=original["launcher"],old_source=OLD,source=NEW,product_delta=PINS,
+               frozen_inputs=len(expected),changed_inputs=sorted(PINS),compiled_modules_verified=verified,main=pins[MAIN],platform=pins[WIN])
     (out/"identity.json").write_text(json.dumps(proof,indent=2)+"\n")
     print("::notice::fixture-candidate "+" ".join(k+"="+proof[k] for k in ("source","pe","launcher","main","platform")),flush=True)
     with open(os.environ["GITHUB_ENV"],"a",encoding="utf-8") as dst: print("OV_FIXTURE_PE_HASH="+pehash,file=dst)
