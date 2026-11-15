@@ -60,12 +60,18 @@ class Fixture:
         self.denied_wallet = 0
         self.excess_titles = self.after_seal = self.extra_root = 0
         self.clean_exit = self.sealed = False
+        self.name_proof = "unobserved"
+        self.first_submit = False
+        self.pre_root_ingress = self.title_attempts = self.wallet_title_attempts = 0
         self.sent = {a: threading.Event() for a in self.answers}
         self.issue = ContextVar("wire-issue", default="wire")
 
     def arm(self, i):
         with self.lock:
             check(self.armed is None and len(self.rows) == i and not self.bad)
+            if self.host == "codex":
+                check(self.name_proof in ("terminal-title", "status-card") and self.pre_root_ingress == 0)
+            self.first_submit = True
             self.armed = i
 
     def turn(self, mode, body, previous=(), root=None):
@@ -110,9 +116,14 @@ class Fixture:
         try:
             root = None
             if self.host == "codex":
+                with self.lock:
+                    if not self.first_submit:
+                        self.pre_root_ingress += 1
                 source,root=metadata(scope)
                 mode=self.routes(scope["path"],"responses")
                 if source=="thread_title":
+                    self.title_attempts += 1
+                    self.wallet_title_attempts += int(mode == "v")
                     # Stock PE has no independent helper witness. Never synthesize
                     # a title, forward it, or credit it as a customer/root answer.
                     self.issue.set("helper-route")
@@ -238,6 +249,36 @@ def frames(host, model, answer, rid):
         yield {"type": kind, **value}
 
 
+def named_preflight(term, fixture, checkpoint, enter):
+    from scripts import verify_windows_conpty as pty
+
+    name = "ov-qa-" + token_hex(6)
+    title = lambda: name in getattr(term.screen, "title", "").split(" | ")
+    row = r"(?m)^[ \t]*(?:[\u2502\u2503|][ \t]*)?Thread name:[ \t]+" + re.escape(name) + r"[ \t]*(?:[\u2502\u2503|][ \t]*)?$"
+    check(not title() and not re.search(row, term.frame()))
+    enter(term, "/rename " + name, checkpoint, "named-rename")
+    checkpoint("named-save-readback")
+    end = time.monotonic() + 3
+    while time.monotonic() < end:
+        term.read()
+        if issue := (term.finding or pty.screen_failure("claude-start", term.frame())):
+            raise pty.CheckpointMiss(issue)
+        if title():
+            proof = "terminal-title"
+            break
+        time.sleep(.025)
+    else:
+        # API-key fixture has no ChatGPT account; /status reads the local widget.
+        enter(term, "/status", checkpoint, "named-status")
+        checkpoint("named-status-readback")
+        term.expect(row, "saved thread name in native status", timeout=12, diagnose="claude-start")
+        proof = "status-card"
+    with fixture.lock:
+        check(not fixture.rows and fixture.armed is None and not fixture.first_submit)
+        fixture.name_proof = proof
+        check(not fixture.pre_root_ingress and not fixture.bad)
+
+
 def interact(host, term, fixture, control, checkpoint):
     from scripts import verify_windows_conpty as pty
 
@@ -253,6 +294,9 @@ def interact(host, term, fixture, control, checkpoint):
     # Stop before sending ANY input at a trust, auth, or first-run UI.
     term.expect(r"OpenAI\s+Codex|Claude\s+Code|Sonnet\s+4\.6|\? for shortcuts|Type your message|shortcuts for help", "native composer",
                 timeout=85, diagnose="claude-start")
+    from scripts.windows_codex_editor import enter
+    if host == "codex":
+        named_preflight(term, fixture, checkpoint, enter)
     for i, mode in enumerate(MODES):
         checkpoint("rehearsal-control-" + str(i))
         if i:
@@ -262,9 +306,8 @@ def interact(host, term, fixture, control, checkpoint):
         fixture.status_checks += 1
         check(not pty.screen_failure("claude-start", term.frame()))
         checkpoint("rehearsal-answer-" + str(i))
-        fixture.arm(i)
-        from scripts.windows_codex_editor import enter
-        enter(term, fixture.prompts[i], checkpoint, "turn-" + str(i), host=host)
+        enter(term, fixture.prompts[i], checkpoint, "turn-" + str(i), host=host,
+              before_submit=lambda: fixture.arm(i))
         term.expect(re.escape(fixture.answers[i]), "rendered synthetic answer", timeout=40, diagnose="claude-start")
         fixture.rendered += 1
         # User-visible text can precede the supplier's completed frame. For
@@ -316,6 +359,11 @@ async def run(host, drive, checkpoint, stats):
             await asyncio.wait_for(serving, 10)
 
             if host=="codex":
+                print(f"::notice::named codex proof={fixture.name_proof} first_submit={int(fixture.first_submit)} "
+                      f"pre_root_ingress={fixture.pre_root_ingress} title_attempts={fixture.title_attempts} "
+                      f"wallet_title_attempts={fixture.wallet_title_attempts} rendered={fixture.rendered} "
+                      f"linked={max(0, len(fixture.rows)-1)} switch_acks={fixture.switch_acks} "
+                      f"status_checks={fixture.status_checks}",flush=True)
                 print(f"::notice::cleanup codex exit_zero={int(fixture.clean_exit)} sealed={int(fixture.sealed)} "
                       f"final_frame={int(fixture.sent[fixture.answers[-1]].is_set())} root_answers={len(fixture.rows)} "
                       f"extra_root={fixture.extra_root} title_over_cap={fixture.excess_titles} "
@@ -326,5 +374,6 @@ async def run(host, drive, checkpoint, stats):
                          rendered=fixture.rendered, switch_acks=fixture.switch_acks,
                          status_checks=fixture.status_checks, rejected=int(fixture.bad or bool(fixture.denied_wallet)))
         if host == "codex":
+            check(not fixture.title_attempts and not fixture.pre_root_ingress)
             check(fixture.clean_exit and fixture.sealed and not fixture.extra_root
                   and not fixture.denied_wallet and not fixture.bad)

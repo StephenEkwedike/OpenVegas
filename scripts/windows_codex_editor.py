@@ -20,7 +20,7 @@ def ready(frame, host):
                                     re.search(r"(?m)^\s*[\u203a\u276f](?!\s*\d+[.)])(?:\s|$)", frame))
 
 
-def enter(term, text, checkpoint, purpose, *, host="codex"):
+def enter(term, text, checkpoint, purpose, *, host="codex", before_submit=None):
     from scripts import verify_windows_conpty as pty
 
     def guard():
@@ -35,7 +35,7 @@ def enter(term, text, checkpoint, purpose, *, host="codex"):
 
     while time.monotonic() < end:
         term.read()
-        if host == "codex" and purpose == "turn-0" and not chosen:
+        if host == "codex" and purpose in ("named-rename", "turn-0") and not chosen:
             from scripts.windows_sandbox_choice import choice, select
             if choice(term.frame()) is not None:
                 select(term, checkpoint)
@@ -71,5 +71,13 @@ def enter(term, text, checkpoint, purpose, *, host="codex"):
     time.sleep(.15)
     term.read()
     term.before_input = guard()
+    if purpose == "named-rename":
+        # Never submit a bare slash command or accept a suggestion in its place.
+        if not (re.fullmatch(r"/rename ov-qa-[0-9a-f]{12}", text) and
+                re.search(PROMPT + re.escape(text) + r"[\u2588\u258f]?[ \t]*(?:[\u2502\u2503][ \t]*)?$",
+                          term.before_input)):
+            raise pty.CheckpointMiss(pty.Failure.ECHO)
     checkpoint(purpose + "-response")
+    if before_submit:
+        before_submit()
     term.process.write("\r")
