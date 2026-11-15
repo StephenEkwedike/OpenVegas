@@ -12,6 +12,7 @@ import json
 import os
 import secrets
 import socket
+import sys
 from contextlib import asynccontextmanager, nullcontext, suppress
 from dataclasses import dataclass, field
 
@@ -43,6 +44,16 @@ class DirectConnect(connect):
 
     def process_redirect(self, exc):
         return exc
+
+
+def native_tcp_peer_auth():
+    if sys.platform == 'linux':
+        from .inference_router_linux import LinuxTCPPeerAuth
+        return LinuxTCPPeerAuth()
+    if sys.platform == 'win32':
+        from .inference_router_windows import WindowsTCPPeerAuth
+        return WindowsTCPPeerAuth()
+    return DarwinTCPPeerAuth()
 
 
 class DarwinTCPPeerAuth:
