@@ -20,7 +20,7 @@ from .inference_router import MAX_BODY
 from .inference_router_adapter import VERSIONS, ProviderAdapter
 from .inference_router_windows import WindowsTCPPeerAuth
 from .use import parse_command
-from .windows_customer import Selection, require
+from .windows_customer import Check, CheckRefused, Selection, checking, require
 
 MAX = 4 * 1024 * 1024
 PREFIX = "ov-win-rpc-"
@@ -150,6 +150,12 @@ class NativeThreads:
         self.pending = {}
         self.roots, self.cold, self.used = set(), set(), set()
         self.revision = 0
+        self.ephemeral_work = 0
+
+    def fence(self, bounded):
+        # A known ephemeral cannot spend against a root-bound provider. Its
+        # turn notifications aren't root work; its lifecycle still matters.
+        return bounded, self.revision - (self.ephemeral_work if bounded else 0)
 
     def sent(self, msg):
         method, key = msg.get("method"), msg.get("id")
@@ -166,6 +172,8 @@ class NativeThreads:
             require(sid in self.used or len(self.used) < 256)
             self.used.add(sid)
             self.revision += 1
+            if sid in self.cold:
+                self.ephemeral_work += 1
 
     def received(self, msg):
         method = msg.get("method")
@@ -327,29 +335,39 @@ def action_for(method, params):
     return parsed[0] if parsed and parsed[0] in ("v", "host") else None
 
 
+def root_bounded(session):
+    return (
+        isinstance(session.router, RootIngress)
+        and isinstance(session.adapter, RootAdapter)
+        and session.router.inner.adapter is session.adapter
+        and session.router.root is session.adapter.root
+    )
+
+
 async def selection(pipe, owner, params):
     sid = params.get("threadId")
-    require(await route(pipe, owner.cwd, owner.session._url) == owner.session.adapter.host_base)
-    loaded = await pipe.call("thread/loaded/list", {"limit": 32})
-    bounded = (
-        isinstance(owner.session.router, RootIngress)
-        and isinstance(owner.session.adapter, RootAdapter)
-        and owner.session.router.inner.adapter is owner.session.adapter
-    )
-    pipe.threads.verify(sid, loaded, bounded=bounded)
-    thread = (await pipe.call("thread/read", {"threadId": sid, "includeTurns": False}))["thread"]
-    native = _identity(thread, sid)
+    with checking(Check.ROUTE):
+        require(await route(pipe, owner.cwd, owner.session._url) == owner.session.adapter.host_base)
+    with checking(Check.INVENTORY):
+        loaded = await pipe.call("thread/loaded/list", {"limit": 32})
+        pipe.threads.verify(sid, loaded, bounded=root_bounded(owner.session))
+    with checking(Check.IDENTITY):
+        thread = (await pipe.call("thread/read", {"threadId": sid, "includeTurns": False}))[
+            "thread"
+        ]
+        native = _identity(thread, sid)
     # The TUI may have picked a new model for this turn without changing
     # thread/read. Use only explicit, agreeing native turn selections.
-    names = [
-        v
-        for v in (
-            params.get("model"),
-            ((params.get("collaborationMode") or {}).get("settings") or {}).get("model"),
-        )
-        if v is not None
-    ]
-    require(not names or (all(exact_model(v) for v in names) and len(set(names)) == 1))
+    with checking(Check.MODEL):
+        names = [
+            v
+            for v in (
+                params.get("model"),
+                ((params.get("collaborationMode") or {}).get("settings") or {}).get("model"),
+            )
+            if v is not None
+        ]
+        require(not names or (all(exact_model(v) for v in names) and len(set(names)) == 1))
     return Selection(sid, names[0] if names else native.model, native.cwd, owner.session._url)
 
 
@@ -384,15 +402,25 @@ async def bridge(ws, pipe, owner, tui):
         await ws.send(json.dumps({"id": key, "error": {"code": -32000, "message": message}}))
 
     async def control(key, action, params):
-        revision = pipe.threads.revision
+        def fence():
+            return pipe.threads.fence(root_bounded(owner.session))
+
+        revision = fence()
 
         def stable():
-            guard()
-            require(pipe.threads.revision == revision)
+            with checking(Check.FENCE):
+                guard()
+                require(fence() == revision)
 
         try:
             message = await owner.command(
                 action, observe=lambda: selection(pipe, owner, params), guard=stable
+            )
+        except CheckRefused as exc:
+            message = (
+                "Local control unconfirmed. Check status; no automatic retry. Control check: "
+                + exc.step.value
+                + "."
             )
         except Exception:  # noqa: BLE001 - Never expose native frames or credential errors.
             message = "Local control unconfirmed. Check status; no automatic retry."

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass
+from enum import Enum
 
 import httpx
 
@@ -22,6 +23,32 @@ def require(condition):
         raise IntegrationError(
             "Windows native ownership, selection or routing could not be verified."
         )
+
+
+class Check(Enum):
+    ROUTE = "native-route"
+    INVENTORY = "native-inventory"
+    IDENTITY = "native-root"
+    MODEL = "native-model"
+    WORKSPACE = "native-workspace"
+    FENCE = "native-fence"
+    LEASE = "session-lease"
+
+
+class CheckRefused(IntegrationError):
+    def __init__(self, step):
+        self.step = step
+        super().__init__("Control check: " + step.value + ".")
+
+
+@contextmanager
+def checking(step):
+    try:
+        yield
+    except CheckRefused:
+        raise
+    except Exception:  # noqa: BLE001 - Only the fixed check name can reach the composer.
+        raise CheckRefused(step) from None
 
 
 def same_workspace(left, right):
@@ -82,6 +109,7 @@ class Customer:
     def __init__(self, host, broker, upstream, cwd):
         self.host, self.broker, self.cwd = host, broker, cwd
         self.current = self.observe = self.guard = self.lease = self.sid = None
+        self.refusal = None
         self.busy = False
         if host == "codex":
             from .inference_router_wallet import codex_wallet_callbacks
@@ -115,24 +143,37 @@ class Customer:
         return self.current.model
 
     async def boundary(self, ticket):
+        try:
+            return await self._boundary(ticket)
+        except CheckRefused as exc:
+            if self.session.state.pending is ticket:
+                self.refusal = exc.step
+            raise
+
+    async def _boundary(self, ticket):
         guard, observe = self.guard, self.observe
         require(self.busy and self.session.state.pending is ticket)
         guard()
         value = await observe()
         require(self.busy and self.session.state.pending is ticket and self.observe is observe)
         guard()
-        require(
-            isinstance(value, Selection)
-            and session_id(value.identifier)
-            and same_workspace(value.cwd, self.cwd)
-            and value.base_url == self.session._url
-            and exact_model(value.model)
-            and (self.host != "claude" or value.model.startswith("claude-"))
-        )
+        with checking(Check.IDENTITY):
+            require(isinstance(value, Selection) and session_id(value.identifier))
+        with checking(Check.WORKSPACE):
+            require(same_workspace(value.cwd, self.cwd))
+        with checking(Check.ROUTE):
+            require(value.base_url == self.session._url)
+        with checking(Check.MODEL):
+            require(
+                exact_model(value.model)
+                and (self.host != "claude" or value.model.startswith("claude-"))
+            )
         if self.sid is None:
-            self.lease = SessionLease(self.host, value.identifier)
+            with checking(Check.LEASE):
+                self.lease = SessionLease(self.host, value.identifier)
             self.sid = value.identifier
-        require(self.sid == value.identifier and self.current in (None, value))
+        with checking(Check.FENCE):
+            require(self.sid == value.identifier and self.current in (None, value))
         self.current = value
         return True
 
@@ -166,16 +207,31 @@ class Customer:
                 return "Billing change pending or unconfirmed; check status."
             return f"Payer: {self.session.state.mode}; {balance}."
         self.busy = True
+        self.refusal = None
         self.current, self.observe, self.guard = None, observe, guard
         try:
             result = await self.session.command("openvegas use " + action)
+            detail = ""
+            if self.host == "codex" and result.billing != action:
+                # Router outcomes may contain several kinds of refusal. Never print an
+                # exception or suggest grant creation/noncreation from a stage name.
+                reason = (
+                    self.refusal.value
+                    if self.refusal
+                    else {
+                        "wallet_not_created": "wallet-prepare",
+                        "wallet_outcome_unconfirmed": "wallet-outcome",
+                    }.get(result.outcome, "request-boundary")
+                )
+                detail = " Control check: " + reason + "."
             if self.session.state.pending is not None:
-                return "Billing outcome unconfirmed; inference held. No automatic retry."
+                return "Billing outcome unconfirmed; inference held. No automatic retry." + detail
             if result.billing != action:
-                return "Switch refused; payer unchanged. No prompt sent."
+                return "Switch refused; payer unchanged. No prompt sent." + detail
             return "Payer: " + result.billing + ". No prompt sent."
         finally:
             self.current = self.observe = self.guard = None
+            self.refusal = None
             self.busy = False
 
     async def close(self):

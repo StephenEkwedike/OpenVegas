@@ -330,7 +330,8 @@ def test_codex_intercepts_only_single_plain_native_control(method, item, expecte
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("rig", ["codex"], indirect=True)
-async def test_native_stdio_bridge_forwards_normal_work_but_not_controls(rig, tmp_path):
+@pytest.mark.parametrize("interleave", ["quiet", "title", "root-before", "root-after", "unknown"])
+async def test_native_stdio_bridge_forwards_normal_work_but_not_controls(rig, tmp_path, interleave):
     from websockets.protocol import State
 
     owner, bank, pick, *_ = rig
@@ -393,6 +394,17 @@ async def test_native_stdio_bridge_forwards_normal_work_but_not_controls(rig, tm
                 "thread/read": {"thread": native_thread},
                 "turn/start": {"turn": {"id": "native-turn", "status": "inProgress"}},
             }[method]
+            if method == "thread/read":
+                checked = sum(m == method for m, _ in native_calls)
+                sid = {
+                    "title": OTHER,
+                    "root-before": SID if checked == 1 else None,
+                    "root-after": SID if checked == 2 else None,
+                    "unknown": "eae0bbff-4e67-4563-842b-fbcee7246374",
+                }.get(interleave)
+                if sid:
+                    notice = {"method": "turn/completed", "params": {"threadId": sid}}
+                    incoming.feed_data(json.dumps(notice).encode() + b"\n")
             incoming.feed_data(json.dumps({"result": response, "id": msg["id"]}).encode() + b"\n")
 
         async def drain(self):
@@ -406,6 +418,8 @@ async def test_native_stdio_bridge_forwards_normal_work_but_not_controls(rig, tm
         await c2s.put({"id": seq, "method": method, "params": values})
         async with asyncio.timeout(2):
             result = await s2c.get()
+            while result.get("method") == "turn/completed":
+                result = await s2c.get()
         assert result["id"] == seq
         return result
 
@@ -414,7 +428,19 @@ async def test_native_stdio_bridge_forwards_normal_work_but_not_controls(rig, tm
             "id"
         ] == OTHER
         assert (await send(11, {}, "thread/start"))["result"]["thread"]["id"] == SID
-        assert (await send(1, params))["error"]["message"] == "Payer: v. No prompt sent."
+        message = (await send(1, params))["error"]["message"]
+        if interleave in ("root-before", "unknown", "root-after"):
+            assert message.endswith("Control check: native-fence.")
+            if interleave == "root-after":
+                assert "unconfirmed; inference held" in message and owner.session.state.pending
+                assert bank.calls.count(("POST", "/native/sessions")) == 1
+            else:
+                assert "refused; payer unchanged" in message and owner.session.state.pending is None
+                assert not bank.calls
+            assert owner.session.state.mode == "host"
+            assert all(method != "turn/start" for method, _ in native_calls)
+            return
+        assert message == "Payer: v. No prompt sent."
         ordinary = {**params, "input": [{"type": "text", "text": "A normal synthetic question"}]}
         assert (await send(2, ordinary))["result"]["turn"]["id"] == "native-turn"
         assert (
@@ -770,3 +796,49 @@ def test_used_ephemeral_is_eligible_only_under_root_wire_containment():
         inventory.verify(
             SID, {**report, "data": [SID, "eae0bbff-4e67-4563-842b-fbcee7246374"]}, bounded=True
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rig", ["codex"], indirect=True)
+async def test_fence_requires_identical_root_authority_at_both_admission_layers(rig):
+    owner, *_ = rig
+    session = owner.session
+    assert codex.root_bounded(session)
+    session.router.root = lambda: OTHER
+    assert not codex.root_bounded(session)
+    session.router.root = session.adapter.root
+    session.router.inner.adapter = replace(session.adapter, root=lambda: OTHER)
+    assert not codex.root_bounded(session)
+
+
+def test_ephemeral_work_exemption_never_exempts_lifecycle_or_unbounded_work():
+    threads = codex.NativeThreads()
+    threads.sent({"id": 1, "method": "thread/start"})
+    threads.received({"id": 1, "result": {"thread": {"id": OTHER, "ephemeral": True}}})
+    bounded, unbounded = threads.fence(True), threads.fence(False)
+    threads.work(OTHER)
+    assert threads.fence(True) == bounded and threads.fence(False) != unbounded
+    threads.sent({"id": 2, "method": "thread/unsubscribe", "params": {"threadId": OTHER}})
+    after_send = threads.fence(True)
+    assert after_send != bounded
+    threads.received({"id": 2, "result": {}})
+    assert threads.fence(True) != after_send
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rig", ["codex"], indirect=True)
+@pytest.mark.parametrize("step", ["native-workspace", "session-lease", "wallet-prepare"])
+async def test_codex_refusal_names_first_check_without_leaking_native_details(rig, step):
+    owner, bank, pick, leases, _ = rig
+    if step == "native-workspace":
+        pick = replace(pick, cwd="not-the-owned-workspace")
+    elif step == "session-lease":
+        leases.side_effect = OSError("private diagnostic must not reach the composer")
+    else:
+        bank.reject = "/native/options?host=codex"
+    result = await owner.command("v", observe=AsyncMock(return_value=pick), guard=lambda: None)
+    assert result == f"Switch refused; payer unchanged. No prompt sent. Control check: {step}."
+    assert owner.session.state.pending is None and owner.session.state.mode == "host"
+    assert bank.calls == (
+        [("GET", "/native/options?host=codex")] if step == "wallet-prepare" else []
+    )
