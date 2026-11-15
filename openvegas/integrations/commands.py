@@ -273,16 +273,21 @@ def pets(apply, upgrade, review_pack):
               help='With --attach on native Windows, run this host in the current console.')
 @click.option('--windows-fixture-port', type=click.IntRange(1, 65535),
               help='Isolated Windows rehearsal ONLY: local synthetic upstream, no real wallet. Use an offline disposable VM.')
+@click.option('--managed-billing', 'windows_managed', is_flag=True,
+              help='Opt in to native Windows billing controls. Starts on host; an explicit local switch requests wallet access.')
 @click.option('--windows-session', help='ID printed by a running synthetic Windows rehearsal.')
 @click.option('--payer', type=click.Choice(['status', 'host', 'v']),
               help='Inspect or change only the synthetic payer of --windows-session.')
 def terminal(apply, make_default, restore_default, game_handoff, attach, check_connection,
-             windows_host, windows_fixture_port, windows_session, payer):
-    """Manage terminal setup, or attach a native host on Windows without changing billing."""
-    if any(v is not None for v in (windows_host, windows_fixture_port, windows_session, payer)):
+             windows_host, windows_fixture_port, windows_managed, windows_session, payer):
+    """Manage terminal setup, or attach a native Windows host."""
+    if windows_managed or any(v is not None for v in (windows_host, windows_fixture_port, windows_session, payer)):
         if os.name != 'nt' or any((apply, make_default, restore_default, game_handoff, check_connection)):
             raise click.UsageError('Windows host/control options require native Windows and no profile options.')
         try:
+            if windows_managed and (not attach or not windows_host or windows_fixture_port is not None
+                                    or windows_session is not None or payer is not None):
+                raise click.UsageError('Use --managed-billing only with --attach --host codex|claude.')
             if windows_session is not None or payer is not None:
                 if not (windows_session and payer) or attach or windows_host or windows_fixture_port:
                     raise click.UsageError('Use --windows-session ID and --payer status|host|v together, alone.')
@@ -295,6 +300,8 @@ def terminal(apply, make_default, restore_default, game_handoff, attach, check_c
             if not attach or not windows_host:
                 raise click.UsageError('Use --attach --host codex|claude.')
             from .windows_billing_host import launch
+            if windows_managed:
+                raise click.exceptions.Exit(launch(windows_host, managed=True))
             raise click.exceptions.Exit(launch(windows_host, fixture_port=windows_fixture_port))
         except (IntegrationError, OSError) as exc:
             raise click.ClickException(str(exc) if isinstance(exc, IntegrationError)

@@ -58,6 +58,20 @@ jobs:
             $exe = (Get-Item -LiteralPath $paths[0]).FullName
             "OV_WINDOWS_$($spec.id)_EXE=$exe" >> $env:GITHUB_ENV
           }
+      - name: Install isolated customer candidate and pinned ConPTY driver
+        run: |
+          if ((git rev-parse HEAD) -ne $env:GITHUB_SHA) { throw 'Unexpected candidate revision' }
+          $pin = Join-Path $env:RUNNER_TEMP 'openvegas-conpty-pin.txt'
+          'pywinpty==2.0.15 --hash=sha256:9a6bcec2df2707aaa9d08b86071970ee32c5026e10bcc3cc5f6f391d85baf7ca' | Set-Content -LiteralPath $pin -Encoding ascii
+          python -m pip --isolated install --no-deps --only-binary=:all: --require-hashes -r $pin
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python -m pip --isolated install --only-binary=:all: -c requirements.lock keyring python-dotenv prompt-toolkit 'setuptools>=77.0.3' wheel
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python -m pip --isolated install --no-deps --no-build-isolation .
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $bash = Join-Path $env:ProgramFiles 'Git/bin/bash.exe'
+          if (!(Test-Path -LiteralPath $bash -PathType Leaf)) { throw 'Expected runner Git Bash' }
+          "OV_WINDOWS_BASH_EXE=$bash" >> $env:GITHUB_ENV
       - name: Block outbound traffic from native hosts, helpers and Python
         id: isolation
         run: |
@@ -68,7 +82,10 @@ jobs:
           }
           $hosts = @($env:OV_WINDOWS_CODEX_EXE, $env:OV_WINDOWS_CLAUDE_EXE)
           $helpers = @(Get-ChildItem -LiteralPath (Join-Path $env:RUNNER_TEMP 'native-hosts') -Filter '*.exe' -File -Recurse -ErrorAction Stop | ForEach-Object FullName)
-          $programs = @(($hosts + $helpers + @((Get-Command python.exe).Source)) | Sort-Object -Unique)
+          $git = Join-Path $env:ProgramFiles 'Git'
+          $tools = @((Get-Command python.exe).Source, (Get-Command node.exe).Source, $env:OV_WINDOWS_BASH_EXE,
+            (Join-Path $git 'usr/bin/bash.exe'), (Join-Path $git 'usr/bin/sh.exe'), (Join-Path $git 'cmd/git.exe'))
+          $programs = @(($hosts + $helpers + $tools) | Sort-Object -Unique)
           $n = 0
           foreach ($exe in $programs) {
             if (!$exe -or ![IO.Path]::IsPathFullyQualified($exe) -or !(Test-Path -LiteralPath $exe -PathType Leaf)) {
@@ -88,6 +105,13 @@ jobs:
       - name: Native image, bundled catalog and peer ownership
         run: |
           python -B -m pytest "--junitxml=$env:RUNNER_TEMP/images.xml" tests/test_integrations/test_windows_native_image.py tests/test_integrations/test_inference_router_windows.py --deselect=tests/test_integrations/test_inference_router_windows.py::test_refuse_wrong_os *> $null
+          exit $LASTEXITCODE
+      - name: Installed customer controls in foreground ConPTY
+        if: ${{ !cancelled() && steps.isolation.outcome == 'success' }}
+        env:
+          OV_WINDOWS_CONPTY_ISOLATED: '1'
+        run: |
+          python -B -m pytest "--junitxml=$env:RUNNER_TEMP/customer.xml" tests/test_integrations/test_windows_installed_switch.py *> $null
           exit $LASTEXITCODE
       - name: Native session lease and owner crash recovery
         if: ${{ !cancelled() && steps.isolation.outcome == 'success' }}
@@ -183,6 +207,7 @@ jobs:
             terminal = @('test_windows_terminal_cli_separates_launch_and_controls','test_native_windows_console_restore','test_windows_locator_and_profile_are_private','test_owned_child_routes_and_switches_without_restart[codex]','test_owned_child_routes_and_switches_without_restart[claude]','test_peer_cleanup_error_cannot_skip_wallet_revocation')
             codex = $matrix
             claude = @('test_pinned_claude_stream_json_round_trip')
+            customer = @('test_installed_customer_switch[codex]','test_installed_customer_switch[claude]','test_bad_bank_request_cannot_issue_or_revoke')
           }
           $ok = $true
           foreach ($group in $required.Keys) {
@@ -197,6 +222,16 @@ jobs:
                 # Publish only source locations and reviewed test names, never traceback values or fixture IO.
                 $locations = [regex]::Matches($bad.InnerText, '(?:tests|openvegas)[/\\][A-Za-z0-9_/\\.]+\.py:\d+') | ForEach-Object Value | Select-Object -Unique -Last 4
                 $label = $case.GetAttribute('name') -replace '[^a-zA-Z0-9_.\[\]-]', '_'
+                if ($group -eq 'customer') {
+                  $stage = $case.SelectSingleNode("(properties/property[@name='qa_stage'])[last()]")
+                  if ($stage -and $stage.value -match '^(isolation|conpty|native-start|switch-(v|host)|status-[012]|answer-[012]|shutdown)$') {
+                    Write-Output "::error::$label checkpoint: $($stage.value)"
+                  }
+                  $sites = [regex]::Matches($bad.InnerText, '(?:scripts[/\\])?verify_windows_[a-z]+\.py:\d+') | ForEach-Object Value | Select-Object -Unique -Last 3
+                  if ($sites) { Write-Output "::error::$label driver: $($sites -join ', ')" }
+                  $frames = [regex]::Match($bad.InnerText, 'QA frames: ((?:[a-z_]+:\d+,?){1,12})')
+                  if ($frames.Success) { Write-Output "::error::$label managed: $($frames.Groups[1].Value)" }
+                }
                 Write-Output "::error::$group / $label / $($bad.LocalName) / $($locations -join ', ')"
               }
             }
@@ -210,4 +245,4 @@ jobs:
             "$group : $($passed.Count) of $($cases.Count) selected cases passed" >> $env:GITHUB_STEP_SUMMARY
           }
           if (!$ok) { throw 'One or more Windows QA gates did not pass' }
-          'Synthetic loopback protocol evidence only; no supplier, payment or full installed TUI certification.' >> $env:GITHUB_STEP_SUMMARY
+          "Installed Windows CLI/Python wheel and native ConPTY with synthetic financial services at $env:GITHUB_SHA. No personal subscription, real payment, npm installer or release certification." >> $env:GITHUB_STEP_SUMMARY

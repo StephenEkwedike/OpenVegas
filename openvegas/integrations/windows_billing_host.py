@@ -1,9 +1,7 @@
-"""Native Windows console launch and request-scoped, loopback-only payer rehearsal.
+"""Ordinary Windows launch, explicit customer routing, or an isolated rehearsal.
 
-Personal profiles never get a routing overlay. The separate rehearsal starts a
-fresh profile/workspace with synthetic credentials; run it only in a disposable
-Windows account with external egress denied. No production grant adapter exists
-on this path. No TUI input is read, injected, replayed or used as consent.
+Only the rehearsal uses a disposable profile and synthetic credentials. Never
+infer customer consent from the fixture switch or an ordinary native launch.
 """
 from __future__ import annotations
 
@@ -189,7 +187,7 @@ async def run_routed(host, executable, port, env, cwd, directory, announce):
         return await owner.run(session, [executable, *argv], child_env, cwd, directory, announce)
 
 
-def launch(host, args=(), *, fixture_port=None):
+def launch(host, args=(), *, fixture_port=None, managed=False):
     from .windows_native_image import pinned_windows_image
 
     if sys.platform != 'win32' or host not in VERSIONS:
@@ -197,6 +195,16 @@ def launch(host, args=(), *, fixture_port=None):
     if os.environ.get('OPENVEGAS_NATIVE_FIXTURE') is not None:
         raise IntegrationError('Do not mix POSIX fixtures with the separate Windows rehearsal.')
     entry = find_entry(host, os.environ.get('PATH', ''))
+    if managed:
+        if args or fixture_port is not None:
+            raise IntegrationError('Managed Windows billing accepts no fixture, prompt or launch overrides.')
+        from . import windows_customer
+        from .native import host_environment
+        with terminal.console_modes(), pinned_windows_image(host, entry, VERSIONS[host]) as exe:
+            try:
+                return asyncio.run(windows_customer.run(host, exe, host_environment() or os.environ, os.getcwd()))
+            except (OSError, ImportError, ValueError, TypeError, KeyError, TimeoutError):
+                raise IntegrationError('Managed Windows billing unavailable. No automatic payer fallback.') from None
     if fixture_port is not None and (args or type(fixture_port) is not int or not 1 <= fixture_port <= 65535):
         raise IntegrationError('The isolated Windows rehearsal accepts no native overrides or prompt.')
     if fixture_port is None:

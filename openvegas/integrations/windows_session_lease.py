@@ -13,6 +13,10 @@ from .credentials import IntegrationError
 def _local_appdata():
     # Environment variables can differ between two launchers for the same user.
     # Use the current user's OS-known folder, not HOME, TEMP, or LOCALAPPDATA.
+    return known_folder("F1B32785-6FBA-4FCF-9D55-7B8E7F157091")
+
+
+def known_folder(identifier):
     shell = ctypes.WinDLL("shell32.dll", winmode=0x800)
     ole = ctypes.WinDLL("ole32.dll", winmode=0x800)
     get = shell.SHGetKnownFolderPath
@@ -26,7 +30,7 @@ def _local_appdata():
     free = ole.CoTaskMemFree
     free.argtypes = [ctypes.c_void_p]
     free.restype = None
-    guid = ctypes.create_string_buffer(UUID("F1B32785-6FBA-4FCF-9D55-7B8E7F157091").bytes_le)
+    guid = ctypes.create_string_buffer(UUID(identifier).bytes_le)
     ptr = ctypes.c_void_p()
     try:
         if get(guid, 0, None, ctypes.byref(ptr)) or not ptr.value:
