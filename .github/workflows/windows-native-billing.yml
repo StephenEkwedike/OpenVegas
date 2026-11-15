@@ -1,7 +1,7 @@
 name: Windows managed startup without inference
 on:
   push:
-    branches: ['codex/qa-win32-private-root-0319']
+    branches: ['codex/qa-win-foreground-8005302f']
 permissions:
   contents: read
   actions: read
