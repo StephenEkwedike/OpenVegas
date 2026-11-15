@@ -9,6 +9,7 @@ import sys
 import time
 from collections import Counter
 from contextlib import contextmanager
+from enum import Enum
 from pathlib import Path
 
 
@@ -21,6 +22,65 @@ def require_hosted_lane():
     }
     if sys.platform != 'win32' or any(os.environ.get(k) != v for k, v in required.items()):
         raise RuntimeError('This probe is restricted to the isolated Windows QA job.')
+
+
+class Failure(Enum):
+    EXITED = 'child-exited'
+    UNKNOWN = 'no-reply'
+    TRUST = 'trust-dialog'
+    LOGIN = 'login-dialog'
+    KEY = 'api-key-dialog'
+    SETUP = 'startup-dialog'
+    BASH = 'git-bash-error'
+    ARGS = 'native-option-error'
+    BUSY = 'switch-busy'
+    HELD = 'switch-held'
+    REFUSED = 'switch-refused'
+    ROUTE = 'native-route'
+    INVENTORY = 'native-inventory'
+    ROOT = 'native-root'
+    MODEL = 'native-model'
+    WORKSPACE = 'native-workspace'
+    FENCE = 'native-fence'
+    LEASE = 'session-lease'
+    COMMAND = 'command-unavailable'
+
+
+class CheckpointMiss(RuntimeError):
+    def __init__(self, reason):
+        self.reason = Failure(reason)
+        super().__init__('Missing native checkpoint: ' + self.reason.value)
+
+
+def screen_failure(stage, frame):
+    text = ' '.join(frame.casefold().split())
+    if stage in ('claude-start', 'claude-control'):
+        for reason, literals in (
+            (Failure.BASH, ('requires git-bash', 'git bash not found', 'could not find git bash')),
+            (Failure.ARGS, ('unknown option', 'unrecognized option', 'invalid option')),
+            (Failure.TRUST, ('yes, i trust', 'do you trust', 'trust this folder', 'trust this workspace')),
+            (Failure.KEY, ('use this api key', 'use this key instead', 'detected a custom api key')),
+            (Failure.LOGIN, ('select login method', 'choose a login method', 'sign in to continue')),
+            (Failure.SETUP, ('choose the text style', 'choose a theme', 'select a theme')),
+        ):
+            if any(s in text for s in literals):
+                return reason
+        if stage == 'claude-control' and 'ov-billing' in text and any(
+                s in text for s in ('unknown command', 'unknown slash command', 'unknown skill',
+                                    'command not found', 'unrecognized command')):
+            return Failure.COMMAND
+    if stage in ('switch', 'claude-control'):
+        for reason in (Failure.ROUTE, Failure.INVENTORY, Failure.ROOT, Failure.MODEL,
+                       Failure.WORKSPACE, Failure.FENCE, Failure.LEASE):
+            if 'control check: ' + reason.value + '.' in text:
+                return reason
+        if 'local control busy' in text or 'billing control busy' in text:
+            return Failure.BUSY
+        if 'inference held' in text:
+            return Failure.HELD
+        if 'switch refused' in text or 'local control unconfirmed' in text:
+            return Failure.REFUSED
+    return None
 
 
 class Terminal:
@@ -67,22 +127,37 @@ class Terminal:
             self.vt.feed(chunk)
         return chunk
 
-    def expect(self, pattern, stage, *, timeout=45):
+    def expect(self, pattern, stage, *, timeout=45, diagnose=None):
         deadline = time.monotonic() + timeout
         regex = re.compile(pattern, re.I)
         old = Counter(m.group() for m in regex.finditer(self.before_input))
+        reason = None
         while time.monotonic() < deadline:
-            visible = Counter(m.group() for m in regex.finditer(self.frame()))
+            frame = self.frame()
+            observed = screen_failure(diagnose, frame) if diagnose else None
+            if observed and diagnose in ('claude-start', 'claude-control') and observed in (
+                    Failure.TRUST, Failure.LOGIN, Failure.KEY, Failure.SETUP, Failure.ARGS, Failure.BASH):
+                # Never send keystrokes to a native trust or authentication dialog.
+                raise CheckpointMiss(observed)
+            reason = observed or reason
+            visible = Counter(m.group() for m in regex.finditer(frame))
             fresh = visible - old
             if fresh:
                 return next(iter(fresh))
             old &= visible
-            if self.read():
-                continue
+            try:
+                if self.read():
+                    continue
+            except (EOFError, OSError):
+                if self.process.isalive():
+                    raise
             if not self.process.isalive():
+                reason = reason or Failure.EXITED
                 break
             time.sleep(.025)
         # Do not put transcripts, paths, credentials, or prompts in pytest/JUnit.
+        if diagnose:
+            raise CheckpointMiss(reason or Failure.UNKNOWN)
         raise RuntimeError('Missing terminal checkpoint: ' + stage)
 
     def type_line(self, line):

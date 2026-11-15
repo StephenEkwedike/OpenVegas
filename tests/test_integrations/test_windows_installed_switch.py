@@ -122,7 +122,11 @@ def drive(host, sink, port, checkpoint):
             checkpoint('native-start')
             term.expect(r'Windows managed ' + host, 'managed launch')
             checkpoint('composer')
-            term.expect(r'OpenAI\s+Codex|Claude\s+Code|shortcuts|for help|Sonnet\s+4\.6', 'native composer')
+            # Some ConPTY versions consume Claude's device-attributes probe,
+            # delaying first paint for 60s. Do not extend switch deadlines.
+            term.expect(r'OpenAI\s+Codex|Claude\s+Code|shortcuts|for help|Sonnet\s+4\.6', 'native composer',
+                        timeout=90 if host == 'claude' else 45,
+                        diagnose='claude-start' if host == 'claude' else None)
             time.sleep(.75)
             for i, mode in enumerate(('host', 'v', 'host')):
                 prefix = 'openvegas ' if host == 'codex' else '/ov-billing '
@@ -131,10 +135,15 @@ def drive(host, sink, port, checkpoint):
                     time.sleep(1)
                     checkpoint('switch-' + mode)
                     term.type_line(prefix + ('use ' if host == 'codex' else '') + mode)
-                    term.expect(r'Payer:\s*' + mode + r'\.\s*No prompt sent\.', 'confirmed switch')
+                    term.expect(r'Payer:\s*' + mode + r'\.\s*No prompt sent\.', 'confirmed switch', diagnose='switch')
                 checkpoint('status-' + str(i))
+                if host == 'claude':
+                    refusal = conpty.screen_failure('claude-start', term.frame())
+                    if refusal:
+                        raise conpty.CheckpointMiss(refusal)
                 term.type_line(prefix + 'status')
-                term.expect(r'Payer:\s*' + mode + r';\s*\$V\s*73\.25\.', 'confirmed balance and payer')
+                term.expect(r'Payer:\s*' + mode + r';\s*\$V\s*73\.25\.', 'confirmed balance and payer',
+                            diagnose='claude-control' if host == 'claude' else None)
                 checkpoint('answer-' + str(i))
                 if host == 'codex':
                     sink.prompt = 'ov-synthetic-turn-' + str(i)
@@ -158,7 +167,11 @@ async def test_installed_customer_switch(host, request):
 
     conpty.require_hosted_lane()
     async with supplier(host) as (sink, port):
-        await asyncio.to_thread(drive, host, sink, port, checkpoint)
+        try:
+            await asyncio.to_thread(drive, host, sink, port, checkpoint)
+        except conpty.CheckpointMiss as exc:
+            request.node.user_properties.append(('qa_failure_label', exc.reason.value))
+            raise
     if host == 'codex':
         assert not sink.rejections and [r['payer'] for r in sink.rows] == ['host', 'v', 'host']
         assert all(r['wire_model'] == qa.MODELS['codex'] and r['wire_effort'] == 'low' for r in sink.rows)
@@ -208,3 +221,32 @@ def test_console_requires_new_visible_ack_not_erased_or_stale_text():
     console.type_line('openvegas use v')
     assert console.expect(r'Payer: v\.\s*No prompt sent\.', 'switch') == 'Payer: v.No prompt sent.'
     assert 'checking' in console.frame()
+
+
+def test_split_primary_device_query_replies_once_without_typing_a_command():
+    class Stream:
+        chunks = iter(['\x1b[', 'c', '\r\n'])
+        replies = []
+
+        def read(self, *_, **kwargs):
+            return next(self.chunks)
+
+        def write(self, value):
+            self.replies.append(value)
+
+    stream = Stream()
+    terminal = conpty.Terminal(stream)
+    for _ in range(3):
+        terminal.read()
+    assert stream.replies == ['\x1b[?6c']
+
+
+def test_terminal_failure_labels_are_closed_and_no_generic_banner_accepts_trust():
+    assert conpty.screen_failure('switch', 'Control check: native-root.') is conpty.Failure.ROOT
+    assert conpty.screen_failure('switch', 'Control check: arbitrary-private-text.') is None
+    assert conpty.screen_failure('claude-start', 'Claude Code: Do you trust this folder?') is conpty.Failure.TRUST
+    assert conpty.screen_failure('claude-start', 'Claude Code for testing') is None
+    assert conpty.screen_failure('claude-control', 'Unknown skill: ov-billing') is conpty.Failure.COMMAND
+    assert conpty.screen_failure('claude-control', 'unrelated unknown command') is None
+    with pytest.raises(ValueError):
+        conpty.CheckpointMiss('private-text')
