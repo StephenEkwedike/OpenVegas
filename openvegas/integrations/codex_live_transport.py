@@ -25,6 +25,8 @@ from websockets.asyncio.server import unix_serve
 from websockets.exceptions import ConnectionClosed
 from websockets.protocol import State
 
+from .runtime_directory import runtime_parent
+
 
 class TransportRefused(RuntimeError):
     """The requested transition was not performed."""
@@ -318,7 +320,7 @@ class LiveTransport:
         return self._pid
 
     async def __aenter__(self):
-        self._temp = tempfile.TemporaryDirectory(prefix="ov-live-", dir=self._directory or "/tmp")
+        self._temp = tempfile.TemporaryDirectory(prefix="ov-live-", dir=self._directory or runtime_parent("/tmp"))
         path = Path(self._temp.name) / "t.sock"
         self.endpoint = "unix://" + str(path)
         try:

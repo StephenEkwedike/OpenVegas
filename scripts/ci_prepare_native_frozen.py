@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 source, output = (Path(arg).resolve() for arg in sys.argv[1:])
-expected = 'fcd2cd871db37822e13b72949f16ed7d00052aa800b3c003fffd9117e691caeb'
+expected = 'cee8e8074f92a34c06a81ad4f19f408abc4c77100dc17dc62f3b969200e25cb5'
 raw = (source / 'native-router-freeze.json').read_bytes()
 assert hashlib.sha256(raw).hexdigest() == expected
 receipt = json.loads(raw)
@@ -27,6 +27,6 @@ shutil.copyfile(source / 'native-router-freeze.json', output / 'freeze.json')
 actual = {p.relative_to(output / 'cli').as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
           for p in (output / 'cli').rglob('*') if p.is_file()}
 assert actual == receipt['inputs']['cli']
-assert len(receipt['checkout_native_inputs']) == 35
+assert len(receipt['checkout_native_inputs']) == 38
 print(json.dumps({'frozen': str(output), 'freeze_sha256': expected,
                   'input_files': len(actual), 'version': receipt['version']}))

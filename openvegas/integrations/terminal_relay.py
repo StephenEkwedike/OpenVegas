@@ -190,7 +190,8 @@ def run(shell):
     key_time = 0
     size = fcntl.ioctl(0, termios.TIOCGWINSZ, bytes(8))
     token = secrets.token_hex(32)
-    directory = tempfile.TemporaryDirectory(prefix="ov-terminal-", dir="/tmp")
+    from .runtime_directory import runtime_parent
+    directory = tempfile.TemporaryDirectory(prefix="ov-terminal-", dir=runtime_parent("/tmp"))
     os.chmod(directory.name, 0o700)
     listener = socket.socket(socket.AF_UNIX)
     path = str(Path(directory.name) / "game.sock")

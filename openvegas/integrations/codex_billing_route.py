@@ -20,6 +20,7 @@ from pathlib import Path
 from websockets.asyncio.client import unix_connect
 
 from .credentials import IntegrationError
+from .runtime_directory import runtime_parent
 from .host_adapter import LocalServerLaunch
 from .native_owned_process import OwnedProcess
 from .native_owned_process import spawn as _spawn_owned
@@ -45,7 +46,7 @@ def _launch_scope(env, cwd):
 
 @asynccontextmanager
 async def _private_server(argv, env, cwd):
-    with tempfile.TemporaryDirectory(prefix='ov-policy-', dir='/tmp') as directory:
+    with tempfile.TemporaryDirectory(prefix='ov-policy-', dir=runtime_parent('/tmp')) as directory:
         socket = Path(directory) / 'native.sock'
         endpoint = 'unix://' + str(socket)
         process, cancelled = await _settle(asyncio.create_task(_spawn_owned(
@@ -474,7 +475,7 @@ async def route(executable, backend, model, env, *, local_tools_only=True, allow
     if (reviewed_catalog is not None and identifiers is None
             or catalog_binding is not None and reviewed_catalog is None):
         raise IntegrationError('Reviewed Codex metadata requires a frozen model scope.')
-    with tempfile.TemporaryDirectory(prefix='ov-codex-', dir='/tmp') as directory:
+    with tempfile.TemporaryDirectory(prefix='ov-codex-', dir=runtime_parent('/tmp')) as directory:
         os.chmod(directory, 0o700)
         socket = str(Path(directory) / 'native.sock')
         process = None

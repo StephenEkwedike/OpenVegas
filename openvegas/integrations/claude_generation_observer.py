@@ -19,6 +19,7 @@ from pathlib import Path
 from .claude_generation_switch import ComposerDraft, Observation, PendingPrompt
 from .claude_payer_boundary import RuntimeSnapshot
 from .credentials import IntegrationError
+from .runtime_directory import runtime_parent
 
 MAX_FRAME = 4 * 1024 * 1024
 
@@ -46,7 +47,7 @@ class ClaudeGenerationObserver:
             '__OPENVEGAS_MISSING__', json.dumps(MISSING))
         billing = [node, '-e', source, 'claude', '--billing-hook']
         if directory is None:
-            self.root = Path(tempfile.mkdtemp(prefix='ov-claude-generation-'))
+            self.root = Path(tempfile.mkdtemp(prefix='ov-claude-generation-', dir=runtime_parent()))
         else:
             self.root = Path(directory).absolute()
             self.root.mkdir(mode=0o700, parents=False, exist_ok=False)

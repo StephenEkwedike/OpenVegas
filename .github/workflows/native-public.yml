@@ -1,14 +1,176 @@
-name: Exact 0.3.19 native setup plans (QA only, no build)
+name: Native 0.3.19 candidates (never publish)
+
 on:
+  workflow_dispatch:
   push:
     branches: ['codex/native-release-0319']
-    paths: ['.github/workflows/native-public.yml']
+
 permissions:
   contents: read
-  actions: read
 
 jobs:
-  exact-plan:
+  frozen:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: linux-x64
+          - runner: ubuntu-22.04-arm
+            target: linux-arm64
+          - runner: macos-15
+            target: darwin-arm64
+          - runner: macos-15-intel
+            target: darwin-x64
+          - runner: windows-2022
+            target: win32-x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Verify preinstalled Node runtime without a package manager
+        run: node -e "if(Number(process.versions.node.split('.')[0])<20)process.exit(1)"
+      - name: Linux audio runtime
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          source /etc/os-release
+          [[ "$ID:$VERSION_CODENAME" == ubuntu:jammy ]]
+          arch=$(dpkg --print-architecture)
+          case "$arch" in
+              amd64) main=https://archive.ubuntu.com/ubuntu; security=https://security.ubuntu.com/ubuntu ;;
+              arm64) main=https://ports.ubuntu.com/ubuntu-ports; security=$main ;;
+              *) exit 2 ;;
+          esac
+          work=$(mktemp -d "${RUNNER_TEMP:-/tmp}/ov-audio.XXXXXXXX")
+          out="$work/bundle"
+          mkdir -p "$out/source" "$out/notices" "$work/build"
+          list="$work/ubuntu-src.list"
+          printf 'deb-src [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] %s %s main universe\n' "$main" jammy "$main" jammy-updates "$security" jammy-security > "$list"
+          sudo install -m 0644 "$list" /etc/apt/sources.list.d/openvegas-audio-src.list
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libportaudio2 libasound2-dev dpkg-dev build-essential pkg-config
+          cd "$out/source"
+          for package in libportaudio2 libasound2; do
+              spec=$(dpkg-query -W -f='${source:Package}=${source:Version}' "$package:$arch")
+              case "$spec" in portaudio19=19.6.0-*|alsa-lib=1.2.6.1-*) ;; *) echo "Unreviewed Jammy source: $spec" >&2; exit 1;; esac
+              apt-get source --download-only --only-source "$spec"
+          done
+          shopt -s nullglob
+          pa=(portaudio19_*.dsc); alsa=(alsa-lib_*.dsc)
+          [[ ${#pa[@]} == 1 && ${#alsa[@]} == 1 ]]
+          # dpkg-source verifies component digests against the .dsc; apt verified the
+          # .dsc and tarballs against Ubuntu's signed source index.
+          dpkg-source -x "${pa[0]}" "$work/build/portaudio"
+          dpkg-source -x "${alsa[0]}" "$work/build/alsa-source"
+          cd "$work/build/portaudio"
+          ./configure --prefix=/usr --libdir=/usr/lib --enable-shared --disable-static --with-alsa --without-jack --without-oss
+          make -j2
+          make DESTDIR="$work/install" install
+          cp -L "$work/install/usr/lib/libportaudio.so.2" "$out/libportaudio.so.2"
+          if nm -D --defined-only "$out/libportaudio.so.2" | grep " PaJack_" > /dev/null; then exit 1; fi
+          nm -D --defined-only "$out/libportaudio.so.2" | grep " PaAlsa_" > /dev/null
+
+          multi=$(dpkg-architecture -qDEB_HOST_MULTIARCH)
+          cp -L "/usr/lib/$multi/libasound.so.2" "$out/libasound.so.2"
+          # Ship the exact distribution sources (including its packaging), versions,
+          # applied build commands, and full notices inside the ELF.
+          dpkg-query -W -f='${binary:Package}\t${Version}\t${source:Package}\t${source:Version}\n' \
+            libportaudio2:"$arch" libasound2:"$arch" libasound2-dev:"$arch" libasound2-data > "$out/notices/packages.tsv"
+          for p in libportaudio2 libasound2 libasound2-data; do
+              mkdir -p "$out/notices/$p"; cp -L "/usr/share/doc/$p/copyright" "$out/notices/$p/copyright"
+          done
+          cp -L /usr/share/common-licenses/LGPL-2.1 "$out/notices/LGPL-2.1"
+          cp -L /usr/share/common-licenses/GPL-2 "$out/notices/GPL-2"
+          cp -L /usr/share/common-licenses/LGPL-2 "$out/notices/LGPL-2"
+          cp -L /usr/share/common-licenses/GPL-3 "$out/notices/GPL-3"
+          cp -L /usr/share/common-licenses/LGPL-3 "$out/notices/LGPL-3"
+          while IFS= read -r cfg; do
+              case "$cfg" in /usr/share/alsa/*.conf)
+                  install -Dm0644 "$cfg" "$out/alsa/${cfg#/usr/share/alsa/}" ;;
+              esac
+          done < <(dpkg-query -L libasound2-data)
+          test -s "$out/alsa/alsa.conf"
+          # Preserve the recipe that actually ran, not an unverified URL to source.
+          cp "$0" "$out/notices/build-audio.sh"
+          (cd "$out"; sha256sum libportaudio.so.2 libasound.so.2 source/* > notices/SHA256SUMS)
+          echo "OPENVEGAS_LINUX_AUDIO=$out" >> "$GITHUB_ENV"
+      - name: Export byte-identical pinned public client
+        run: |
+          git -c core.autocrlf=false -c core.eol=lf archive --format=zip --output ../release-source.zip HEAD -- openvegas openvegas-0.3.19.dist-info scripts npm-cli pyproject.toml requirements.lock ci-build-requirements.txt native-release-inputs.json native-router-freeze.json .github/workflows/native-public.yml
+          python -m zipfile -e ../release-source.zip dist/git-source
+          python dist/git-source/scripts/ci_prepare_native_frozen.py dist/git-source dist/frozen
+      - name: Install lock-constrained build dependencies
+        env:
+          OPENSSL_STATIC: '1'
+        run: python -m pip install --no-cache-dir -c dist/frozen/cli/requirements.lock -r dist/git-source/ci-build-requirements.txt
+      - name: Reject dynamically linked macOS cryptography
+        if: runner.os == 'macOS'
+        run: |
+          python -c "import cryptography.hazmat.bindings._rust as r, subprocess; result=subprocess.check_output(['otool','-L',r.__file__],text=True); print(result); assert not any(name in result for name in ('libssl.', 'libcrypto.'))"
+      - name: Build and independently verify frozen binary and Mac profile
+        working-directory: dist/frozen/cli
+        env:
+          FREEZE_PIN: 'cee8e8074f92a34c06a81ad4f19f408abc4c77100dc17dc62f3b969200e25cb5'
+          SOURCE_PIN: 'c3685dc856a19eb8aea14c8dac45e864728411370fa1cf959a591013c63be570'
+          TARGET: ${{ matrix.target }}
+        run: python -B ../../git-source/scripts/ci_runtime_binary.py --output ../../native-candidate
+      - uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-native-candidate-${{ matrix.target }}
+          retention-days: 7
+          path: |
+            dist/native-candidate/candidate.json
+            dist/native-candidate/independent-verified.json
+            dist/native-candidate/bin/openvegas-${{ matrix.target }}*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frozen-source-evidence-${{ matrix.target }}
+          retention-days: 7
+          path: |
+            dist/frozen/freeze.json
+            dist/frozen/public-export-receipt.json
+
+  assembly-check:
+    needs: frozen
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: unsigned-native-candidate-*
+          path: dist/candidates
+      - name: Assemble all five platforms without publication
+        run: >-
+          python scripts/ci_runtime_assemble.py
+          --candidate dist/candidates/unsigned-native-candidate-darwin-arm64
+          --candidate dist/candidates/unsigned-native-candidate-darwin-x64
+          --candidate dist/candidates/unsigned-native-candidate-linux-arm64
+          --candidate dist/candidates/unsigned-native-candidate-linux-x64
+          --candidate dist/candidates/unsigned-native-candidate-win32-x64
+          --output dist/npm-assembly-check
+      - name: Pack exact customer tarballs without package manager
+        run: python -IB scripts/ci_runtime_tarballs.py pack
+      - uses: actions/upload-artifact@v4
+        with:
+          name: customer-tarballs-unpublished
+          retention-days: 7
+          path: dist/customer-tarballs
+
+  customer-install:
+    needs: assembly-check
     name: Installed native plans / ${{ matrix.target }}
     strategy:
       fail-fast: false
@@ -24,43 +186,40 @@ jobs:
     env:
       TARGET: ${{ matrix.target }}
     steps:
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
         with:
-          node-version: '22'
+          persist-credentials: false
+          sparse-checkout: scripts/ci_runtime_tarballs.py
+          sparse-checkout-cone-mode: false
+      - name: Verify preinstalled Node runtime without a package manager
+        run: node -e "if(Number(process.versions.node.split('.')[0])<20)process.exit(1)"
       - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
-      - name: Fetch original immutable customer pack (run 43742060705)
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           name: customer-tarballs-unpublished
-          repository: StephenEkwedike/OpenVegas
-          run-id: 43742060705
-          github-token: ${{ github.token }}
           path: packs
-      - name: Verify and clean-install the exact customer pair without the registry
+      - name: Verify archive checksums and materialize the exact pair in a clean directory
+        run: python -IB scripts/ci_runtime_tarballs.py unpack
+      - name: Exercise the tarball launcher and verify the installed bundle
         shell: bash
         run: |
           set -euo pipefail
           test "$(node -p 'process.platform+"-"+process.arch')" = "$TARGET"
-          cd packs
-          case "$TARGET" in
-            darwin-arm64) pin=b56a87f9477e51e3a33aa03e446c851b3b2e1d142ab858a12ba81c9bff8eba9e ;;
-            darwin-x64)   pin=c5881ec6562e6bd8d07da5211295bf2ddca715ebc9b1fe3f1b084b8eac7713aa ;;
-            linux-arm64)  pin=617e7e7a0d177a0e6b14ea2e14232bd59a720bc90fbe83b32863c7990dc1a630 ;;
-            linux-x64)    pin=98af1c7840d451c4bb41b76831e6d0f97ae84a967ed4f2710605e3a3fdcf03c1 ;;
-            win32-x64)    pin=3566885a68160769c5d168b0118dfe4b8428fcf241e241cd4e26cb816dcdb729 ;;
-            *) exit 1 ;;
-          esac
-          main=openvegas-ai-0.3.19.tgz
-          platform="lordesteph-openvegas-${TARGET}-0.3.19.tgz"
-          node -e 'const fs=require("fs"),c=require("crypto"); for(const [name,h] of [[process.argv[1],"fe297a390e2cbd3c2f1a5b9293acd49184b023f34e4f7a2883d26e4004e8cb28"],[process.argv[2],process.argv[3]]]){if(c.createHash("sha256").update(fs.readFileSync(name)).digest("hex")!==h)throw Error("tarball digest"); console.log(name,h)}' "$main" "$platform" "$pin"
-          npm install --offline --ignore-scripts --no-fund --no-audit --no-package-lock --cache ../empty-cache --prefix ../installed "./$main" "./$platform"
-      - name: Install exact platform executables (never run package scripts)
+          node installed/node_modules/openvegas-ai/bin/openvegas.js --version | grep '0\.3\.19'
+          node installed/node_modules/openvegas-ai/bin/openvegas.js --verify-bundle >/dev/null
+      - name: Linux system libraries survive a managed shell launch
+        if: runner.os == 'Linux'
         shell: bash
+        working-directory: installed
         run: |
-          set -euo pipefail
-          npm install --prefix hosts --registry=https://registry.npmjs.org --ignore-scripts --no-audit --no-fund --no-package-lock --save-exact "@openai/codex@0.166.0-${TARGET}" "@anthropic-ai/claude-code-${TARGET}@2.1.322"
+          set -eu
+          export OV_EXPECT_LIBRARY="$RUNNER_TEMP/openvegas-linker-probe"
+          LD_LIBRARY_PATH="$OV_EXPECT_LIBRARY" node node_modules/openvegas-ai/bin/openvegas.js --_terminal-relay -- /bin/sh -c 'test "$LD_LIBRARY_PATH" = "$OV_EXPECT_LIBRARY" && node --version'
+          env -u LD_LIBRARY_PATH -u LD_LIBRARY_PATH_ORIG node node_modules/openvegas-ai/bin/openvegas.js --_terminal-relay -- /bin/sh -c 'test -z "${LD_LIBRARY_PATH-}" && node --version'
+      - name: Fetch pinned standalone publisher executables without registry access
+        run: python -IB scripts/ci_runtime_tarballs.py hosts
       - name: Verify both executable versions and both installed native plans
         shell: python
         run: |
@@ -71,26 +230,23 @@ jobs:
                     'darwin-arm64':'aarch64-apple-darwin','darwin-x64':'x86_64-apple-darwin','win32-x64':'x86_64-pc-windows-msvc'}[target]
           node = P(shutil.which('node')).resolve(strict=True)
           suffix = '.exe' if os.name == 'nt' else ''
+          assert target == subprocess.check_output([str(node),'-p','process.platform+"-"+process.arch'],text=True).strip()
           root = P.cwd()
           m = root/'installed/node_modules'
           customer = m/'openvegas-ai'
           js = customer/'bin/openvegas.js'
-          hosts = root/'hosts/node_modules'
-          codex = hosts/'@openai/codex'
-          claude = hosts/('@anthropic-ai/claude-code-'+target)
           def sha(p):
               with p.open('rb') as f: return hashlib.file_digest(f,'sha256').hexdigest()
-          for p,n,v in [(codex,'@openai/codex','0.166.0-'+target),(claude,'@anthropic-ai/claude-code-'+target,'2.1.322')]:
-              meta = json.loads((p/'package.json').read_bytes())
-              assert (meta['name'],meta['version']) == (n,v)
-          exes = {'codex':codex/'vendor'/triple/'bin'/('codex'+suffix), 'claude':claude/('claude'+suffix)}
+          exes = {host:root/'hosts'/(host+suffix) for host in ('codex','claude')}
+          host_pins = {'linux-x64': {'codex': 'b8a11fedf24b2dfb59a70c9e52b030f9a508dcd49cd2dd0d41956f4c785156b8', 'claude': 'bfb3703ad5380242328459bc62ada4bde8ae7ba57c6e1eeadb9c00e08874c478'}, 'linux-arm64': {'codex': 'f2e6c980c937e734644bed1b4a9a018d3e63a0ccbe71aafc85c86a8c6e4b462a', 'claude': 'f220ca50ea4f3222043ff83cc224a1262e0196e9897acc0871efa94235b0c1fd'}, 'win32-x64': {'codex': '9d563ee4e0441ff9d59d612013e0460ddf8e5709735c2d9f6b98b7ef8ca4eb42', 'claude': '345996b4bdbae21d817f750fae2f34cbf8d81224a5444c78136091d121beb298'}, 'darwin-x64': {'codex': '1361e18268866b7f9f5e8703fabcea0a2a990a439eedcce03940abb4ba9eaaeb', 'claude': 'b513d15117cbf1bb05095dab41963fd394ff40de1fa99dcc6d7d1033bf292e9b'}, 'darwin-arm64': {'codex': '39acf979729dd290f9a24ee38b2914e036c91b65952872e28ae2a6b88a7db7c1', 'claude': 'a9d237949db816a0b7afd88a9a8e1df36b3a597a30f5a41d1c0539eb180a3450'}}[target]
+          assert {k:sha(p) for k,p in exes.items()}==host_pins
           index = json.loads((customer/'release.json').read_bytes())
-          assert index['source_sha256']=='f85cb9440c8d20ac65df5c2ff4275c80df9df4676672dd76dca6cbab8779bf79' and index['version']=='0.3.19'
+          assert index['source_sha256']=='c3685dc856a19eb8aea14c8dac45e864728411370fa1cf959a591013c63be570' and index['version']=='0.3.19'
           p = index['platforms'][target]
           assert p['package']=='@lordesteph/openvegas-'+target and p['binary']=='openvegas-'+target+suffix
           assert sha(m/p['package']/'bin'/p['binary'])==p['sha256']
           assert sha(js)=='1a8a0bf494acc4ab68c9828bb0f100ba3267ca7bd0386056591b87d33d933555'
-          print('Verified original installed binary:',target,p['sha256'],flush=True)
+          print('Verified same-run installed binary:',target,p['sha256'],flush=True)
           with tempfile.TemporaryDirectory() as scratch:
               home=P(scratch).resolve(); work=home/'work'; work.mkdir()
               env={k:os.environ[k] for k in ('PATH','SYSTEMROOT','WINDIR','PATHEXT','COMSPEC','SYSTEMDRIVE','PROGRAMDATA','ProgramFiles','ProgramFiles(x86)','ProgramW6432','ALLUSERSPROFILE','CommonProgramFiles','CommonProgramFiles(x86)') if k in os.environ}
@@ -114,6 +270,7 @@ jobs:
               for host,version in [('codex','0.166.0'),('claude','2.1.322')]:
                   exe=exes[host].resolve(strict=True)
                   assert P(shutil.which(host,path=env['PATH'])).samefile(exe)
+                  assert sha(exe)==host_pins[host], 'native executable digest mismatch'
                   out=run(host+' version',[str(exe),'--version'])
                   assert re.search(r'(?<![\d.])'+re.escape(version)+r'(?![\d.])',out)
                   print(host,version,'verified native executable',sha(exe),flush=True)
@@ -121,3 +278,15 @@ jobs:
               for row in ('codex 0.166.0: mcp_text_only','claude 2.1.322: mod_and_mcp'):
                   assert rows.count(row)==1, 'Missing expected native plan: '+row
                   print('Verified installed plan:',row,flush=True)
+          receipt = dict(target=target, sha=os.environ['GITHUB_SHA'], run_id=os.environ['GITHUB_RUN_ID'],
+                         attempt=os.environ['GITHUB_RUN_ATTEMPT'], source_sha256=index['source_sha256'],
+                         tarballs={n:sha(root/'packs'/n) for n in ['openvegas-ai-0.3.19.tgz','lordesteph-openvegas-'+target+'-0.3.19.tgz']},
+                         binary_sha256=p['sha256'], launcher_sha256=sha(js), hosts=host_pins,
+                         npm_install_verified=False, clean_tarball_layout=True, plans={'codex':'mcp_text_only','claude':'mod_and_mcp'}, foreground=False, model_turns=0)
+          (root/'installed-qa.json').write_text(json.dumps(receipt,sort_keys=True)+'\n')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installed-qa-${{ matrix.target }}
+          path: installed-qa.json
+          if-no-files-found: error
+          retention-days: 7

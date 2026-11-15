@@ -30,6 +30,7 @@ from .billing_choices import model_choices, wallet_ceiling
 from .broker import Broker
 from .credentials import IntegrationError
 from .host_adapter import HostLaunchSpec
+from .runtime_directory import runtime_parent
 from .native_child_environment import external_child_environment
 from .use import SOCKET, TOKEN
 
@@ -1121,7 +1122,7 @@ class Supervisor:
                 self.session_lease = None
 
     async def _run_session(self):
-        with tempfile.TemporaryDirectory(prefix='ov-use-', dir='/tmp') as directory:
+        with tempfile.TemporaryDirectory(prefix='ov-use-', dir=runtime_parent('/tmp')) as directory:
             os.chmod(directory, 0o700)
             path = str(Path(directory) / 'switch.sock')
             server = await asyncio.start_unix_server(self.handle, path, limit=8192)
