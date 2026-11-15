@@ -1,6 +1,7 @@
 """Native-only Claude controls. Only green submits a synthetic loopback turn."""
 import asyncio
 import hashlib
+import json
 import os
 import re
 import socket
@@ -11,7 +12,7 @@ from pathlib import Path
 from contextlib import ExitStack
 from secrets import token_hex
 
-CASES = ("base", "bash", "folders", "both", "system", "green")
+CASES = ("profile", "green-empty", "green")
 PIN = "345996b4bdbae21d817f750fae2f34cbf8d81224a5444c78136091d121beb298"
 
 
@@ -49,7 +50,7 @@ def run(case, fixture=None, port=None):
         ephemeral = held.enter_context(socket.socket())
         ephemeral.bind(("127.0.0.1",0))  # Bound but deliberately not listening.
         dirs = ["", "work", "claude", "codex", "roaming", "local", "tmp"]
-        folders = case in ("folders","both","system","green")
+        folders = case != "profile"
         if folders:
             dirs += ["AppData","AppData/Local","AppData/Roaming"]
         for rel in dirs:
@@ -64,32 +65,39 @@ def run(case, fixture=None, port=None):
                    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1",CLAUDE_CODE_DISABLE_TERMINAL_TITLE="1",
                    ANTHROPIC_API_KEY="invalid-local-lab-"+token_hex(12),
                    ANTHROPIC_BASE_URL="http://127.0.0.1:"+str(ephemeral.getsockname()[1]))
-        if case in ("bash","both","system"):
-            env["CLAUDE_CODE_GIT_BASH_PATH"] = str(bash)
-        if case == "system":
-            env.update({k:os.environ[k] for k in ("SYSTEMDRIVE","PROGRAMFILES","PROGRAMDATA","PROGRAMFILES(X86)",
-                                                   "PROGRAMW6432","ALLUSERSPROFILE") if k in os.environ})
-        if case == "green":
+        if case == "profile":
+            (root/"claude/.claude.json").write_text(json.dumps({"hasCompletedOnboarding":True,"theme":"dark",
+                "customApiKeyResponses":{"approved":[env["ANTHROPIC_API_KEY"][-20:]]},
+                "projects":{(root/"work").as_posix():{"hasTrustDialogAccepted":True}}}), encoding="ascii")
+        if case in ("green","green-empty"):
             from scripts.windows_managed_startup import environment
-            need(fixture is not None and type(port) is int and 0 < port < 65536)
-            # Historical native bootstrap only, in this lab's own empty root.
-            # Not the PE's protected home. No broker/supplier substitution in the PE.
-            env = environment("claude",root,image,bash,os.environ,managed=True)
-            env["ANTHROPIC_BASE_URL"] = "http://127.0.0.1:"+str(port)+"/_host"
+            url=env["ANTHROPIC_BASE_URL"]
+            env = environment("claude",root,image,bash,os.environ,managed=case=="green")
+            if case=="green":
+                need(fixture is not None and type(port) is int and 0 < port < 65536)
+                url="http://127.0.0.1:"+str(port)+"/_host"
+            else:
+                env.update(ANTHROPIC_API_KEY="ov-qa-invalid-"+token_hex(24),ANTHROPIC_MODEL="claude-sonnet-4-6",
+                           CLAUDE_CODE_GIT_BASH_PATH=str(bash))
+                env["PATH"]+=os.pathsep+str(bash.parent.parent/"cmd")
+            env["ANTHROPIC_BASE_URL"]=url
         with pty.isolated_console(Path(__file__).resolve(), ["child",str(image)], env, str(root/"work")) as term:
             try:
-                term.expect(r"\? for shortcuts|Type your message|shortcuts for help", "native composer cue",
-                            timeout=75 if case=="green" else 15, diagnose="claude-start")
+                term.expect(r"Claude\s+Code|Sonnet\s+4\.6|\? for shortcuts|Type your message|shortcuts for help",
+                            "historical native title or composer",timeout=90, diagnose="claude-start")
             except pty.CheckpointMiss as exc:
                 return exc.reason.value
             if case == "green":
                 from scripts.windows_codex_editor import enter
                 fixture.arm(0)
-                enter(term,fixture.prompts[0],lambda _: None,"green",host="claude")
-                term.expect(re.escape(fixture.answers[0]),"rendered loopback answer",timeout=25,diagnose="claude-start")
+                try:
+                    enter(term,fixture.prompts[0],lambda _: None,"green",host="claude")
+                    term.expect(re.escape(fixture.answers[0]),"rendered loopback answer",timeout=25,diagnose="claude-start")
+                except pty.CheckpointMiss as exc:
+                    return "after-title-"+exc.reason.value
                 need(fixture.rows == ["host"] and not fixture.bad)
                 return "native-loopback-answer"
-            return "composer-cue"
+            return "native-title-or-composer"
 
 if __name__ == "__main__":
     if len(sys.argv)==3 and sys.argv[1]=="child":

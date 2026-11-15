@@ -15,7 +15,8 @@ def ready(frame, host):
         return True
     # The green public driver uses the native title then settles, not a mandatory
     # footer. Only accept a native chat glyph (never an ASCII menu selection).
-    return host == "codex" and bool(re.search(r"OpenAI\s+Codex", frame, re.I) and
+    title = r"OpenAI\s+Codex" if host == "codex" else r"Claude\s+Code|Sonnet\s+4\.6"
+    return bool(re.search(title, frame, re.I) and
                                     re.search(r"(?m)^\s*[\u203a\u276f](?!\s*\d+[.)])(?:\s|$)", frame))
 
 
@@ -30,8 +31,19 @@ def enter(term, text, checkpoint, purpose, *, host="codex"):
 
     checkpoint(purpose + "-composer")
     end, since = time.monotonic() + 18, None
+    chosen = False
+
     while time.monotonic() < end:
         term.read()
+        if host == "codex" and purpose == "turn-0" and not chosen:
+            from scripts.windows_sandbox_choice import choice, select
+            if choice(term.frame()) is not None:
+                select(term, checkpoint)
+                chosen = True
+                checkpoint(purpose + "-restricted-composer")
+                end, since = time.monotonic() + 30, None
+                continue
+
         frame = guard()
         if ready(frame, host):
             if since is None:

@@ -116,11 +116,11 @@ jobs:
               throw 'Effective executable-specific outbound block missing'
             }
           }
-      - name: Classify Codex post-onboarding and run exact switch rehearsal
+      - name: Exact Codex switches with optional native non-admin sandbox only
         env:
           OV_WINDOWS_CONPTY_ISOLATED: '1'
         run: python -B -m scripts.windows_managed_startup rehearsal
-      - name: Compare Claude publisher startup settings and one native-only loopback answer
+      - name: Isolate Claude profile startup using native composer and loopback
         if: ${{ !cancelled() && steps.isolation.outcome == 'success' }}
         env:
           OV_WINDOWS_CONPTY_ISOLATED: '1'
