@@ -36,23 +36,41 @@ async function metadata($) {
     throw Error();
   return {identifier:await $.session.id(), model:await $.session.model(), cwd:await $.session.cwd(), base_url:base};
 }
+async function verifyReady($) {
+  if ((await send($, {event:'ready', value:await metadata($)})).message !== 'ready') throw Error();
+}
 export function register(on) {
   on('session.start', async ($, e, next) => {
     const result = await next(e);
     await $.command.register({name:'ov-billing',description:'Local OpenVegas payer and balance',
       argumentHint:'v|host|status', immediate:true});
-    await send($, {event:'ready', value:await metadata($)});
+    // Register before returning, but don't hold native startup on a local HTTP reply.
+    $.clock.after(0, async () => {
+      try { await verifyReady($); }
+      catch { $.ui.log('OpenVegas billing controls registered; readiness unconfirmed.'); return; }
+      $.ui.log('OpenVegas billing controls ready.');
+    });
     return result;
   });
   on('command.run', {command:'ov-billing'}, async ($, e) => {
     const action = (e.args ?? '').trim().toLowerCase();
-    if (e.origin.kind !== 'composer' || !['v','host','status'].includes(action))
+    if (e.origin.kind !== 'composer') return {};
+    if (!['v','host','status'].includes(action))
       return {text:'Use /ov-billing v, host, or status from the native composer.'};
     try {
+      // Only a person's explicit status check repeats readiness, never a payer mutation.
+      if (action === 'status') await verifyReady($);
       let reply = await send($, {event:'start', action});
       for (let i=0; i<3 && reply.challenge; i++)
         reply = await send($, {event:'observe', challenge:reply.challenge, value:await metadata($)});
-      return {text:reply.message ?? 'Local control unconfirmed. Check status.'};
+      // Only show billing outcomes, never an unexpected response body or error.
+      const msg = reply.message;
+      const known = typeof msg === 'string' && msg.length <= 100 && !/[\r\n]/.test(msg) &&
+        (/^Payer: (host|v)(?:\. No prompt sent\.|; (?:\$V [\d,]+\.\d{2}|balance unavailable)\.)$/.test(msg) ||
+        ['Switch refused; payer unchanged. No prompt sent.', 'Billing control busy; no new switch started.',
+         'Billing outcome unconfirmed; inference held. No automatic retry.',
+         'Billing change pending or unconfirmed; check status.'].includes(msg));
+      return {text:known ? msg : 'Local control unconfirmed. Check status.'};
     } catch { return {text:'Local control unconfirmed. Check status; no automatic retry.'}; }
   });
 }

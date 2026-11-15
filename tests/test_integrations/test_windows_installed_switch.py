@@ -127,7 +127,13 @@ def drive(host, sink, port, checkpoint):
             term.expect(r'OpenAI\s+Codex|Claude\s+Code|shortcuts|for help|Sonnet\s+4\.6', 'native composer',
                         timeout=90 if host == 'claude' else 45,
                         diagnose='claude-start' if host == 'claude' else None)
-            time.sleep(.75)
+            if host == 'claude':
+                # Registration is asynchronous. An early logo does not mean an
+                # immediate slash command can already be submitted.
+                term.expect(r'OpenVegas billing controls (?:ready|registered;\s*readiness unconfirmed)\.',
+                            'registered local billing command', timeout=90, diagnose='claude-start')
+            else:
+                time.sleep(.75)
             for i, mode in enumerate(('host', 'v', 'host')):
                 prefix = 'openvegas ' if host == 'codex' else '/ov-billing '
                 if i:

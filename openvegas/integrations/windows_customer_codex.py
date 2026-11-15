@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import re
 import secrets
 import subprocess
 from contextlib import asynccontextmanager
@@ -344,6 +346,60 @@ def root_bounded(session):
     )
 
 
+def _drive_key(value):
+    if not isinstance(value, str):
+        return None
+    if value.startswith("\\\\?\\"):
+        value = value[4:]
+        if "/" in value:
+            return None
+    else:
+        value = value.replace("/", "\\")
+    if not re.fullmatch(r"[A-Za-z]:\\.*", value):
+        return None
+    for part in value[3:].split("\\") if len(value) > 3 else ():
+        # Only equate ordinary DOS paths with their unambiguous verbatim spelling.
+        # In particular, stripping a prefix from a device or trailing-dot name
+        # can change what it opens. Never resolve links or fold directory case.
+        if (
+            not part
+            or part.endswith((" ", "."))
+            or re.search(r'[\x00-\x1f<>:"|?*]', part)
+            or re.fullmatch(
+                r"CON|PRN|AUX|NUL|CONIN\$|CONOUT\$|(?:COM|LPT)[0-9\u00b9\u00b2\u00b3]",
+                part.partition(".")[0].rstrip(" "),
+                re.ASCII | re.IGNORECASE,
+            )
+        ):
+            return None
+    return value[0].upper() + value[1:]
+
+
+def _root_identity(thread, sid, cwd):
+    # The shared identity verifier compares strings. The protocol types differ:
+    # thread.cwd is AbsolutePathBuf; environment cwd and roots are legacy strings.
+    # Preserve its policy checks; compare all three original paths before adapting
+    # their spelling. No directory lookup or interpretation of other workspaces.
+    if os.name != "nt" and cwd.startswith("/") and not cwd.startswith("//"):
+        return _identity(thread, sid)
+    with checking(Check.WORKSPACE):
+        key = _drive_key(cwd)
+        envs = thread["environments"]
+        require(key is not None and isinstance(envs, list) and len(envs) == 1)
+        env = envs[0]
+        roots = env["runtimeWorkspaceRoots"]
+        require(isinstance(roots, list) and len(roots) == 1)
+        require(all(_drive_key(p) == key for p in (thread["cwd"], env["cwd"], roots[0])))
+    return _identity(
+        {
+            **thread,
+            "cwd": cwd,
+            "environments": [{**env, "cwd": cwd, "runtimeWorkspaceRoots": [cwd]}],
+        },
+        sid,
+    )
+
+
 async def selection(pipe, owner, params):
     sid = params.get("threadId")
     with checking(Check.ROUTE):
@@ -355,7 +411,7 @@ async def selection(pipe, owner, params):
         thread = (await pipe.call("thread/read", {"threadId": sid, "includeTurns": False}))[
             "thread"
         ]
-        native = _identity(thread, sid)
+        native = _root_identity(thread, sid, owner.cwd)
     # The TUI may have picked a new model for this turn without changing
     # thread/read. Use only explicit, agreeing native turn selections.
     with checking(Check.MODEL):

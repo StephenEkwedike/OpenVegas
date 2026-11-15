@@ -545,21 +545,27 @@ def test_plugin_serves_only_a_composer_command_without_using_model(tmp_path):
     script = """
 import assert from 'node:assert/strict';
 import {register} from './plugin.mjs';
-const events = {}, seen = [], value = {identifier:'id', model:'claude-native', cwd:'C:/work',base_url:'http://127.0.0.1:13212'};
+const events = {}, seen = [], scheduled = [], notices = [];
+const value = {identifier:'id', model:'claude-native', cwd:'C:/work',base_url:'http://127.0.0.1:13212'};
 register((name,...rest) => events[name] = rest.at(-1));
-const $ = {command:{register:async spec=>assert.equal(spec.immediate,true)},settings:{read:async()=>({})},
+const $ = {command:{register:async spec=>{assert.equal(spec.name,'ov-billing');assert.equal(spec.immediate,true)}},
+  clock:{after:(ms,fn)=>{assert.equal(ms,0);scheduled.push(fn)}},ui:{log:s=>notices.push(s)},
+  settings:{read:async()=>({})},
   session:{version:async()=>({version:'2.1.322'}),id:async()=>value.identifier,
     model:async()=>value.model,cwd:async()=>value.cwd},env:{get:async()=>value.base_url},
   http:{fetch:async(url,req)=>{
     assert.equal(url,value.base_url+'/ov-local-control'); assert.equal(req.headers['X-OV-Command'],'dummy');
     const msg=JSON.parse(req.body); seen.push(msg);
-    return {ok:true,text:JSON.stringify(msg.event==='start'?{challenge:'fresh'}:{message:'local result'})};
+    const answer = {ready:{message:'ready'},start:{challenge:'fresh'},observe:{message:'Payer: v. No prompt sent.'}};
+    return {ok:true,text:JSON.stringify(answer[msg.event])};
   }}};
 await events['session.start']($,{},async()=>true);
+assert.deepEqual(seen,[]); assert.equal(scheduled.length,1);
+await scheduled.shift()(); assert.deepEqual(notices,['OpenVegas billing controls ready.']);
 for (const kind of ['plugin','bridge','sdk']) await events['command.run']($,{args:'v',origin:{kind}});
 assert.equal(seen.length,1);
 const reply=await events['command.run']($,{args:'v',origin:{kind:'composer'}});
-assert.equal(reply.text,'local result');
+assert.deepEqual(reply,{text:'Payer: v. No prompt sent.'});
 assert.deepEqual(seen,[{event:'ready',value},{event:'start',action:'v'},{event:'observe',challenge:'fresh',value}]);
 """
     driver = tmp_path / "driver.mjs"
