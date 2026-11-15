@@ -1,6 +1,6 @@
 {
   "baseline_build_inputs_sha256": null,
-  "baseline_freeze_sha256": "cd2686f46906db0f8a03d64d0bc3029a4629c3ef8ad796017bfe9326cc23e5b1",
+  "baseline_freeze_sha256": "416b1e5ae2f4cf890ca019f7e825e5116652bc9b9375fde891b273282aa76d95",
   "checkout_native_inputs": {
     "openvegas/integrations/billing_host.py": "4693b1225a63387b0605ef0db84e223bfb9fffa5dcbe889010ee173e2884a172",
     "openvegas/integrations/codex_live_transport.py": "5985e915c2acd5964fa4754aa9978e888e1ad8abdcb824f3d1132812a51e5364",
@@ -33,7 +33,7 @@
     "scripts/frozen_entry.py": "1f39353e7d62f5a12259550cbbd0524adaaa165984d954960a0f3aa37c10a505"
   },
   "format": "openvegas-native-router-candidate-v1",
-  "freezer_sha256": "bc08ee9b1f301238c924dc58d634596b564e69eb6789a9c608099618101cc252",
+  "freezer_sha256": "1c053bf57341ff0a9a0d60154cae719e6d995067f904537b4a7374fb0be5a146",
   "frozen": true,
   "inputs": {
     "cli": {
@@ -364,7 +364,7 @@
       "openvegas/wallet/ledger.py": "4de7fe7b84f5431c311d4f83d6624c37d2178b9d7b4ebe186b60f5737c6ddf11",
       "pyproject.toml": "ad089d60aa825e0a9adf99db79d9f2c03ab10df8fb95f232689dcd819c975080",
       "requirements.lock": "74cf80310c10efff836d8e29e4165abb225d779c3ec86c16ee23a5c2c4996162",
-      "scripts/build_cli_candidate.py": "99ef3030ef4bc6546422280bd731683015c2e3d9579017330ac0f20be2704b43",
+      "scripts/build_cli_candidate.py": "bc5de76962997d3dfc5a90c84dbca8af524695053d67b9d1074a49c3b23915fb",
       "scripts/frozen_entry.py": "1f39353e7d62f5a12259550cbbd0524adaaa165984d954960a0f3aa37c10a505"
     }
   },
@@ -376,7 +376,7 @@
     "native_terminal_balance_display": "not_run",
     "permission_and_tool_continuity": "not_run"
   },
-  "preparation": "Private native Codex daemon socket alias on Linux; no release or billing change.",
+  "preparation": "Bundle ALSA-only Linux audio, notices and corresponding sources on both architectures.",
   "publication_approved": false,
   "published": false,
   "version": "0.3.19"

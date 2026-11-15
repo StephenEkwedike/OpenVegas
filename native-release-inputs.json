@@ -322,14 +322,14 @@
     "openvegas/wallet/ledger.py": "4de7fe7b84f5431c311d4f83d6624c37d2178b9d7b4ebe186b60f5737c6ddf11",
     "pyproject.toml": "ad089d60aa825e0a9adf99db79d9f2c03ab10df8fb95f232689dcd819c975080",
     "requirements.lock": "74cf80310c10efff836d8e29e4165abb225d779c3ec86c16ee23a5c2c4996162",
-    "scripts/build_cli_candidate.py": "99ef3030ef4bc6546422280bd731683015c2e3d9579017330ac0f20be2704b43",
+    "scripts/build_cli_candidate.py": "bc5de76962997d3dfc5a90c84dbca8af524695053d67b9d1074a49c3b23915fb",
     "scripts/frozen_entry.py": "1f39353e7d62f5a12259550cbbd0524adaaa165984d954960a0f3aa37c10a505"
   },
   "native_paid_enabled": false,
   "repository_files": {
-    ".github/workflows/native-public.yml": "8c45b13cb13aaaf6a166c10751f9f2f29bcf23b99cf1b1901a32dc6cf06b0f36",
+    ".github/workflows/native-public.yml": "2a771d179ebb3923093ac3b071e11c2437ebfc520ba5f4b6d692641d2efdc002",
     "ci-build-requirements.txt": "9abfa42c3c675a76a4edb4db8e2c296467ec38da27522c15633456d3478f5a09",
-    "native-router-freeze.json": "416b1e5ae2f4cf890ca019f7e825e5116652bc9b9375fde891b273282aa76d95",
+    "native-router-freeze.json": "40b6b57911abd203ef7d492a30e4d1c9bf95d3325587b1f6c74e85f55e5c9692",
     "npm-cli/bin/release.js": "1a8a0bf494acc4ab68c9828bb0f100ba3267ca7bd0386056591b87d33d933555",
     "openvegas-0.3.19.dist-info/METADATA": "96593e28cc3a988f784ca80821aa217265d8e0547320edd632a117e09cf7c7d1",
     "openvegas-0.3.19.dist-info/RECORD": "1c44cf89c210bea0ee8f49921d65557b71457409e2836814282b21f2a9092fe5",
@@ -659,13 +659,13 @@
     "pyproject.toml": "ad089d60aa825e0a9adf99db79d9f2c03ab10df8fb95f232689dcd819c975080",
     "requirements.lock": "74cf80310c10efff836d8e29e4165abb225d779c3ec86c16ee23a5c2c4996162",
     "scripts/assemble_npm_release.py": "394689db9e93170279a5f3597ea83f940845459e343173869754ced88c137256",
-    "scripts/build_cli_candidate.py": "99ef3030ef4bc6546422280bd731683015c2e3d9579017330ac0f20be2704b43",
-    "scripts/ci_prepare_native_frozen.py": "a9d8e8c15bd43b768a99dd4fb171824f30c5ace0507a259330582496726377dd",
+    "scripts/build_cli_candidate.py": "bc5de76962997d3dfc5a90c84dbca8af524695053d67b9d1074a49c3b23915fb",
+    "scripts/ci_prepare_native_frozen.py": "26052336bea1dcf285e3f164ba09f4b3bdf0a36aba924cde452ab6d2324c4cbe",
     "scripts/frozen_entry.py": "1f39353e7d62f5a12259550cbbd0524adaaa165984d954960a0f3aa37c10a505",
     "scripts/prepare_public_release.py": "787dde403da1ee94c337e89dc39eb6467761b70032adc96fcb2b6ec95a094099",
     "scripts/verify_native_release_source.py": "09c1e3748ff710ed0490c9fa905522bf756be420e66f42e8e70ffa895df2b74a",
     "scripts/verify_native_router_candidate.py": "b94aaa0eaa457a33b07e8e89e87d92613dcfcea123e78208add7fc2cd05cec18"
   },
-  "source_sha256": "211f1621ec2c5910bd166f0c9a1699c216c659391f4ba97fd7cea5e3a8201c90",
+  "source_sha256": "7d888317c941de44d483daf5ef60c46924489a0f78d4d161810b6d02f09cac59",
   "version": "0.3.19"
 }
