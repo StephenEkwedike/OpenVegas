@@ -1,7 +1,7 @@
-name: Windows managed startup without inference
+name: Windows stock managed critical QA (offline)
 on:
   push:
-    branches: ['codex/qa-win-foreground-8005302f']
+    branches: ['codex/qa-win-stock-critical']
 permissions:
   contents: read
   actions: read
@@ -9,9 +9,12 @@ jobs:
   windows-offline:
     if: github.repository == 'StephenEkwedike/OpenVegas' && !github.event.repository.private
     runs-on: windows-2022
-    timeout-minutes: 20
+    timeout-minutes: 40
     env:
       CI: 'true'
+      OPENVEGAS_LOAD_PROJECT_ENV: '0'
+      PYTHON_DOTENV_DISABLED: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
       DISABLE_TELEMETRY: '1'
       DISABLE_AUTOUPDATER: '1'
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
@@ -26,6 +29,9 @@ jobs:
         with:
           python-version: '3.11'
           architecture: x64
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.15.0'
       - name: Read reviewed assembly identity
         id: pin
         shell: python
@@ -33,6 +39,7 @@ jobs:
           import json, os
           from pathlib import Path
           p = json.loads(Path('qa-image-pins.json').read_bytes())
+          assert p.get('unbound') is False
           assert all(type(p[k]) is int and p[k] > 0 for k in ('run_id','artifact_id'))
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as f:
               print('run='+str(p['run_id']), 'artifact='+str(p['artifact_id']), sep='\n', file=f)
@@ -45,25 +52,14 @@ jobs:
           path: packs
       - name: Verify and unpack reviewed customer files without installation
         run: python -IB scripts/windows_managed_startup.py unpack
-      - name: Get standalone native publisher images and pin all three executables
+      - name: Bind exact original customer entry
         run: |
-          $dir = (New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'native-hosts')).FullName
-          $cx = Join-Path $dir 'codex.exe'
-          $cc = Join-Path $dir 'claude.exe'
-          curl.exe -qfsSL --retry 2 --max-time 180 -o "$cx" https://github.com/openai/codex/releases/download/rust-v0.166.0/codex-x86_64-pc-windows-msvc.exe
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          curl.exe -qfsSL --retry 2 --max-time 180 -o "$cc" https://downloads.claude.ai/claude-code-releases/2.1.322/win32-x64/claude.exe
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           $pin = Get-Content -Raw -LiteralPath qa-image-pins.json | ConvertFrom-Json
           $pe = (Get-Item -LiteralPath 'installed/node_modules/@lordesteph/openvegas-win32-x64/bin/openvegas-win32-x64.exe').FullName
           $js = (Get-Item -LiteralPath 'installed/node_modules/openvegas-ai/bin/openvegas.js').FullName
-          if ((Get-FileHash $cx).Hash -ine '9d563ee4e0441ff9d59d612013e0460ddf8e5709735c2d9f6b98b7ef8ca4eb42' -or
-              (Get-FileHash $cc).Hash -ine '345996b4bdbae21d817f750fae2f34cbf8d81224a5444c78136091d121beb298' -or
-              (Get-FileHash $pe).Hash -ine $pin.pe -or (Get-FileHash $js).Hash -ine $pin.launcher) {
-              throw 'Unexpected Windows test image'
+          if ((Get-FileHash $pe).Hash -ine $pin.pe -or (Get-FileHash $js).Hash -ine $pin.launcher) {
+            throw 'Unexpected installed consumer bytes'
           }
-          "OV_WINDOWS_CODEX_EXE=$cx" >> $env:GITHUB_ENV
-          "OV_WINDOWS_CLAUDE_EXE=$cc" >> $env:GITHUB_ENV
           "OV_QA_NODE=$((Get-Command node.exe).Source)" >> $env:GITHUB_ENV
           "OV_QA_PE=$pe" >> $env:GITHUB_ENV
           "OV_QA_APP=$js" >> $env:GITHUB_ENV
@@ -78,6 +74,8 @@ jobs:
           "OV_QA_CODEX_BUNDLE_EXE=$((Get-Item -LiteralPath (Join-Path $dir 'bin/codex.exe')).FullName)" >> $env:GITHUB_ENV
       - name: Install test-side terminal and private-directory dependencies
         run: |
+          python -m pip --isolated install --only-binary=:all: -c requirements.lock -r qa-stock-requirements.txt
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
           $pin = Join-Path $env:RUNNER_TEMP 'conpty-wheels.txt'
           'pywinpty==2.0.15 --hash=sha256:9a6bcec2df2707aaa9d08b86071970ee32c5026e10bcc3cc5f6f391d85baf7ca' | Set-Content -LiteralPath $pin -Encoding ascii
           'pyte==0.8.2 --hash=sha256:85db42a35798a5aafa96ac4d8da78b090b2c933248819157fc0e6f78876a0135' | Add-Content -LiteralPath $pin -Encoding ascii
@@ -88,18 +86,16 @@ jobs:
           "OV_WINDOWS_BASH_EXE=$(Join-Path $env:ProgramFiles 'Git/bin/bash.exe')" >> $env:GITHUB_ENV
       - name: Block outbound traffic from native hosts, helpers and Python
         id: isolation
+        env:
+          OV_WINDOWS_CONPTY_ISOLATED: '1'
         run: |
           Set-NetFirewallProfile -Profile Domain,Private,Public -Enabled True -ErrorAction Stop
           $profiles = @(Get-NetFirewallProfile)
           if (!$profiles.Count -or ($profiles | Where-Object { $_.Enabled -ne 'True' })) {
             throw 'Windows Firewall must be enabled for every profile'
           }
-          $hosts = @($env:OV_WINDOWS_CODEX_EXE, $env:OV_WINDOWS_CLAUDE_EXE)
-          $helpers = @(Get-ChildItem -LiteralPath (Join-Path $env:RUNNER_TEMP 'native-hosts') -Filter '*.exe' -File -Recurse -ErrorAction Stop | ForEach-Object FullName)
-          $git = Join-Path $env:ProgramFiles 'Git'
-          $tools = @((Get-Command python.exe).Source, (Get-Command node.exe).Source, $env:OV_WINDOWS_BASH_EXE,
-            (Join-Path $git 'usr/bin/bash.exe'), (Join-Path $git 'usr/bin/sh.exe'), (Join-Path $git 'cmd/git.exe'))
-          $programs = @(($hosts + $helpers + $tools + @($env:OV_QA_PE)) | Sort-Object -Unique)
+          $programs = @(python -B -c "from scripts.qa_stock_managed_run import firewall_programs; import json; print(json.dumps(firewall_programs()))" | ConvertFrom-Json)
+          if ($LASTEXITCODE -or !$programs.Count) { throw 'Missing exact executable inventory' }
           $n = 0
           foreach ($exe in $programs) {
             if (!$exe -or ![IO.Path]::IsPathFullyQualified($exe) -or !(Test-Path -LiteralPath $exe -PathType Leaf)) {
@@ -116,7 +112,14 @@ jobs:
               throw 'Effective executable-specific outbound block missing'
             }
           }
-      - name: Verify both native foreground sessions on the exact combined installer
+          python -B -c "from scripts.qa_stock_managed_run import firewall_programs,isolation; isolation(firewall_programs())"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Stock installed managed unnamed round trip
         env:
           OV_WINDOWS_CONPTY_ISOLATED: '1'
-        run: python -B -m scripts.windows_managed_startup rehearsal
+        run: python -B -m scripts.qa_stock_managed_run roundtrip
+      - name: Stock installed managed interrupted wallet retry
+        if: ${{ !cancelled() && steps.isolation.outcome == 'success' }}
+        env:
+          OV_WINDOWS_CONPTY_ISOLATED: '1'
+        run: python -B -m scripts.qa_stock_managed_run retry

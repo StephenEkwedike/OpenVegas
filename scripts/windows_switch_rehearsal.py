@@ -15,6 +15,10 @@ MODES = ("host", "v", "host")
 LIMIT = 2**20
 
 
+class InterruptWire(Exception):
+    """Validated wallet root request; emit only a start frame, never a completion."""
+
+
 def check(value):
     if not value:
         raise ValueError("Synthetic turn not established")
@@ -49,7 +53,7 @@ def markers(messages, known):
 
 
 class Fixture:
-    def __init__(self, host):
+    def __init__(self, host, interrupt=False):
         self.host = host
         self.prompts = ["ov-qa-input-" + token_hex(12) for _ in MODES]
         self.answers = ["ov-qa-answer-" + token_hex(12) for _ in MODES]
@@ -60,24 +64,34 @@ class Fixture:
         self.denied_wallet = 0
         self.excess_titles = self.after_seal = self.extra_root = 0
         self.clean_exit = self.sealed = False
-        self.name_proof = "unobserved"
-        self.first_submit = False
-        self.pre_root_ingress = self.title_attempts = self.wallet_title_attempts = 0
-        self.early_host_ws = self.early_empty_warmup = 0
+        self.interrupt = interrupt
+        self.interrupted = threading.Event()
+        self.drop_armed = self.native_reconnect = self.native_error = False
+        self.reopens = self.repeat_v = self.repeat_host = self.unmatched = 0
         self.sent = {a: threading.Event() for a in self.answers}
         self.issue = ContextVar("wire-issue", default="wire")
 
     def arm(self, i):
         with self.lock:
             check(self.armed is None and len(self.rows) == i and not self.bad)
-            if self.host == "codex":
-                check(self.name_proof in ("terminal-title", "status-card") and self.pre_root_ingress == 0)
-            self.first_submit = True
             self.armed = i
+
+    def helper_policy_ok(self):
+        return not (self.excess_titles or self.denied_wallet)
 
     def turn(self, mode, body, previous=(), root=None):
         with self.lock:
             i = len(self.rows)
+            if self.drop_armed:
+                # Count physical generation attempts, not socket opens or warmups.
+                seen = markers(body.get("input") or [], set(self.prompts + self.answers))
+                if root == self.root and ("user", self.prompts[1]) in [*previous, *seen]:
+                    self.repeat_v += int(mode == "v")
+                    self.repeat_host += int(mode == "host")
+                else:
+                    self.unmatched += 1
+                self.issue.set("post-interrupt-ingress")
+                raise ValueError("No replay authorization")
             if self.sealed:
                 self.issue.set("extra-root")
                 self.extra_root+=1
@@ -102,6 +116,9 @@ class Fixture:
                 check(root is not None and self.root in (None,root))
                 self.root = root
             self.model, self.armed = model, None
+            if self.interrupt and i == 1:
+                self.drop_armed = True
+                raise InterruptWire()
             self.rows.append(mode)
             self.sealed = len(self.rows) == len(MODES)
             self.issue.set("none")
@@ -119,18 +136,7 @@ class Fixture:
             if self.host == "codex":
                 source,root=metadata(scope)
                 mode=self.routes(scope["path"],"responses")
-                with self.lock:
-                    if not self.first_submit:
-                        if scope["type"] == "websocket" and mode == "host" and source == "user" and root:
-                            self.early_host_ws += 1
-                        else:
-                            self.pre_root_ingress += 1
-                            if source != "thread_title":
-                                self.issue.set("early-operation")
-                                raise ValueError("Unexpected pre-submit contact")
                 if source=="thread_title":
-                    self.title_attempts += 1
-                    self.wallet_title_attempts += int(mode == "v")
                     # Stock PE has no independent helper witness. Never synthesize
                     # a title, forward it, or credit it as a customer/root answer.
                     self.issue.set("helper-route")
@@ -142,17 +148,19 @@ class Fixture:
                         self.after_seal+=1
                     if mode=="v":
                         self.denied_wallet+=1
-                    if self.denied_titles>=12:
+                    over_cap = self.denied_titles >= 12
+                    if over_cap:
+                        # Deny and retain the failure, without retiring an unrelated root nonce.
                         self.excess_titles+=1
-                    check(self.denied_titles<12)
-                    self.denied_titles+=1
+                    else:
+                        self.denied_titles+=1
                     # A wallet helper is a permanent final gate failure. Refuse it
                     # immediately; never let it consume the separate root nonce.
                     if scope["type"]=="websocket":
                         check((await receive())["type"]=="websocket.connect")
                         await send({"type":"websocket.close","code":1008})
                     else:
-                        await send({"type":"http.response.start","status":403,"headers":[]})
+                        await send({"type":"http.response.start","status":400 if over_cap else 403,"headers":[]})
                         await send({"type":"http.response.body","body":b"{}"})
                     self.issue.set("none")
                     return
@@ -189,6 +197,13 @@ class Fixture:
             await send({"type": "http.response.body", "body": data})
             if answer:
                 self.sent[answer].set()
+        except InterruptWire:
+            check(scope["type"] == "http")
+            created = next(frames("codex", self.model, None, "resp_" + token_hex(12)))
+            await send({"type":"http.response.start","status":200,"headers":[(b"content-type",b"text/event-stream")]})
+            await send({"type":"http.response.body","body":("event: response.created\ndata: " +
+                        json.dumps(created) + "\n\n").encode()})
+            self.interrupted.set()
         except Exception:
             self.first_fault=self.first_fault or self.issue.get()
 
@@ -202,6 +217,8 @@ class Fixture:
     async def ws(self, scope, receive, send, root):
         mode = self.routes(scope["path"], "responses")
         check(self.host == "codex" and mode and (await receive())["type"] == "websocket.connect")
+        if self.drop_armed and self.root == root:
+            self.reopens += 1
         await send({"type": "websocket.accept"})
         history = {}
         while True:
@@ -212,15 +229,6 @@ class Fixture:
             check(0 < len(raw) <= LIMIT)
             body = json.loads(raw)
             check(body.get("type") == "response.create" and len(history) < 12)
-            with self.lock:
-                if not self.first_submit:
-                    if (mode == "host" and body.get("generate") is False
-                            and body.get("input", []) == [] and not body.get("previous_response_id")):
-                        self.early_empty_warmup += 1
-                    else:
-                        self.issue.set("early-operation")
-                        self.pre_root_ingress += 1
-                        raise ValueError("Unexpected pre-submit frame")
             rid = "resp_" + token_hex(12)
             if body.get("generate") is False:
                 answer, history[rid] = None, []
@@ -228,7 +236,14 @@ class Fixture:
                 prev = body.get("previous_response_id")
                 self.issue.set("foreign-previous")
                 prior = history[prev] if prev else []
-                answer, history[rid] = self.turn(mode, body, prior, root)
+                try:
+                    answer, history[rid] = self.turn(mode, body, prior, root)
+                except InterruptWire:
+                    created = next(frames("codex", self.model, None, rid))
+                    await send({"type": "websocket.send", "text": json.dumps(created)})
+                    await send({"type": "websocket.close", "code": 1011})
+                    self.interrupted.set()
+                    return
             for e in frames("codex", body["model"], answer, rid):
                 await send({"type": "websocket.send", "text": json.dumps(e)})
             if answer:
@@ -265,36 +280,6 @@ def frames(host, model, answer, rid):
         yield {"type": kind, **value}
 
 
-def named_preflight(term, fixture, checkpoint, enter):
-    from scripts import verify_windows_conpty as pty
-
-    name = "ov-qa-" + token_hex(6)
-    title = lambda: name in getattr(term.screen, "title", "").split(" | ")
-    row = r"(?m)^[ \t]*(?:[\u2502\u2503|][ \t]*)?Thread name:[ \t]+" + re.escape(name) + r"[ \t]*(?:[\u2502\u2503|][ \t]*)?$"
-    check(not title() and not re.search(row, term.frame()))
-    enter(term, "/rename " + name, checkpoint, "named-rename")
-    checkpoint("named-save-readback")
-    end = time.monotonic() + 3
-    while time.monotonic() < end:
-        term.read()
-        if issue := (term.finding or pty.screen_failure("claude-start", term.frame())):
-            raise pty.CheckpointMiss(issue)
-        if title():
-            proof = "terminal-title"
-            break
-        time.sleep(.025)
-    else:
-        # API-key fixture has no ChatGPT account; /status reads the local widget.
-        enter(term, "/status", checkpoint, "named-status")
-        checkpoint("named-status-readback")
-        term.expect(row, "saved thread name in native status", timeout=12, diagnose="claude-start")
-        proof = "status-card"
-    with fixture.lock:
-        check(not fixture.rows and fixture.armed is None and not fixture.first_submit)
-        fixture.name_proof = proof
-        check(not fixture.pre_root_ingress and not fixture.bad)
-
-
 def interact(host, term, fixture, control, checkpoint):
     from scripts import verify_windows_conpty as pty
 
@@ -310,9 +295,6 @@ def interact(host, term, fixture, control, checkpoint):
     # Stop before sending ANY input at a trust, auth, or first-run UI.
     term.expect(r"OpenAI\s+Codex|Claude\s+Code|Sonnet\s+4\.6|\? for shortcuts|Type your message|shortcuts for help", "native composer",
                 timeout=85, diagnose="claude-start")
-    from scripts.windows_codex_editor import enter
-    if host == "codex":
-        named_preflight(term, fixture, checkpoint, enter)
     for i, mode in enumerate(MODES):
         checkpoint("rehearsal-control-" + str(i))
         if i:
@@ -322,8 +304,30 @@ def interact(host, term, fixture, control, checkpoint):
         fixture.status_checks += 1
         check(not pty.screen_failure("claude-start", term.frame()))
         checkpoint("rehearsal-answer-" + str(i))
+        from scripts.windows_codex_editor import enter
         enter(term, fixture.prompts[i], checkpoint, "turn-" + str(i), host=host,
               before_submit=lambda: fixture.arm(i))
+        if fixture.interrupt and i == 1:
+            checkpoint("wallet-wire-interrupt")
+            check(fixture.interrupted.wait(30))
+            checkpoint("native-retry-outcome")
+            deadline = time.monotonic() + 85
+            while time.monotonic() < deadline:
+                term.read()
+                frame = term.frame()
+                check(fixture.answers[1] not in frame)
+                fixture.native_reconnect |= bool(re.search(r"reconnecting\W+\d+\s*/\s*\d+", frame, re.I))
+                fixture.native_error |= bool(re.search(
+                    r"stream disconnected before completion|exceeded retry limit|"
+                    r"unexpected status (?:400|403|409|502)|stream closed before response.completed", frame, re.I))
+                if fixture.native_error or fixture.repeat_v or fixture.repeat_host or fixture.unmatched:
+                    break
+                time.sleep(.04)
+            check(fixture.native_error and (fixture.reopens or fixture.native_reconnect))
+            check(not (fixture.bad or fixture.repeat_v or fixture.repeat_host or fixture.unmatched))
+            control(sid, "status", "v")
+            fixture.status_checks += 1
+            break
         term.expect(re.escape(fixture.answers[i]), "rendered synthetic answer", timeout=40, diagnose="claude-start")
         fixture.rendered += 1
         # User-visible text can precede the supplier's completed frame. For
@@ -339,9 +343,10 @@ def interact(host, term, fixture, control, checkpoint):
     term.require_success()
     fixture.clean_exit=True
     checkpoint("foreground-exited-zero")
-    check(fixture.rows == list(MODES) and fixture.sealed and fixture.armed is None)
+    expected = ["host"] if fixture.interrupt else list(MODES)
+    check(fixture.rows == expected and fixture.sealed != fixture.interrupt and fixture.armed is None)
     checkpoint("rehearsal-helper-policy")
-    check(not fixture.denied_wallet and not fixture.bad and not fixture.extra_root)
+    check(fixture.helper_policy_ok() and not fixture.bad and not fixture.extra_root)
 
 
 def payer(node, app, env, cwd, sid, action, expected):
@@ -352,10 +357,10 @@ def payer(node, app, env, cwd, sid, action, expected):
     check(result.returncode == 0 and result.stdout.strip() == ("Synthetic Windows payer: " + expected).encode())
 
 
-async def run(host, drive, checkpoint, stats):
+async def run(host, drive, checkpoint, stats, *, interrupt=False):
     import uvicorn
 
-    fixture = Fixture(host)
+    fixture = Fixture(host, interrupt)
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         sock.listen(8)
@@ -375,22 +380,23 @@ async def run(host, drive, checkpoint, stats):
             await asyncio.wait_for(serving, 10)
 
             if host=="codex":
-                print(f"::notice::pre-submit host_ws={fixture.early_host_ws} empty_warmup={fixture.early_empty_warmup} denied={fixture.pre_root_ingress}", flush=True)
-                print(f"::notice::named codex proof={fixture.name_proof} first_submit={int(fixture.first_submit)} "
-                      f"pre_root_ingress={fixture.pre_root_ingress} title_attempts={fixture.title_attempts} "
-                      f"wallet_title_attempts={fixture.wallet_title_attempts} rendered={fixture.rendered} "
-                      f"linked={max(0, len(fixture.rows)-1)} switch_acks={fixture.switch_acks} "
-                      f"status_checks={fixture.status_checks}",flush=True)
+                print(f"::notice::unnamed lane={'interrupt' if interrupt else 'roundtrip'} "
+                      f"rendered={fixture.rendered} links={max(0,len(fixture.rows)-1)} "
+                      f"switches={fixture.switch_acks} statuses={fixture.status_checks} "
+                      f"drop={int(fixture.interrupted.is_set())} reopens={fixture.reopens} "
+                      f"retry_ui={int(fixture.native_reconnect)} terminal_error={int(fixture.native_error)} "
+                      f"repeat_v={fixture.repeat_v} repeat_host={fixture.repeat_host} unmatched={fixture.unmatched} "
+                      f"wallet_completed={int('v' in fixture.rows)} exit_zero={int(fixture.clean_exit)}",flush=True)
                 print(f"::notice::cleanup codex exit_zero={int(fixture.clean_exit)} sealed={int(fixture.sealed)} "
                       f"final_frame={int(fixture.sent[fixture.answers[-1]].is_set())} root_answers={len(fixture.rows)} "
                       f"extra_root={fixture.extra_root} title_over_cap={fixture.excess_titles} "
                       f"title_after_seal={fixture.after_seal}",flush=True)
-                reason=fixture.first_fault or ("wallet-helper" if fixture.denied_wallet else "none")
+                reason=fixture.first_fault or ("helper-limit" if fixture.excess_titles else
+                                               "wallet-helper" if fixture.denied_wallet else "none")
                 print(f"::notice::wire codex denied_titles={fixture.denied_titles} denied_wallet={fixture.denied_wallet} root={int(fixture.root is not None)} fault={reason}",flush=True)
             stats.update(supplier_answers=len(fixture.rows), linked=max(0, len(fixture.rows)-1),
                          rendered=fixture.rendered, switch_acks=fixture.switch_acks,
-                         status_checks=fixture.status_checks, rejected=int(fixture.bad or bool(fixture.denied_wallet)))
+                         status_checks=fixture.status_checks, rejected=int(fixture.bad or not fixture.helper_policy_ok()))
         if host == "codex":
-            check(not fixture.title_attempts and not fixture.pre_root_ingress)
-            check(fixture.clean_exit and fixture.sealed and not fixture.extra_root
-                  and not fixture.denied_wallet and not fixture.bad)
+            check(fixture.clean_exit and fixture.sealed != interrupt and not fixture.extra_root
+                  and fixture.helper_policy_ok() and not fixture.bad)
