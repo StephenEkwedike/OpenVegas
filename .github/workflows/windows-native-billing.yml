@@ -95,10 +95,67 @@ jobs:
           python -B -m pytest "--junitxml=$env:RUNNER_TEMP/lease.xml" tests/test_integrations/test_windows_session_lease.py *> $null
           exit $LASTEXITCODE
       - name: Terminal control, CLI and native console restoration
+        id: terminal
         if: ${{ !cancelled() && steps.isolation.outcome == 'success' }}
         run: |
-          python -B -m pytest "--junitxml=$env:RUNNER_TEMP/terminal.xml" tests/test_integrations/test_windows_terminal_host.py *> $null
+          python -B -m pytest "--junitxml=$env:RUNNER_TEMP/terminal.xml" tests/test_integrations/test_windows_terminal_host.py tests/test_integrations/test_inference_router_session.py::test_peer_cleanup_error_cannot_skip_wallet_revocation *> $null
           exit $LASTEXITCODE
+      - name: Classify console failure without child output
+        if: ${{ !cancelled() && steps.terminal.outcome == 'failure' }}
+        run: |
+          [xml]$xml = Get-Content -Raw -LiteralPath (Join-Path $env:RUNNER_TEMP 'terminal.xml')
+          if (!$xml.SelectSingleNode('//testcase[@name="test_native_windows_console_restore"]/failure')) { exit 0 }
+          @'
+          import subprocess, sys
+          # Diagnostic only: the original failed test and red gate remain authoritative.
+          stages = {10:"attach", 11:"read-mode", 12:"enter-guard", 13:"set-mode", 14:"set-page",
+                    15:"check-mutation", 16:"unwind", 17:"check-restoration", 0:"not-reproduced"}
+          probe = """
+          import ctypes, msvcrt, os
+          from ctypes import wintypes as W
+          from openvegas.integrations.windows_terminal import console_modes
+          stage = 10
+          try:
+              for fd, name in enumerate(('CONIN$', 'CONOUT$', 'CONOUT$')):
+                  source = os.open(name, os.O_RDWR)
+                  if source != fd:
+                      os.dup2(source, fd)
+                      os.close(source)
+              stage = 11
+              api = ctypes.WinDLL('kernel32.dll', winmode=0x800)
+              h = W.HANDLE(msvcrt.get_osfhandle(0))
+              def mode():
+                  value = W.DWORD()
+                  assert api.GetConsoleMode(h, ctypes.byref(value))
+                  return value.value
+              old, cp = mode(), api.GetConsoleOutputCP()
+              newcp = 437 if cp == 65001 else 65001
+              stage = 12
+              try:
+                  with console_modes():
+                      stage = 13
+                      assert api.SetConsoleMode(h, old ^ 1)
+                      stage = 14
+                      assert api.SetConsoleOutputCP(newcp)
+                      stage = 15
+                      assert mode() == old ^ 1 and api.GetConsoleOutputCP() == newcp
+                      stage = 16
+                      raise ValueError('test unwind')
+              except ValueError:
+                  pass
+              stage = 17
+              assert mode() == old and api.GetConsoleOutputCP() == cp
+          except BaseException:
+              os._exit(stage)
+          """
+          try:
+              run = subprocess.run([sys.executable, '-B', '-c', probe], creationflags=subprocess.CREATE_NEW_CONSOLE,
+                                   timeout=30, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+              label = stages.get(run.returncode, "child-start")
+          except (OSError, subprocess.TimeoutExpired):
+              label = "spawn-or-timeout"
+          print("::warning::Console diagnostic stage: " + label)
+          '@ | python -B -
       - name: Installed Codex app-server against synthetic loopback
         if: ${{ !cancelled() && steps.isolation.outcome == 'success' }}
         env:
@@ -123,7 +180,7 @@ jobs:
           $required = [ordered]@{
             images = @('test_launches_official_windows_image[codex-0.166.0]', 'test_launches_official_windows_image[claude-2.1.322]', 'test_native_windows_child_socket_only', 'test_session_close_denies_pending_request_and_retires_handle_after_inspection')
             lease = @('test_default_lease_directory_independent_of_launcher_env','test_second_process_refused_until_owner_exit')
-            terminal = @('test_windows_terminal_cli_separates_launch_and_controls','test_native_windows_console_restore','test_windows_locator_and_profile_are_private','test_owned_child_routes_and_switches_without_restart[codex]','test_owned_child_routes_and_switches_without_restart[claude]')
+            terminal = @('test_windows_terminal_cli_separates_launch_and_controls','test_native_windows_console_restore','test_windows_locator_and_profile_are_private','test_owned_child_routes_and_switches_without_restart[codex]','test_owned_child_routes_and_switches_without_restart[claude]','test_peer_cleanup_error_cannot_skip_wallet_revocation')
             codex = $matrix
             claude = @('test_pinned_claude_stream_json_round_trip')
           }

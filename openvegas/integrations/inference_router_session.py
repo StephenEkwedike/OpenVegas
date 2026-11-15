@@ -11,7 +11,7 @@ import asyncio
 import json
 import re
 import time
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass, field
 
 import click
@@ -125,7 +125,11 @@ class RouterSession:
         if effective_policy_verified is not True or self._url is not None or self._closed:
             raise IntegrationError('Native launch policy must be verified before using the router.')
         try:
-            async with serve(self.router) as url:
+            async with AsyncExitStack() as transport:
+                close_peer = getattr(self._peer, 'close', None)
+                if close_peer is not None:
+                    transport.callback(close_peer)
+                url = await transport.enter_async_context(serve(self.router))
                 updated, argv = launch_overlay(self.adapter.host, version, url, env, args,
                     local_capability=self.router.capability if self.router.auth_mode == 'header' else None,
                     peer_authenticated=self.router.auth_mode == 'peer')
@@ -134,9 +138,6 @@ class RouterSession:
         finally:
             self._url = None
             self._closed = True
-            close_peer = getattr(self._peer, 'close', None)
-            if close_peer is not None:
-                close_peer()
             settled = await self.controls.close()
             if not settled:
                 # An owned switch may already be revoking this exact grant.

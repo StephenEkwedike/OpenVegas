@@ -218,8 +218,10 @@ def test_native_windows_console_restore():
 import ctypes, msvcrt, os, sys
 from ctypes import wintypes as W
 from openvegas.integrations.windows_terminal import console_modes
-for fd, name, flags in [(0,'CONIN$',os.O_RDONLY),(1,'CONOUT$',os.O_WRONLY),(2,'CONOUT$',os.O_WRONLY)]:
-    source = os.open(name, flags)
+# Match default Windows console handles: GetConsoleMode and SetConsoleMode
+# both require GENERIC_READ, including on the output screen buffer.
+for fd, name in [(0,'CONIN$'),(1,'CONOUT$'),(2,'CONOUT$')]:
+    source = os.open(name, os.O_RDWR)
     if source != fd:
         os.dup2(source, fd)
         os.close(source)
@@ -234,7 +236,9 @@ cp = api.GetConsoleOutputCP()
 try:
     with console_modes():
         assert api.SetConsoleMode(h, old ^ 1)
-        assert api.SetConsoleOutputCP(65001)
+        alternate_cp = 437 if cp == 65001 else 65001
+        assert api.SetConsoleOutputCP(alternate_cp)
+        assert current() == old ^ 1 and api.GetConsoleOutputCP() == alternate_cp
         raise ValueError('test cleanup')
 except ValueError:
     pass
