@@ -22,7 +22,7 @@ FILES = {
     WIN: (PACKAGE, ("bin/" + BIN, "package.json")),
 }
 HOSTS = ("codex", "claude")
-REF = "refs/heads/codex/qa-win32-private-root-0319"
+REF = "refs/heads/codex/qa-win-foreground-8005302f"
 
 
 def require(ok):
