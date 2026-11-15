@@ -1,8 +1,9 @@
 {
   "baseline_build_inputs_sha256": null,
-  "baseline_freeze_sha256": "fc965c98fed39e1a6eec0ccc832f9db14ed120db3fca58aa3b001fa89e1ff401",
+  "baseline_freeze_sha256": "cd2686f46906db0f8a03d64d0bc3029a4629c3ef8ad796017bfe9326cc23e5b1",
   "checkout_native_inputs": {
     "openvegas/integrations/billing_host.py": "4693b1225a63387b0605ef0db84e223bfb9fffa5dcbe889010ee173e2884a172",
+    "openvegas/integrations/codex_live_transport.py": "5985e915c2acd5964fa4754aa9978e888e1ad8abdcb824f3d1132812a51e5364",
     "openvegas/integrations/codex_stable_transport.py": "5f93083018ead0c736a1f55f308e7ab7eabc925ac6738c4bcfcddfb24c28c172",
     "openvegas/integrations/commands.py": "da7d7caa121c33d5d6c6de1acbf1195563427a54cc45092f1bde0e00869ec7b8",
     "openvegas/integrations/inference_router.py": "5f73bb5875bd7f54757e7252def2f628541a53e65a2fbe172459afd21cd16f54",
@@ -32,7 +33,7 @@
     "scripts/frozen_entry.py": "1f39353e7d62f5a12259550cbbd0524adaaa165984d954960a0f3aa37c10a505"
   },
   "format": "openvegas-native-router-candidate-v1",
-  "freezer_sha256": "a8b5776055f5e210853f10556421247a312bd721fbeeca119b794f307b0a513f",
+  "freezer_sha256": "bc08ee9b1f301238c924dc58d634596b564e69eb6789a9c608099618101cc252",
   "frozen": true,
   "inputs": {
     "cli": {
@@ -233,7 +234,7 @@
       "openvegas/integrations/codex_catalog_schema.py": "8df314fc202d83478488a268d036125c133baecd7f3627fba7b48cdd446e7482",
       "openvegas/integrations/codex_handoff_policy.py": "e8e9fe290043ebf4978ad2db87a6bfa9702dcb38cb8af582d7875bcd655165c3",
       "openvegas/integrations/codex_live_switch.py": "43277f8b61ba144c8b4302761f76c55d33e3a995d168182efa795a362a75255c",
-      "openvegas/integrations/codex_live_transport.py": "b8c045a687a2707d36315ac21427bf38b134cb633f827b8ffa8e45a7676ee864",
+      "openvegas/integrations/codex_live_transport.py": "5985e915c2acd5964fa4754aa9978e888e1ad8abdcb824f3d1132812a51e5364",
       "openvegas/integrations/codex_pets.py": "de8e81eca689e0d9dcd9f5a9d79162bf12bf0d7bb0f866d0363e2fdb2e724d7f",
       "openvegas/integrations/codex_stable_transport.py": "5f93083018ead0c736a1f55f308e7ab7eabc925ac6738c4bcfcddfb24c28c172",
       "openvegas/integrations/commands.py": "da7d7caa121c33d5d6c6de1acbf1195563427a54cc45092f1bde0e00869ec7b8",
@@ -375,7 +376,7 @@
     "native_terminal_balance_display": "not_run",
     "permission_and_tool_continuity": "not_run"
   },
-  "preparation": "Reviewed native platform and search delivery fixes; no publication or account changes.",
+  "preparation": "Private native Codex daemon socket alias on Linux; no release or billing change.",
   "publication_approved": false,
   "published": false,
   "version": "0.3.19"

@@ -59,8 +59,8 @@ jobs:
         env:
           EXPECTED_TARGET: ${{ matrix.target }}
         run: |
-          python -c "import json,os; r=json.load(open('dist/native-candidate/candidate.json')); assert r['version']=='0.3.19' and r['os']+'-'+r['arch']==os.environ['EXPECTED_TARGET']; assert r['source_sha256']=='08bdb980efb418299bfd58ddc954ee0600ff0cb108592b20e7b9c5983dcbe6ff'"
-          python -B dist/git-source/scripts/verify_native_router_candidate.py verify --frozen dist/frozen --freeze-sha256 cd2686f46906db0f8a03d64d0bc3029a4629c3ef8ad796017bfe9326cc23e5b1 --candidate dist/native-candidate --output dist/native-candidate/independent-verified.json
+          python -c "import json,os; r=json.load(open('dist/native-candidate/candidate.json')); assert r['version']=='0.3.19' and r['os']+'-'+r['arch']==os.environ['EXPECTED_TARGET']; assert r['source_sha256']=='211f1621ec2c5910bd166f0c9a1699c216c659391f4ba97fd7cea5e3a8201c90'"
+          python -B dist/git-source/scripts/verify_native_router_candidate.py verify --frozen dist/frozen --freeze-sha256 416b1e5ae2f4cf890ca019f7e825e5116652bc9b9375fde891b273282aa76d95 --candidate dist/native-candidate --output dist/native-candidate/independent-verified.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:

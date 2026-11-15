@@ -193,6 +193,10 @@ def _peer_instance(ws, pid):
     raise TransportRefused("Unsupported Unix peer identity.")
 
 
+def _daemon_directory():
+    return Path("/tmp").resolve() / f"codex-daemon-{os.geteuid()}"
+
+
 def _path(endpoint):
     if not isinstance(endpoint, str) or not endpoint.startswith("unix:///"):
         raise TransportRefused("A private owned Unix server is required.")
@@ -206,18 +210,21 @@ def _path(endpoint):
     ):
         raise TransportRefused("Unsafe native socket or containing directory.")
     if stat.S_ISLNK(node.st_mode):
-        backing = p.resolve(strict=True)
-        daemon = Path("/tmp").resolve() / f"codex-daemon-{os.geteuid()}"
-        info = backing.parent.lstat()
+        daemon = _daemon_directory()
+        target = Path(os.readlink(p))
         if (
-            sys.platform != "darwin"
-            or backing.parent != daemon
-            or not re.fullmatch("[0-9a-f]{64}", backing.name)
-            or not stat.S_ISDIR(info.st_mode)
-            or info.st_uid != os.geteuid()
-            or info.st_mode & 0o077
+            sys.platform not in ("darwin", "linux")
+            or not target.is_absolute()
+            or target.parent not in (daemon, Path("/tmp") / daemon.name)
+            or not re.fullmatch("[0-9a-f]{64}", target.name)
         ):
             raise TransportRefused("Unverified native socket alias.")
+        # Codex on both platforms can place its real socket in this private directory.
+        # Use the canonical directory and never follow a second link at the leaf.
+        info = daemon.lstat()
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077:
+            raise TransportRefused("Unsafe native daemon directory.")
+        backing = daemon / target.name
         p, node = backing, backing.lstat()
     if not stat.S_ISSOCK(node.st_mode) or node.st_uid != os.geteuid() or node.st_mode & 0o077:
         raise TransportRefused("Unsafe native socket ownership or mode.")
