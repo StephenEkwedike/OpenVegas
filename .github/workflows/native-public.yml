@@ -120,7 +120,7 @@ jobs:
           FREEZE_PIN: 'cee8e8074f92a34c06a81ad4f19f408abc4c77100dc17dc62f3b969200e25cb5'
           SOURCE_PIN: 'c3685dc856a19eb8aea14c8dac45e864728411370fa1cf959a591013c63be570'
           TARGET: ${{ matrix.target }}
-        run: python -B ../../git-source/scripts/ci_runtime_binary.py --output ../../native-candidate
+        run: python -B ../../git-source/scripts/ci_runtime_binary.py --output "${{ github.workspace }}/dist/native-candidate"
       - uses: actions/upload-artifact@v4
         with:
           name: unsigned-native-candidate-${{ matrix.target }}

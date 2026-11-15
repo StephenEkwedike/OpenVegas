@@ -329,7 +329,7 @@
   },
   "native_paid_enabled": false,
   "repository_files": {
-    ".github/workflows/native-public.yml": "dec434743d8ff7aa095e1dc2dac04e329162ea434be4c83e3328bd830c0f6a41",
+    ".github/workflows/native-public.yml": "a87dd24e3227b625b918fc61836f296fcc2b730cb9fd53b073508c4e098df94c",
     "ci-build-requirements.txt": "9abfa42c3c675a76a4edb4db8e2c296467ec38da27522c15633456d3478f5a09",
     "native-router-freeze.json": "cee8e8074f92a34c06a81ad4f19f408abc4c77100dc17dc62f3b969200e25cb5",
     "npm-cli/bin/release.js": "1a8a0bf494acc4ab68c9828bb0f100ba3267ca7bd0386056591b87d33d933555",
