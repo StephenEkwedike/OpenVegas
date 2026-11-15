@@ -7,6 +7,7 @@ payer changes. This transport does not infer task completion from idle sockets.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import json
 import os
@@ -158,6 +159,24 @@ class NativeSocket:
     connecting: bool = True
     close: asyncio.Event = field(default_factory=asyncio.Event)
     done: asyncio.Event = field(default_factory=asyncio.Event)
+    response_hash: bytes | None = None
+
+    def verify_response(self, event, seen):
+        kind = event.get('type') if isinstance(event, dict) else None
+        if kind not in ('response.created', 'response.completed'):
+            return
+        response = event.get('response')
+        rid = response.get('id') if isinstance(response, dict) else None
+        if self.active is None or not isinstance(rid, str) or not (1 <= len(rid) <= 256) or not rid.isascii():
+            raise IntegrationError('Native response has no matching active attempt.')
+        digest = hashlib.sha256(rid.encode('ascii')).digest()
+        if kind == 'response.created':
+            if self.response_hash is not None or digest in seen or len(seen) >= 4096:
+                raise IntegrationError('Native response identity was already used or cannot be retained.')
+            self.response_hash = digest
+            seen.add(digest)
+        elif self.response_hash != digest or response.get('status') != 'completed':
+            raise IntegrationError('Native completion is not for the admitted response.')
 
 
 class Completion:
@@ -307,6 +326,8 @@ class InferenceRouter:
         self.catalog_validator = catalog_validator
         self.sockets = set()
         self.admission_wait = admission_wait
+        self.title_origins = None
+        self._seen_responses = set()
 
     def __repr__(self):
         return '<InferenceRouter session-local>'
@@ -362,12 +383,22 @@ class InferenceRouter:
 
     async def _http(self, scope, receive, send, path, headers):
         try:
+            if self.title_origins is not None:
+                await self.title_origins.admit(headers)
             await self._wait_admission()
+            if self.title_origins is not None:
+                self.title_origins.claim(headers)
             query = scope.get('query_string', b'').decode('ascii')
             full_path = path + ('?' + query if query else '')
             plan = self.adapter.request_plan(scope['method'], full_path, headers,
                                              self.state.mode, self.wallet_token())
-            lease = self.state.begin(scope['method'], path, retry=anonymous_retry(headers))
+            fence = {}
+            if (self.title_origins is not None and scope['method'] == 'POST'
+                    and path in ('/responses', '/v1/responses')):
+                from .codex_title_origin import turn_scope
+                fence['turn_scope'] = turn_scope(headers)
+                fence['managed_response'] = True
+            lease = self.state.begin(scope['method'], path, retry=anonymous_retry(headers), **fence)
         except (IntegrationError, RouterStateError, ValueError):
             await self._error(scope, send, 409, 'Billing route is held or unsupported. Nothing was replayed.')
             return
@@ -522,7 +553,10 @@ class InferenceRouter:
 
         slot, tasks, outcome = None, [], 'rejected'
         try:
+            title = await self.title_origins.admit(headers) if self.title_origins is not None else None
             await self._wait_admission()
+            if self.title_origins is not None:
+                self.title_origins.claim(headers)
             retry = anonymous_retry(headers)
             query = scope.get('query_string', b'').decode('ascii')
             full_path = path + ('?' + query if query else '')
@@ -560,15 +594,20 @@ class InferenceRouter:
                             raise IntegrationError('Native socket request cannot be assigned to this payer.')
                         # A held socket is retired rather than forwarding a new
                         # response.create with its old credential after commit.
-                        slot.active = self.state.begin('POST', path, retry=retry)
+                        fence = ({'turn_scope': self.title_origins.frame(value, title),
+                                  'managed_response': value.get('generate') is not False}
+                                 if self.title_origins is not None else {})
+                        slot.active = self.state.begin('POST', path, retry=retry, **fence)
                         if self.fixture:
                             self.fixture.destination(plan, slot.mode)
                         await upstream.send(message)
 
                 async def from_upstream():
                     async for message in upstream:
-                        await send({'type': 'websocket.send', 'text' if isinstance(message, str) else 'bytes': message})
                         value = json.loads(message)
+                        if self.title_origins is not None:
+                            slot.verify_response(value, self._seen_responses)
+                        await send({'type': 'websocket.send', 'text' if isinstance(message, str) else 'bytes': message})
                         if (isinstance(value, dict) and value.get('type') == 'response.completed'
                                 and isinstance(value.get('response'), dict)
                                 and value['response'].get('status') == 'completed'):
@@ -576,6 +615,7 @@ class InferenceRouter:
                                 raise IntegrationError('Native completion has no admitted request.')
                             self.state.finish(slot.active, 'completed')
                             slot.active = None
+                            slot.response_hash = None
 
                 tasks = [asyncio.create_task(to_upstream()), asyncio.create_task(from_upstream()),
                          asyncio.create_task(slot.close.wait())]

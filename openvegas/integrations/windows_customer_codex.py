@@ -223,6 +223,7 @@ class Pipe:
 
     def __init__(self, process):
         self.p = process
+        self.title_origins = None
         self.waiters = {}
         self.client = None
         self.write_lock = asyncio.Lock()
@@ -235,6 +236,8 @@ class Pipe:
         require(len(raw) <= MAX)
         async with self.write_lock:
             self.threads.sent(message)
+            if self.title_origins is not None and message.get("method") == "thread/start":
+                self.title_origins.start(message["id"])
             self.p.stdin.write(raw + b"\n")
             await self.p.stdin.drain()
 
@@ -255,6 +258,8 @@ class Pipe:
                 packet = json.loads(raw)
                 self.threads.received(packet)
                 key = packet.get("id")
+                if self.title_origins is not None and key is not None and "method" not in packet:
+                    self.title_origins.result(key, packet)
                 if isinstance(key, str) and key.startswith(PREFIX):
                     require(not packet.get("method"))
                     future = self.waiters.get(key)
@@ -572,6 +577,7 @@ async def run(owner, exe, env):
                 return
             claimed = True
             pipe = Pipe(server)
+            pipe.title_origins = session.router.title_origins
             pipe.client = ws
             try:
                 await bridge(ws, pipe, owner, tui)

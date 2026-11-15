@@ -136,6 +136,8 @@ class Customer:
             commit_guard=self.commit_guard,
         )
         if host == "codex":
+            from .codex_title_origin import TitleOrigins
+            self.session.router.title_origins = TitleOrigins(self.session.state)
             self.session.router = RootIngress(self.session.router, adapter.root)
 
     def model(self):

@@ -98,6 +98,8 @@ class ManagedCodexRouter(RuntimeOwner):
                 broker.backend + '/integrations/native'), task_boundary=self._boundary,
                 commit_guard=self._assert_commit, prepare_wallet=prepare, revoke_wallet=revoke,
                 status_changed=s.wallet_status_changed, local_auth='peer', request_boundary=True)
+            from .codex_title_origin import TitleOrigins
+            self.session.router.title_origins = TitleOrigins(self.session.state)
             async with self.session.launch(version=s.launch_spec.version, env=self.env, args=[],
                                            effective_policy_verified=True) as (server_env, overlay):
                 self._router_url = self.session._url
@@ -109,6 +111,7 @@ class ManagedCodexRouter(RuntimeOwner):
                     await route_config(self.source_endpoint, self.cwd, self._router_url)
                     async with RequestStableTransport(self.source_endpoint, on_notice=s.emit) as transport:
                         self.transport = transport
+                        transport.title_origins = self.session.router.title_origins
                         transport.require_cancel_ack = True
                         transport.pending_changed = s.wallet_status_changed.set
                         s.codex_endpoint, s.live_owner = self.source_endpoint, self

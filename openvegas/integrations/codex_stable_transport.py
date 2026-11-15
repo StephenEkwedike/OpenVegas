@@ -422,6 +422,8 @@ class StableTransport(LiveTransport):
             if method:
                 if key is not None:
                     self._out[key] = method
+                    if method == "thread/start" and getattr(self, "title_origins", None) is not None:
+                        self.title_origins.start(key)
                 if method == "thread/unsubscribe":
                     self._ephemerals.discard(params.get("threadId"))
             elif key not in self._in:
@@ -464,6 +466,8 @@ class StableTransport(LiveTransport):
                             raise TransportUncertain("Unmatched native backend response.")
                         operation = self._out.pop(key)
                         if operation == "thread/start":
+                            if getattr(self, "title_origins", None) is not None:
+                                self.title_origins.result(key, frame)
                             thread = frame.get("result", {}).get("thread", {})
                             if thread.get("ephemeral") is True:
                                 sid = thread.get("id")

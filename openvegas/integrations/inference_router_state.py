@@ -122,6 +122,8 @@ class RouterState:
         self._prepared: _Prepared | None = None
         self._operations: dict[str, _Operation] = {}
         self._attempts: dict[str, _Attempt] = {}
+        self._turn_fences: dict[tuple[str, str], Lease] = {}
+        self._open_responses: dict[str, tuple[str, str] | None] = {}
 
     @property
     def mode(self) -> Mode:
@@ -136,7 +138,8 @@ class RouterState:
         return self._prepared.ticket if self._prepared else None
 
     def begin(
-        self, method: str, path: str, operation_id: str | None = None, retry: bool = False
+        self, method: str, path: str, operation_id: str | None = None, retry: bool = False,
+        *, turn_scope: tuple[str, str] | None = None, managed_response: bool = False
     ) -> Lease:
         """Reserve before dispatch; supplied IDs require adapter-verified identity.
 
@@ -158,6 +161,20 @@ class RouterState:
         ):
             _refuse("invalid_operation", "Only a verified, bounded native operation ID is accepted.")
 
+        # A turn can contain multiple paid tool/model calls. Its ID can fence
+        # uncertain attempts, never identify a charge or deduplicate a success.
+        if managed_response and self._open_responses and (
+            turn_scope is None or None in self._open_responses.values()
+        ):
+            _refuse("unattributed_response", "An unresolved response cannot be distinguished from this request.")
+        if turn_scope is not None:
+            if (not self.request_boundary or type(turn_scope) is not tuple or len(turn_scope) != 2
+                    or not all(type(v) is str and len(v) == 36 for v in turn_scope)):
+                _refuse("invalid_scope", "Invalid native turn scope.")
+            prior = self._turn_fences.get(turn_scope)
+            if prior is not None and (prior.generation != self._generation or
+                    self._attempts[prior.attempt_id].outcome in (None, "ambiguous")):
+                _refuse("turn_held", "Prior turn attempt is unresolved or belongs to another payer.")
         operation = self._operations.get(operation_id) if operation_id is not None else None
         if retry and operation_id is not None:
             if operation is None or not operation.verified:
@@ -171,6 +188,12 @@ class RouterState:
                 _refuse("operation_active", "The logical operation already has an active attempt.")
         elif retry and self._generation != 0:
             _refuse("unbound_retry", "An anonymous retry cannot establish its original payer.")
+        elif retry and method == "POST" and self.request_boundary and any(
+            a.operation.generation == self._generation and a.operation.method == method
+            and a.operation.path == path and a.outcome in (None, "ambiguous", "completed")
+            for a in self._attempts.values()
+        ):
+            _refuse("unbound_retry", "An anonymous retry could duplicate an existing request.")
         elif operation is not None:
             _refuse("duplicate_operation", "Known operation requires an explicit retry.")
 
@@ -189,6 +212,10 @@ class RouterState:
         lease = Lease(operation.mode, operation.generation, operation.operation_id, attempt_id)
         self._operations[operation.operation_id] = operation
         self._attempts[attempt_id] = _Attempt(lease, operation)
+        if turn_scope is not None:
+            self._turn_fences[turn_scope] = lease
+        if managed_response:
+            self._open_responses[attempt_id] = turn_scope
         return lease
 
     def finish(self, lease: Lease, outcome: Outcome) -> None:
@@ -206,6 +233,8 @@ class RouterState:
         if type(outcome) is not str or outcome not in ("completed", "rejected", "ambiguous"):
             _refuse("invalid_outcome", "Unknown attempt outcome; lease remains active.")
         attempt.outcome = outcome
+        if outcome != "ambiguous":
+            self._open_responses.pop(lease.attempt_id, None)
 
     def prepare(self, target: Mode) -> SwitchTicket:
         """Claim the sole switch slot; active work may drain but new work is held."""
