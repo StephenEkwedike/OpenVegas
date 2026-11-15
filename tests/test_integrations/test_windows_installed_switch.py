@@ -228,6 +228,24 @@ def drive(host, sink, port, checkpoint):
             term.require_success()
 
 
+def codex_receipt_failure(sink):
+    # Three correctly displayed answers do not excuse a wrong payer or extra request.
+    fault = conpty.Failure
+    if [r['payer'] for r in sink.rows] != ['host', 'v', 'host']:
+        return fault.ROUTE
+    if any(r['auth_matched'] is not True or codex.PATHS.get(r['path']) != r['payer'] for r in sink.rows):
+        return fault.ROUTE
+    if any(r['wire_model'] != qa.MODELS['codex'] or r['wire_effort'] != 'low' for r in sink.rows):
+        return fault.MODEL
+    if not all(r['prior_reply_linked'] for r in sink.rows[1:]):
+        return fault.ROOT
+    if sink.rejections:
+        return {'route_or_auth': fault.ROUTE, 'not_current_deliberate_prompt': fault.UNSOLICITED,
+                'previous_native_reply_missing': fault.ROOT, 'wire_model_or_effort': fault.MODEL
+                }.get(sink.rejections[0], fault.PROTOCOL)
+    return None
+
+
 @pytest.mark.skipif(sys.platform != 'win32', reason='requires disposable Windows ConPTY runner')
 @pytest.mark.parametrize('host', ['codex', 'claude'])
 @pytest.mark.asyncio
@@ -244,11 +262,34 @@ async def test_installed_customer_switch(host, request):
             raise
     checkpoint('supplier-receipts')
     if host == 'codex':
-        assert not sink.rejections and [r['payer'] for r in sink.rows] == ['host', 'v', 'host']
-        assert all(r['wire_model'] == qa.MODELS['codex'] and r['wire_effort'] == 'low' for r in sink.rows)
-        assert all(r['prior_reply_linked'] for r in sink.rows[1:])
+        failure = codex_receipt_failure(sink)
+        if failure:
+            request.node.user_properties.append(('qa_failure_label', failure.value))
+            raise conpty.CheckpointMiss(failure)
     else:
         assert sink == (['host', 'v', 'host'], [], [])
+
+
+def test_codex_receipts_distinguish_a_bad_turn_from_an_unexpected_extra():
+    sink = codex.Supplier()
+    path = {v: k for k, v in codex.PATHS.items()}
+    sink.rows = [dict(payer=mode, auth_matched=True, path=path[mode], wire_model=qa.MODELS['codex'],
+                      wire_effort='low', prior_reply_linked=i > 0)
+                 for i, mode in enumerate(('host', 'v', 'host'))]
+    assert codex_receipt_failure(sink) is None
+    sink.rejections.append('not_current_deliberate_prompt')
+    assert codex_receipt_failure(sink) == conpty.Failure.UNSOLICITED
+    for field, value, expected in [('payer', 'host', conpty.Failure.ROUTE),
+                                   ('path', path['host'], conpty.Failure.ROUTE),
+                                   ('auth_matched', False, conpty.Failure.ROUTE),
+                                   ('wire_effort', 'high', conpty.Failure.MODEL),
+                                   ('prior_reply_linked', False, conpty.Failure.ROOT)]:
+        original = sink.rows[1][field]
+        sink.rows[1][field] = value
+        assert codex_receipt_failure(sink) == expected
+        sink.rows[1][field] = original
+    sink.rejections[0] = 'unknown value must stay private'
+    assert codex_receipt_failure(sink) == conpty.Failure.PROTOCOL
 
 
 def test_bad_bank_request_cannot_issue_or_revoke():
