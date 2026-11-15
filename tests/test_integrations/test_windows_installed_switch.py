@@ -81,6 +81,11 @@ def configure(host, exe, env, cwd):
             env[key] = os.environ[key]
     root = Path(env['USERPROFILE'])
     env.update(HOMEDRIVE=root.drive, HOMEPATH=str(root)[len(root.drive):])
+    # Shell known-folder resolution expands %USERPROFILE% and checks existence.
+    for key, subdir in (('LOCALAPPDATA', 'Local'), ('APPDATA', 'Roaming')):
+        path = root / 'AppData' / subdir
+        path.mkdir(parents=True, exist_ok=True)
+        env[key] = str(path)
     if host == 'codex':
         home = Path(env['CODEX_HOME'])
         (home / 'auth.json').write_text(json.dumps({'OPENAI_API_KEY': SYNTHETIC_KEY}))

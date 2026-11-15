@@ -28,7 +28,7 @@ class Terminal:
 
     def expect(self, pattern, stage, *, timeout=45):
         deadline = time.monotonic() + timeout
-        tail = ''
+        tail = plain = ''
         while time.monotonic() < deadline:
             chunk = self.process.read(16384, blocking=False)
             if chunk:
@@ -53,6 +53,11 @@ class Terminal:
             else:
                 time.sleep(.025)
         # Do not put transcripts, paths, credentials, or prompts in pytest/JUnit.
+        for label, marker in (('command-missing', 'unknown command'), ('setup', 'choose the text style'),
+                              ('api-key-dialog', 'external api key'), ('plugin-trust', 'trust the plugin'),
+                              ('git-bash', 'requires git-bash'), ('claude-login', 'select login method')):
+            if marker in plain.casefold():
+                raise RuntimeError('QA screen: ' + label)
         raise RuntimeError('Missing terminal checkpoint: ' + stage)
 
     def type_line(self, line):

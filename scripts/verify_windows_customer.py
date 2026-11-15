@@ -157,6 +157,22 @@ def diagnostics(path):
                 seen.add(label)
                 with path.open('a', encoding='ascii') as out:
                     out.write(label + '\n')
+                    if frame.f_code.co_name in ('selection', 'verify') and 'loaded' in frame.f_locals:
+                        loaded = frame.f_locals.get('loaded')
+                        rows = loaded.get('data') if isinstance(loaded, dict) else None
+                        if isinstance(rows, list):
+                            sid = frame.f_locals.get('sid')
+                            out.write(f'loaded_count:{min(len(rows), 99)}\n')
+                            out.write(f'loaded_contains:{int(sid in rows)}\n')
+                            out.write(f'loaded_paged:{int(loaded.get("nextCursor") is not None)}\n')
+                            witness = frame.f_locals.get('self')
+                            if witness is not None and type(witness).__name__ == 'NativeThreads' and all(
+                                    isinstance(i, str) for i in rows):
+                                others = set(rows) - {sid}
+                                out.write(f'owned_root:{int(sid in witness.roots)}\n')
+                                out.write(f'pending_count:{min(len(witness.pending), 99)}\n')
+                                out.write(f'other_unknown:{min(len(others - witness.cold), 99)}\n')
+                                out.write(f'other_used:{min(len(others & witness.used), 99)}\n')
         return trace
     return trace
 
