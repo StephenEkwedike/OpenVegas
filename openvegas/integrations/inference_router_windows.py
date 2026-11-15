@@ -136,10 +136,12 @@ class WindowsTCPPeerAuth:
         self._process = self._handle = self._identity = None
         self._bound = asyncio.Event()
         self._limit = asyncio.Semaphore(4)
+        self._closed = False
+        self._inspections = set()
 
     def bind(self, process):
         child = process if isinstance(process, subprocess.Popen) else getattr(process, '_child', None)
-        if self._process is not None or not isinstance(child, subprocess.Popen):
+        if self._closed or self._process is not None or not isinstance(child, subprocess.Popen):
             raise IntegrationError('Local router requires the retained Windows child.')
         handle = None
         try:
@@ -171,12 +173,27 @@ class WindowsTCPPeerAuth:
 
     def _finished(self, future):
         self._limit.release()
+        self._inspections.discard(future)
+        self._release_if_idle()
         if not future.cancelled():
             future.exception()
 
+    def _release_if_idle(self):
+        if self._closed and not self._inspections and self._handle is not None:
+            handle, self._handle = self._handle, None
+            handle.Close()
+            self._process = self._identity = None
+
+    def close(self):
+        # _proof may still be using the duplicated handle after an HTTP timeout.
+        # Never race CloseHandle with an inspector or wait on it to exit the UI.
+        self._closed = True
+        self._bound.set()
+        self._release_if_idle()
+
     async def __call__(self, scope):
         client, server = scope.get('client'), scope.get('server')
-        if (not all(isinstance(ep, (list, tuple)) and len(ep) == 2 and ep[0] == '127.0.0.1'
+        if (self._closed or not all(isinstance(ep, (list, tuple)) and len(ep) == 2 and ep[0] == '127.0.0.1'
                     and type(ep[1]) is int and 1 <= ep[1] <= 65535 for ep in (client, server))
                 or client[1] == server[1]):
             return False
@@ -186,6 +203,9 @@ class WindowsTCPPeerAuth:
             async with asyncio.timeout(_TIMEOUT):
                 await self._bound.wait()
                 await self._limit.acquire()
+                if self._closed:
+                    self._limit.release()
+                    return False
                 try:
                     loop = asyncio.get_running_loop()
                     future = loop.run_in_executor(None, self._proof, (client[1], server[1]), observed)
@@ -193,7 +213,8 @@ class WindowsTCPPeerAuth:
                     self._limit.release()
                     raise
                 # A timeout or disconnect must not release a still-running inspector's slot.
+                self._inspections.add(future)
                 future.add_done_callback(self._finished)
-                return await asyncio.shield(future)
+                return await asyncio.shield(future) and not self._closed
         except (OSError, ValueError, AttributeError, TypeError, RuntimeError, IntegrationError):
             return False

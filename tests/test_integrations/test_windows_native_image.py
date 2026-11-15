@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 import subprocess
 from pathlib import PureWindowsPath
@@ -97,3 +98,22 @@ def test_launches_official_windows_image(host, version, tmp_path):
             check=True,
         )
         assert version in result.stdout
+        if host == "codex":
+            from openvegas.integrations.codex_catalog_schema import valid_native_row
+
+            # Bundled means no sign-in, model request, or network refresh.
+            catalog = subprocess.run(
+                [exe, "debug", "models", "--bundled"],
+                cwd=tmp_path,
+                env=env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=40,
+                check=True,
+            )
+            rows = json.loads(catalog.stdout)["models"]
+            for model in ("gpt-6-astra", "gpt-6.1-sol", "gpt-6.1-terra"):
+                (row,) = [row for row in rows if row["slug"] == model]
+                assert valid_native_row(row) and row["visibility"] == "list"
+                assert {"low", "high"} <= {v["effort"] for v in row["supported_reasoning_levels"]}

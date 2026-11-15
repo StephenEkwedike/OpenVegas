@@ -1,12 +1,11 @@
 """Cross-process, current-user leases for native session identities.
 
 Lock files are never unlinked on release: unlinking a locked inode would allow
-two owners on different inodes. Kernel flock releases the lease after a crash.
+two owners on different inodes. The OS releases the lease after a process crash.
 Only a monotonic fencing generation is persisted, never auth or conversation.
 """
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
@@ -18,20 +17,31 @@ from .credentials import IntegrationError
 
 class SessionLease:
     def __init__(self, host, identifier, *, directory=None):
+        self.fd = self._win = None
         from .billing_host import session_id
         if host not in {'codex', 'claude'} or not session_id(identifier):
             raise IntegrationError('Invalid native ownership identity.')
-        self.fd = None
         self.generation = None
-        root = Path(directory) if directory is not None else Path('/tmp') / f'ov-session-owner-{os.getuid()}'
+        digest = hashlib.sha256((host + ':' + identifier).encode()).hexdigest()
         try:
+            if os.name == 'nt':
+                from .windows_session_lease import acquire
+                lease = acquire(digest, directory)
+                try:
+                    self.generation = lease.__enter__()
+                except BlockingIOError:
+                    raise IntegrationError('Another OpenVegas runtime owns this native session; no handoff started.') from None
+                self._win = lease
+                return
+            import fcntl
+            root = Path(directory) if directory is not None else Path('/tmp') / f'ov-session-owner-{os.getuid()}'
             root.mkdir(mode=0o700, exist_ok=True)
             parent = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             try:
                 info = os.fstat(parent)
                 if info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700:
                     raise IntegrationError('Native ownership directory is not private.')
-                name = hashlib.sha256((host + ':' + identifier).encode()).hexdigest() + '.lock'
+                name = digest + '.lock'
                 fd = os.open(name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=parent)
             finally:
                 os.close(parent)
@@ -64,6 +74,9 @@ class SessionLease:
             raise
 
     def close(self):
+        if self._win is not None:
+            lease, self._win = self._win, None
+            lease.__exit__(None, None, None)
         if self.fd is not None:
             os.close(self.fd)
             self.fd = None

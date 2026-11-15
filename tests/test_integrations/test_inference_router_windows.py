@@ -143,6 +143,33 @@ def test_pid_mismatch_releases_duplicate_without_binding(backend):
 
 
 @pytest.mark.asyncio
+async def test_session_close_denies_pending_request_and_retires_handle_after_inspection(backend):
+    auth, api, child = backend
+    entered, finish = threading.Event(), threading.Event()
+
+    def slow_proof(*args):
+        entered.set()
+        assert finish.wait(5)
+        return (BIRTH + 100, BIRTH + 90)
+
+    api.connection.side_effect = slow_proof
+    auth.bind(child)
+    request = asyncio.create_task(auth(SCOPE))
+    try:
+        assert await asyncio.to_thread(entered.wait, 3)
+        auth.close()
+        assert not await auth(SCOPE)
+        api.pin.return_value.Close.assert_not_called()
+    finally:
+        finish.set()
+    assert not await request
+    auth.close()
+    api.pin.return_value.Close.assert_called_once()
+    with pytest.raises(IntegrationError):
+        auth.bind(child)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize('failure', ['birth', 'handle-lost', 'exit', 'new-socket', 'table-error'])
 async def test_races_and_inspection_failure_deny(backend, failure):
     auth, api, child = backend

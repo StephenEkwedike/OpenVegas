@@ -8,9 +8,15 @@ permissions:
   contents: read
 
 jobs:
-  image-and-peer:
+  windows-offline:
     runs-on: windows-2022
     timeout-minutes: 20
+    env:
+      CI: 'true'
+      PYTEST_ADDOPTS: '-q -p no:cacheprovider --tb=short --show-capture=no'
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
+      DISABLE_TELEMETRY: '1'
+      DISABLE_AUTOUPDATER: '1'
     defaults:
       run:
         shell: pwsh
@@ -29,7 +35,7 @@ jobs:
       - name: Install focused test dependencies
         run: >-
           python -m pip --isolated install --only-binary=:all: --no-cache-dir
-          -c requirements.lock pytest pytest-asyncio httpx websockets Pillow click rich
+          -c requirements.lock pytest pytest-asyncio httpx websockets uvicorn Pillow click rich
       - name: Install official packages without lifecycle scripts
         run: |
           $platform = node -p 'process.platform + "/" + process.arch'
@@ -52,42 +58,99 @@ jobs:
             $exe = (Get-Item -LiteralPath $paths[0]).FullName
             "OV_WINDOWS_$($spec.id)_EXE=$exe" >> $env:GITHUB_ENV
           }
-      - name: Block all outbound traffic from both native hosts
+      - name: Block outbound traffic from native hosts, helpers and Python
+        id: isolation
         run: |
           Set-NetFirewallProfile -Profile Domain,Private,Public -Enabled True -ErrorAction Stop
           $profiles = @(Get-NetFirewallProfile)
           if (!$profiles.Count -or ($profiles | Where-Object { $_.Enabled -ne 'True' })) {
             throw 'Windows Firewall must be enabled for every profile'
           }
-          $programs = @($env:OV_WINDOWS_CODEX_EXE, $env:OV_WINDOWS_CLAUDE_EXE)
+          $hosts = @($env:OV_WINDOWS_CODEX_EXE, $env:OV_WINDOWS_CLAUDE_EXE)
+          $helpers = @(Get-ChildItem -LiteralPath (Join-Path $env:RUNNER_TEMP 'native-hosts') -Filter '*.exe' -File -Recurse -ErrorAction Stop | ForEach-Object FullName)
+          $programs = @(($hosts + $helpers + @((Get-Command python.exe).Source)) | Sort-Object -Unique)
+          $n = 0
           foreach ($exe in $programs) {
             if (!$exe -or ![IO.Path]::IsPathFullyQualified($exe) -or !(Test-Path -LiteralPath $exe -PathType Leaf)) {
               throw 'A required native test image is missing'
             }
-            $id = "OpenVegas-QA-$([IO.Path]::GetFileName($exe))"
+            $n++
+            $id = if ($exe -in $hosts) { "OpenVegas-QA-$([IO.Path]::GetFileName($exe))" } else { "OpenVegas-QA-helper-$n" }
             New-NetFirewallRule -Name $id -DisplayName $id -Profile Any -Enabled True -Direction Outbound -Action Block -Program $exe -ErrorAction Stop | Out-Null
             $active = Get-NetFirewallRule -PolicyStore ActiveStore -Name $id -ErrorAction Stop
-            if ($active.Enabled -ne 'True' -or $active.Action -ne 'Block') { throw 'Native egress block inactive' }
-          }
-      - name: Run image and peer tests (no model requests)
-        env:
-          CI: 'true'
-          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
-          DISABLE_TELEMETRY: '1'
-          DISABLE_AUTOUPDATER: '1'
-        run: |
-          $report = Join-Path $env:RUNNER_TEMP 'windows-native.xml'
-          python -m pytest -q -ra "--junitxml=$report" tests/test_integrations/test_windows_native_image.py tests/test_integrations/test_inference_router_windows.py --deselect=tests/test_integrations/test_inference_router_windows.py::test_refuse_wrong_os
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          [xml]$xml = Get-Content -Raw -LiteralPath $report
-          $cases = @($xml.SelectNodes('//testcase'))
-          if (!$cases.Count -or $xml.SelectNodes('//testcase/*[self::failure or self::error or self::skipped]').Count) {
-            throw 'Expected every selected Windows test to pass without skips'
-          }
-          foreach ($name in @('test_launches_official_windows_image[codex-0.166.0]', 'test_launches_official_windows_image[claude-2.1.322]', 'test_native_windows_child_socket_only')) {
-            if (@($cases | Where-Object { $_.GetAttribute('name') -ceq $name }).Count -ne 1) {
-              throw "Missing required native test: $name"
+            $app = $active | Get-NetFirewallApplicationFilter
+            $addr = $active | Get-NetFirewallAddressFilter
+            if ($active.Enabled -ne 'True' -or $active.Action -ne 'Block' -or $active.Direction -ne 'Outbound' -or
+                $active.Profile -ne 'Any' -or $app.Program -ine $exe -or (@($addr.RemoteAddress) -join ',') -ne 'Any') {
+              throw 'Effective executable-specific outbound block missing'
             }
-            "Passed: $name" >> $env:GITHUB_STEP_SUMMARY
           }
-          "$($cases.Count) passed; image and peer QA only, not installed end-to-end billing." >> $env:GITHUB_STEP_SUMMARY
+      - name: Native image, bundled catalog and peer ownership
+        run: |
+          python -B -m pytest "--junitxml=$env:RUNNER_TEMP/images.xml" tests/test_integrations/test_windows_native_image.py tests/test_integrations/test_inference_router_windows.py --deselect=tests/test_integrations/test_inference_router_windows.py::test_refuse_wrong_os *> $null
+          exit $LASTEXITCODE
+      - name: Native session lease and owner crash recovery
+        if: ${{ !cancelled() && steps.isolation.outcome == 'success' }}
+        run: |
+          python -B -m pytest "--junitxml=$env:RUNNER_TEMP/lease.xml" tests/test_integrations/test_windows_session_lease.py *> $null
+          exit $LASTEXITCODE
+      - name: Terminal control, CLI and native console restoration
+        if: ${{ !cancelled() && steps.isolation.outcome == 'success' }}
+        run: |
+          python -B -m pytest "--junitxml=$env:RUNNER_TEMP/terminal.xml" tests/test_integrations/test_windows_terminal_host.py *> $null
+          exit $LASTEXITCODE
+      - name: Installed Codex app-server against synthetic loopback
+        if: ${{ !cancelled() && steps.isolation.outcome == 'success' }}
+        env:
+          OV_WINDOWS_CODEX_PAYER_PROBE: '1'
+        run: |
+          $env:OV_WINDOWS_CODEX_ENTRY = $env:OV_WINDOWS_CODEX_EXE
+          python -B -m pytest "--junitxml=$env:RUNNER_TEMP/codex.xml" tests/test_integrations/test_windows_codex_payer_roundtrip.py *> $null
+          exit $LASTEXITCODE
+      - name: Installed Claude stream against synthetic loopback
+        if: ${{ !cancelled() && steps.isolation.outcome == 'success' }}
+        run: |
+          python -B -m pytest "--junitxml=$env:RUNNER_TEMP/claude.xml" tests/test_integrations/test_windows_claude_stream_native.py *> $null
+          exit $LASTEXITCODE
+      - name: Require all named native passes and reject skips
+        if: ${{ !cancelled() && steps.isolation.outcome == 'success' }}
+        run: |
+          $matrix = foreach ($effort in 'low','high') {
+            foreach ($model in 'gpt-6-astra','gpt-6.1-sol','gpt-6.1-terra') {
+              "test_windows_codex_payer_roundtrip[$effort-$model]"
+            }
+          }
+          $required = [ordered]@{
+            images = @('test_launches_official_windows_image[codex-0.166.0]', 'test_launches_official_windows_image[claude-2.1.322]', 'test_native_windows_child_socket_only', 'test_session_close_denies_pending_request_and_retires_handle_after_inspection')
+            lease = @('test_default_lease_directory_independent_of_launcher_env','test_second_process_refused_until_owner_exit')
+            terminal = @('test_windows_terminal_cli_separates_launch_and_controls','test_native_windows_console_restore','test_windows_locator_and_profile_are_private','test_owned_child_routes_and_switches_without_restart[codex]','test_owned_child_routes_and_switches_without_restart[claude]')
+            codex = $matrix
+            claude = @('test_pinned_claude_stream_json_round_trip')
+          }
+          $ok = $true
+          foreach ($group in $required.Keys) {
+            $report = Join-Path $env:RUNNER_TEMP "$group.xml"
+            if (!(Test-Path -LiteralPath $report)) { Write-Output "::error::Missing $group JUnit report"; $ok = $false; continue }
+            [xml]$xml = Get-Content -Raw -LiteralPath $report
+            $cases = @($xml.SelectNodes('//testcase'))
+            foreach ($case in $cases) {
+              $bad = $case.SelectSingleNode('failure|error|skipped')
+              if ($bad) {
+                $ok = $false
+                # Publish only source locations and reviewed test names, never traceback values or fixture IO.
+                $locations = [regex]::Matches($bad.InnerText, '(?:tests|openvegas)[/\\][A-Za-z0-9_/\\.]+\.py:\d+') | ForEach-Object Value | Select-Object -Unique -Last 4
+                $label = $case.GetAttribute('name') -replace '[^a-zA-Z0-9_.\[\]-]', '_'
+                Write-Output "::error::$group / $label / $($bad.LocalName) / $($locations -join ', ')"
+              }
+            }
+            $passed = @($cases | Where-Object { !$_.SelectSingleNode('failure|error|skipped') } | ForEach-Object { $_.GetAttribute('name') })
+            foreach ($name in $required[$group]) {
+              if (@($passed | Where-Object { $_ -ceq $name }).Count -ne 1) {
+                Write-Output "::error::Missing required pass: $name"
+                $ok = $false
+              }
+            }
+            "$group : $($passed.Count) of $($cases.Count) selected cases passed" >> $env:GITHUB_STEP_SUMMARY
+          }
+          if (!$ok) { throw 'One or more Windows QA gates did not pass' }
+          'Synthetic loopback protocol evidence only; no supplier, payment or full installed TUI certification.' >> $env:GITHUB_STEP_SUMMARY

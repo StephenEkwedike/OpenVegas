@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 import click
 
 from .credentials import IntegrationError
-from .inference_router import DarwinTCPPeerAuth, InferenceRouter, serve
+from .inference_router import InferenceRouter, native_tcp_peer_auth, serve
 from .inference_router_adapter import launch_overlay
 from .inference_router_controls import RouterBillingCoordinator, RouterControlPort
 from .inference_router_shutdown_receipt import save_unresolved_dispatches
@@ -50,7 +50,7 @@ class RouterSession:
             raise IntegrationError('Native peer authentication is only verified for Codex.')
         if local_auth == 'header' and adapter.host != 'claude':
             raise IntegrationError('Native header authentication is only verified for Claude.')
-        self._peer = DarwinTCPPeerAuth() if local_auth == 'peer' else None
+        self._peer = native_tcp_peer_auth() if local_auth == 'peer' else None
 
         def commit(ticket, grant):
             if ticket.target == 'v' and (not isinstance(grant, WalletAccess)
@@ -134,6 +134,9 @@ class RouterSession:
         finally:
             self._url = None
             self._closed = True
+            close_peer = getattr(self._peer, 'close', None)
+            if close_peer is not None:
+                close_peer()
             settled = await self.controls.close()
             if not settled:
                 # An owned switch may already be revoking this exact grant.
