@@ -40,7 +40,7 @@ def claude_input_failure(payload, prompt):
 @asynccontextmanager
 async def supplier(host):
     if host == 'codex':
-        async with codex.supplier() as (sink, port):
+        async with codex.supplier(foreground_threads=lambda: {}) as (sink, port):
             sink.token = qa.GRANT
             yield sink, port
         return
@@ -153,6 +153,25 @@ def drive(host, sink, port, checkpoint):
         env, cwd = canonical_fixture(launcher, host, env, cwd)
         checkpoint('fixture-configure')
         configure(host, exe, env, cwd)
+        if host == 'codex':
+            # Out-of-band observations from the owned app-server, not provider
+            # headers. Files exist only inside the disposable job profile.
+            from openvegas.emotes._windows_state import private_windows_directory
+            def witnessed():
+                result = {}
+                with private_windows_directory(Path(env['TMP'])) as state:
+                    for source, files in qa.THREAD_FILES.items():
+                        ids = []
+                        for filename in files:
+                            try:
+                                ids.append(state.read(filename, 36).decode('ascii'))
+                            except FileNotFoundError:
+                                break
+                        if source == 'user' and not ids:
+                            return {}
+                        result[source] = ids[0] if source == 'user' else ids
+                return result
+            sink.lookup = witnessed
         checkpoint('conpty')
         with conpty.isolated_console(Path(qa.__file__), [host, exe, str(port)], env, cwd) as term:
             checkpoint('native-start')
@@ -250,16 +269,25 @@ def codex_receipt_failure(sink):
 @pytest.mark.parametrize('host', ['codex', 'claude'])
 @pytest.mark.asyncio
 async def test_installed_customer_switch(host, request):
+    last_stage = None
     def checkpoint(name):
+        nonlocal last_stage
+        last_stage = name
         request.node.user_properties.append(('qa_stage', name))
 
     conpty.require_hosted_lane()
-    async with supplier(host) as (sink, port):
-        try:
+    try:
+        async with supplier(host) as (sink, port):
             await asyncio.to_thread(drive, host, sink, port, checkpoint)
-        except conpty.CheckpointMiss as exc:
-            request.node.user_properties.append(('qa_failure_label', exc.reason.value))
-            raise
+    except Exception as exc:
+        # Do not lose an already observed supplier failure to a later teardown
+        # error. The original error is still raised; neither gate is waived.
+        reason = codex_receipt_failure(sink) if host == 'codex' and last_stage == 'shutdown' else None
+        if reason is None and isinstance(exc, conpty.CheckpointMiss):
+            reason = exc.reason
+        if reason:
+            request.node.user_properties.append(('qa_failure_label', reason.value))
+        raise
     checkpoint('supplier-receipts')
     if host == 'codex':
         failure = codex_receipt_failure(sink)
@@ -290,6 +318,23 @@ def test_codex_receipts_distinguish_a_bad_turn_from_an_unexpected_extra():
         sink.rows[1][field] = original
     sink.rejections[0] = 'unknown value must stay private'
     assert codex_receipt_failure(sink) == conpty.Failure.PROTOCOL
+
+
+def test_supplier_witness_requires_typed_correlated_native_thread_start():
+    from openvegas.integrations.windows_customer_codex import NativeThreads
+    tracker = NativeThreads()
+    root, title = ('e64139f8-4678-46ac-8cf0-bf765e77016a', '9a7341f6-341e-4d31-865a-37c5e9262edc')
+    for key, (sid, source, ephemeral) in enumerate(((root, 'user', False), (title, 'thread_title', True)), 1):
+        tracker.sent({'id': key, 'method': 'thread/start', 'params': {}})
+        pending = tracker.pending[key]
+        thread = {'id': sid, 'parentThreadId': None, 'ephemeral': ephemeral, 'threadSource': source}
+        response = {'id': key, 'result': {'thread': thread}}
+        tracker.received(response)
+        assert qa.thread_witness(pending, response, tracker) == (source, sid)
+        assert qa.thread_witness(None, response, tracker) is None
+        assert qa.thread_witness(('thread/resume', sid), response, tracker) is None
+        thread['threadSource'] = 'user' if ephemeral else 'thread_title'
+        assert qa.thread_witness(pending, response, tracker) is None
 
 
 def test_bad_bank_request_cannot_issue_or_revoke():
@@ -377,6 +422,18 @@ def test_console_requires_confirmed_launcher_exit(code, reason):
         with pytest.raises(conpty.CheckpointMiss) as exc:
             term.require_success()
         assert exc.value.reason is reason
+
+
+def test_closed_console_waits_for_owned_launcher_not_pipe(monkeypatch):
+    class Closing:
+        def read(self, *_args, **_kwargs):
+            raise EOFError
+
+    monkeypatch.setattr(conpty.time, 'sleep', lambda _: None)
+    codes = iter((None, 23))
+    with pytest.raises(conpty.CheckpointMiss) as exc:
+        conpty.Terminal(Closing(), exit_code=lambda: next(codes)).require_success()
+    assert exc.value.reason is conpty.Failure.BANK
 
 
 def test_terminal_failure_labels_are_closed_and_no_generic_banner_accepts_trust():

@@ -103,13 +103,267 @@ class Supplier:
             await ws.close(code=1008)
 
 
+def _check(value):
+    if not value:
+        raise ValueError('foreground_identity')
+
+
+def _uuid(value):
+    return isinstance(value, str) and str(UUID(value)) == value
+
+
+def _object(raw):
+    def unique(pairs):
+        out = dict(pairs)
+        _check(len(out) == len(pairs))
+        return out
+    value = json.loads(raw, object_pairs_hook=unique)
+    _check(isinstance(value, dict))
+    return value
+
+
+class ForegroundSupplier(Supplier):
+    """Synthetic TUI oracle only. Native analytics labels are not payer authority."""
+
+    def __init__(self, lookup):
+        super().__init__()
+        self.lookup = lookup
+        self.root, self.helpers, self.turns = None, (), set()
+        self.helper_legs, self.warmed, self.answered = {}, set(), set()
+        self.title_warmups = self.title_turns = 0
+        self.wallet_seen = False
+
+    async def _bind(self, source, sid):
+        # Native prewarm can race publication of the matched app-server reply.
+        # Never learn an authorized UUID from the provider request itself.
+        async with asyncio.timeout(3):
+            while True:
+                ids = self.lookup()
+                _check(isinstance(ids, dict) and ids.keys() <= {'user', 'thread_title'})
+                root, helpers = ids.get('user'), ids.get('thread_title', [])
+                _check(root is None or _uuid(root))
+                _check(isinstance(helpers, list) and len(helpers) <= 2 and all(_uuid(i) for i in helpers))
+                _check(len(set(helpers)) == len(helpers) and root not in helpers and (root or not helpers))
+                _check(self.root in (None, root) and tuple(helpers[:len(self.helpers)]) == self.helpers)
+                self.root, self.helpers = root, tuple(helpers)
+                if sid == root or sid in helpers or (source == 'user' and root) or len(helpers) == 2:
+                    _check((source == 'user' and sid == root) or (source == 'thread_title' and sid in helpers))
+                    return
+                await asyncio.sleep(.02)
+
+    async def connection(self, ws):
+        try:
+            mode = PATHS.get(ws.request.path)
+            key = SYNTHETIC_KEY if mode == 'host' else self.token
+            headers = ws.request.headers
+            _check(mode and key and headers.get_all('authorization') == ['Bearer ' + key])
+            claims = headers.get_all('x-codex-turn-metadata')
+            _check(len(claims) == 1)
+            header = _object(claims[0])
+            sid, source = header['thread_id'], header['thread_source']
+            _check(_uuid(sid) and header['session_id'] == sid and source in ('user', 'thread_title'))
+            _check(headers.get_all('thread-id') == headers.get_all('session-id') == [sid])
+            _check(header['request_kind'] in ('prewarm', 'turn'))
+            _check(source == 'user' or mode == 'host')
+            await self._bind(source, sid)
+            if mode == 'v':
+                self.wallet_seen = True
+            leg = int(self.wallet_seen)
+            if source == 'thread_title':
+                _check(not leg or (len(self.rows) >= 2 and self.rows[1]['payer'] == 'v'))
+                _check(leg or sid == self.helpers[0])
+                _check(self.helper_legs.get(leg, sid) == sid and self.helper_legs.get(1 - leg) != sid)
+                self.helper_legs[leg] = sid
+            first = True
+
+            def inspect(raw):
+                nonlocal first
+                body = _object(raw)
+                meta = body['client_metadata']
+                detail = _object(meta['x-codex-turn-metadata'])
+                _check(body['type'] == 'response.create' and isinstance(meta, dict))
+                _check(detail['thread_source'] == source and
+                       detail['thread_id'] == meta['thread_id'] == detail['session_id'] == meta['session_id'] == sid)
+                _check(body['model'] == detail['model'] == MODELS[0]
+                       and body['reasoning']['effort'] == detail['reasoning_effort'] == 'low')
+                _check('generate' not in body or type(body['generate']) is bool)
+                warmup = body.get('generate') is False
+                _check(detail['request_kind'] == ('prewarm' if warmup else 'turn'))
+                _check(not warmup or first)
+                first = False
+                _check(source == 'user' or leg == int(self.wallet_seen))
+                if not warmup:
+                    tid = detail['turn_id']
+                    _check(_uuid(tid) and meta['turn_id'] == meta['root_turn_id'] == detail['root_turn_id'] == tid)
+                    _check(tid not in self.turns and len(self.turns) < 5)
+                    if source == 'user':
+                        _check(len(self.rows) < 3 and mode == ('host', 'v', 'host')[len(self.rows)])
+                    self.turns.add(tid)
+                return body
+
+            if source == 'user':
+                class RootSocket:
+                    request = ws.request
+                    send = ws.send
+                    close = ws.close
+
+                    async def __aiter__(self):
+                        async for raw in ws:
+                            inspect(raw)
+                            yield raw
+
+                # All original prompt arming, history, token, wire model/effort,
+                # and prior-reply assertions still apply to every root turn.
+                return await super().connection(RootSocket())
+
+            own_warmup = None
+            async for raw in ws:
+                body = inspect(raw)
+                previous = body.get('previous_response_id')
+                _check(previous is None or (own_warmup is not None and previous == own_warmup))
+                rid = 'resp_' + secrets.token_hex(16)
+                if body.get('generate') is False:
+                    _check(sid not in self.answered and sid not in self.warmed and previous is None)
+                    self.warmed.add(sid)
+                    self.title_warmups += 1
+                    own_warmup, output = rid, []
+                else:
+                    _check(sid not in self.answered and mode == 'host')
+                    fmt = body['text']['format']
+                    schema = fmt['schema']
+                    _check(fmt['type'] == 'json_schema' and fmt['name'] == 'codex_output_schema'
+                           and fmt['strict'] is True and schema['type'] == 'object'
+                           and schema['required'] == ['title'] and schema['additionalProperties'] is False
+                           and schema['properties'] == {'title': {'type': 'string', 'minLength': 1, 'maxLength': 36}})
+                    self.answered.add(sid)
+                    self.title_turns += 1
+                    output = [{'type': 'message', 'id': 'msg_' + secrets.token_hex(16), 'role': 'assistant',
+                               'status': 'completed', 'content': [{'type': 'output_text',
+                               'text': '{"title":"Synthetic workspace"}', 'annotations': []}]}]
+                # Title replies never consume an armed prompt, enter root history,
+                # count as customer answers or set the customer's last answer.
+                for event in frames(body['model'], rid, output):
+                    await ws.send(json.dumps(event))
+        except (ValueError, KeyError, IndexError, AttributeError, TypeError, TimeoutError, OSError):
+            self.rejections.append('foreground_identity')
+            await ws.close(code=1008)
+
+
 @asynccontextmanager
-async def supplier():
+async def supplier(*, foreground_threads=None):
     from websockets.asyncio.server import serve
 
-    sink = Supplier()
+    sink = Supplier() if foreground_threads is None else ForegroundSupplier(foreground_threads)
     async with serve(sink.connection, '127.0.0.1', 0, max_size=2_000_000) as server:
         yield sink, server.sockets[0].getsockname()[1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", [
+    "valid", "legacy", "unwitnessed", "aliased", "wrong_role", "wallet_title", "wrong_auth",
+    "multiple_headers", "wrong_header_session", "wrong_frame_thread", "wrong_nested_thread",
+    "wrong_kind", "wrong_model", "duplicate_key", "duplicate_turn", "duplicate_warmup",
+    "foreign_previous", "wrong_schema", "rebound_witness", "two_helpers", "two_in_one_leg",
+    "helper_reused_across_legs",
+])
+async def test_foreground_title_oracle(case):
+    from types import SimpleNamespace
+
+    from websockets.datastructures import Headers
+
+    root, title, tid, other = [str(UUID(int=i)) for i in range(1, 5)]
+    witness = {'user': root, 'thread_title': [title]}
+    sink = Supplier() if case == 'legacy' else ForegroundSupplier(lambda: witness)
+    sink.prompt, sink.last_answer, sink.token = 'armed-root-input', 'earlier-root-answer', 'ov_native_fixture_only'
+    md = {'thread_source': 'thread_title', 'thread_id': title, 'session_id': title,
+          'request_kind': 'turn', 'turn_id': tid, 'root_turn_id': tid,
+          'model': MODELS[0], 'reasoning_effort': 'low'}
+    header = dict(md, request_kind='prewarm')
+    meta = {'thread_id': title, 'session_id': title, 'turn_id': tid, 'root_turn_id': tid}
+    schema = {'type': 'object', 'properties': {'title': {'type': 'string', 'minLength': 1, 'maxLength': 36}},
+              'required': ['title'], 'additionalProperties': False}
+    body = {'type': 'response.create', 'model': MODELS[0], 'reasoning': {'effort': 'low'}, 'input': [],
+            'text': {'format': {'type': 'json_schema', 'strict': True,
+                                'name': 'codex_output_schema', 'schema': schema}}}
+    if case == 'unwitnessed':
+        witness['thread_title'] = [other, str(UUID(int=5))]
+    elif case == 'aliased':
+        witness['user'] = title
+    elif case == 'wrong_role':
+        header['thread_source'] = 'user'
+    elif case == 'wrong_frame_thread':
+        meta['thread_id'] = root
+    elif case == 'wrong_nested_thread':
+        md['thread_id'] = root
+    elif case == 'wrong_kind':
+        md['request_kind'] = 'prewarm'
+    elif case == 'wrong_model':
+        md['model'] = MODELS[1]
+    elif case == 'foreign_previous':
+        body['previous_response_id'] = 'resp_from_another_connection'
+    elif case == 'wrong_schema':
+        schema['properties']['title']['type'] = 'integer'
+    elif case == 'rebound_witness':
+        sink.root = other
+    mode = 'v' if case == 'wallet_title' else 'host'
+    headers = Headers({'authorization': 'Bearer ' + (sink.token if mode == 'v' else SYNTHETIC_KEY),
+                       'thread-id': title, 'session-id': title, 'x-codex-turn-metadata': json.dumps(header)})
+    if case in ('wrong_header_session', 'wrong_auth'):
+        key = 'session-id' if case == 'wrong_header_session' else 'authorization'
+        del headers[key]
+        headers[key] = other
+    if case == 'multiple_headers':
+        headers['thread-id'] = title
+    raw = json.dumps({**body, 'client_metadata': {**meta, 'x-codex-turn-metadata': json.dumps(md)}})
+    if case == 'duplicate_key':
+        raw = raw.replace('"client_metadata":', '"client_metadata": {}, "client_metadata":')
+    warmup = json.dumps({**body, 'generate': False, 'client_metadata': {
+        **meta, 'x-codex-turn-metadata': json.dumps({**md, 'request_kind': 'prewarm'})}})
+    wire = ([warmup, raw] if case == 'valid' else [raw, raw] if case == 'duplicate_turn'
+            else [warmup, warmup] if case == 'duplicate_warmup' else [raw])
+    answers, closes = [], []
+
+    class WS:
+        request = SimpleNamespace(headers=headers, path=next(p for p, v in PATHS.items() if v == mode))
+
+        async def __aiter__(self):
+            for frame in wire:
+                yield frame
+
+        async def send(self, packet):
+            event = json.loads(packet)
+            if event['type'] == 'response.completed':
+                answers.extend(json.loads(x['content'][0]['text']) for x in event['response']['output'])
+
+        async def close(self, code):
+            closes.append(code)
+
+    await sink.connection(WS())
+    assert (sink.prompt, sink.last_answer, sink.rows) == ('armed-root-input', 'earlier-root-answer', [])
+    if case in ('two_helpers', 'two_in_one_leg', 'helper_reused_across_legs'):
+        assert not sink.rejections and sink.title_turns == 1
+        if case != 'two_in_one_leg':
+            sink.wallet_seen = True
+            sink.rows.extend([{'payer': 'host'}, {'payer': 'v'}])
+        if case != 'helper_reused_across_legs':
+            witness['thread_title'].append(other)
+            for key in ('session-id', 'thread-id', 'x-codex-turn-metadata'):
+                value = headers[key].replace(title, other)
+                del headers[key]
+                headers[key] = value
+            wire[:] = [raw.replace(title, other).replace(tid, str(UUID(int=6)))]
+        await sink.connection(WS())
+        assert sink.title_turns == (2 if case == 'two_helpers' else 1)
+        assert bool(sink.rejections) == (case != 'two_helpers')
+        return
+    if case == 'valid':
+        assert not closes and not sink.rejections and sink.title_turns == sink.title_warmups == 1
+        assert answers == [{'title': 'Synthetic workspace'}]
+    else:
+        assert closes == [1008] and len(sink.rejections) == 1
+        assert answers == ([{'title': 'Synthetic workspace'}] if case == 'duplicate_turn' else [])
+        if case == 'legacy':
+            assert sink.rejections == ['not_current_deliberate_prompt']
 
 
 class Stdio:

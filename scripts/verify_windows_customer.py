@@ -21,6 +21,7 @@ BALANCE = '73.25'
 AFTER_WALLET = '73.24'
 SESSION = 'windows-qa-synthetic'
 CONTROL_RECEIPT = 'control-result'
+THREAD_FILES = {'user': ('qa-user-thread',), 'thread_title': ('qa-title-first', 'qa-title-second')}
 CONTROL_CHECKS = frozenset(('native-route', 'native-inventory', 'native-root', 'native-model',
                             'native-workspace', 'native-fence', 'session-lease', 'wallet-prepare',
                             'wallet-outcome', 'request-boundary'))
@@ -30,6 +31,45 @@ def refused_check(message):
     if isinstance(message, str) and 'Control check: ' in message:
         return next((code for code in CONTROL_CHECKS if message.endswith('Control check: ' + code + '.')), None)
     return None
+
+
+def thread_witness(pending, packet, tracker):
+    from openvegas.integrations.billing_host import session_id
+
+    if not pending or pending[0] != 'thread/start' or 'error' in packet or 'method' in packet:
+        return None
+    thread = packet.get('result', {}).get('thread', {})
+    sid, source = session_id(thread.get('id')), thread.get('threadSource')
+    if (not sid or source not in THREAD_FILES or 'parentThreadId' not in thread
+            or thread['parentThreadId'] is not None):
+        return None
+    title = source == 'thread_title'
+    if thread.get('ephemeral') is not title or sid not in (tracker.cold if title else tracker.roots):
+        return None
+    return source, sid
+
+
+def install_thread_witness(folder):
+    from openvegas.emotes._windows_state import private_windows_directory
+    from openvegas.integrations.windows_customer_codex import NativeThreads
+
+    original = NativeThreads.received
+    confirmed = {k: [] for k in THREAD_FILES}
+
+    def received(tracker, packet):
+        pending = tracker.pending.get(packet.get('id')) if 'method' not in packet else None
+        original(tracker, packet)
+        item = thread_witness(pending, packet, tracker)
+        if item:
+            source, sid = item
+            index = len(confirmed[source])
+            if index >= len(THREAD_FILES[source]) or any(sid in ids for ids in confirmed.values()):
+                raise ValueError('Duplicate witnessed QA thread')
+            with private_windows_directory(folder) as state:
+                state.atomic_write(THREAD_FILES[source][index], sid.encode('ascii'))
+            confirmed[source].append(sid)
+
+    NativeThreads.received = received
 
 
 def cleanup_exit(exc):
@@ -188,6 +228,7 @@ def main(host, exe, port):
     windows_customer.Broker = bank.broker
     if host == 'codex':
         from openvegas.emotes._windows_state import private_windows_directory
+        install_thread_witness(root / 'tmp')
         command = windows_customer.Customer.command
 
         async def observe_result(owner, action, **kwargs):

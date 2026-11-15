@@ -126,7 +126,7 @@ class Terminal:
                 super().reset_mode(*modes, **kwargs)
 
         self.process = process
-        self.exit_code = exit_code if exit_code is not None else getattr(process, 'get_exitstatus', None)
+        self.exit_code = exit_code
         self.screen = Screen(140, 42)
         self.vt = pyte.Stream(self.screen)
         self.before_input = ''
@@ -193,17 +193,19 @@ class Terminal:
 
     def require_success(self):
         deadline = time.monotonic() + 15
-        while self.process.isalive() and time.monotonic() < deadline:
+        if self.exit_code is None:
+            raise CheckpointMiss(Failure.EXIT_CODE)
+        while (status := self.exit_code()) is None:
+            if time.monotonic() >= deadline:
+                raise CheckpointMiss(Failure.EXIT_TIMEOUT)
             try:
-                self.read()
-            except (EOFError, OSError):
-                # ConPTY may close its output pipe before exit status is ready.
-                # Only the observed process exit below constitutes success.
+                # Drain only: rendering here can send a terminal query response
+                # to a console that's already closed. Neither EOF nor a closed
+                # pipe proves that the supervisor exited successfully.
+                self.process.read(16384, blocking=False)
+            except (EOFError, OSError, RuntimeError):
                 pass
             time.sleep(.05)
-        if self.process.isalive():
-            raise CheckpointMiss(Failure.EXIT_TIMEOUT)
-        status = self.exit_code()
         if status != 0:
             raise CheckpointMiss({23: Failure.BANK, 26: Failure.LAUNCH_EXCEPTION, 31: Failure.RECEIPT,
                                   32: Failure.BRIDGE, 33: Failure.SESSION_CLOSE, 34: Failure.SERVER_CLOSE,
@@ -230,11 +232,17 @@ def isolated_console(script, args, env, cwd):
     dll.WaitForSingleObject.restype = W.DWORD
     dll.GetExitCodeProcess.argtypes = (W.HANDLE, ctypes.POINTER(W.DWORD))
     dll.GetExitCodeProcess.restype = W.BOOL
+    dll.GetCurrentProcess.argtypes = ()
+    dll.GetCurrentProcess.restype = W.HANDLE
+    dll.DuplicateHandle.argtypes = (W.HANDLE, W.HANDLE, W.HANDLE, ctypes.POINTER(W.HANDLE),
+                                     W.DWORD, W.BOOL, W.DWORD)
+    dll.DuplicateHandle.restype = W.BOOL
     job = dll.CreateJobObjectW(None, None)
     if not job:
         raise ctypes.WinError(ctypes.get_last_error())
     process = PTY(140, 42, backend=Backend.ConPTY)
     owned = False
+    retained = W.HANDLE()
     try:
         block = '\0'.join(f'{k}={v}' for k, v in sorted(env.items(), key=lambda pair: pair[0].upper())) + '\0'
         cmd = ' ' + subprocess.list2cmdline(['-I', '-B', str(script), *args])
@@ -246,12 +254,19 @@ def isolated_console(script, args, env, cwd):
             dll.TerminateProcess(process.fd, 1)
             raise RuntimeError('Cannot contain the test process tree.')
         owned = True
+        here = dll.GetCurrentProcess()
+        if not dll.DuplicateHandle(here, process.fd, here, ctypes.byref(retained),
+                                   0x00101000, False, 0):  # SYNCHRONIZE | QUERY_LIMITED_INFORMATION
+            raise CheckpointMiss(Failure.EXIT_CODE)
+
         def exit_code():
-            # Use the verified retained child handle, not PTY pipe EOF or a PID lookup.
-            if dll.WaitForSingleObject(process.fd, 1000) != 0:
-                raise CheckpointMiss(Failure.EXIT_TIMEOUT)
+            result = dll.WaitForSingleObject(retained, 0)
+            if result == 258:  # WAIT_TIMEOUT: still running
+                return None
+            if result != 0:
+                raise CheckpointMiss(Failure.EXIT_CODE)
             code = W.DWORD()
-            if not dll.GetExitCodeProcess(process.fd, ctypes.byref(code)):
+            if not dll.GetExitCodeProcess(retained, ctypes.byref(code)):
                 raise CheckpointMiss(Failure.EXIT_CODE)
             return code.value
 
@@ -265,4 +280,6 @@ def isolated_console(script, args, env, cwd):
             if owned and not dll.TerminateJobObject(job, 1):
                 raise RuntimeError('Cannot reap the contained test process tree.')
         finally:
+            if retained:
+                dll.CloseHandle(retained)
             dll.CloseHandle(job)
