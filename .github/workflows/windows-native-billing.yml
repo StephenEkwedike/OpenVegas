@@ -1,4 +1,5 @@
 name: Windows native billing QA (offline)
+run-name: ${{ contains(github.event.head_commit.message, '[qa-foreground:') && 'Targeted Windows foreground QA (not full certification)' || 'Windows native billing QA (offline)' }}
 
 on:
   push:
@@ -17,6 +18,7 @@ jobs:
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1'
       DISABLE_TELEMETRY: '1'
       DISABLE_AUTOUPDATER: '1'
+      QA_FOREGROUND: ${{ contains(github.event.head_commit.message, '[qa-foreground:claude]') && 'claude' || contains(github.event.head_commit.message, '[qa-foreground:codex]') && 'codex' || contains(github.event.head_commit.message, '[qa-foreground:both]') && 'both' || '' }}
     defaults:
       run:
         shell: pwsh
@@ -103,6 +105,7 @@ jobs:
             }
           }
       - name: Native image, bundled catalog and peer ownership
+        if: ${{ success() && env.QA_FOREGROUND == '' }}
         run: |
           python -B -m pytest "--junitxml=$env:RUNNER_TEMP/images.xml" tests/test_integrations/test_windows_native_image.py tests/test_integrations/test_inference_router_windows.py --deselect=tests/test_integrations/test_inference_router_windows.py::test_refuse_wrong_os *> $null
           exit $LASTEXITCODE
@@ -111,21 +114,27 @@ jobs:
         env:
           OV_WINDOWS_CONPTY_ISOLATED: '1'
         run: |
-          python -B -m pytest "--junitxml=$env:RUNNER_TEMP/customer.xml" tests/test_integrations/test_windows_installed_switch.py tests/test_integrations/test_windows_customer.py *> $null
+          $fixture = 'tests/test_integrations/test_windows_installed_switch.py'
+          $cases = @($fixture, 'tests/test_integrations/test_windows_customer.py')
+          if ($env:QA_FOREGROUND) {
+            $hostsToTest = if ($env:QA_FOREGROUND -eq 'both') { 'claude', 'codex' } else { $env:QA_FOREGROUND }
+            $cases = @(foreach ($client in $hostsToTest) { "${fixture}::test_installed_customer_switch[$client]" })
+          }
+          python -B -m pytest "--junitxml=$env:RUNNER_TEMP/customer.xml" @cases *> $null
           exit $LASTEXITCODE
       - name: Native session lease and owner crash recovery
-        if: ${{ !cancelled() && steps.isolation.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.isolation.outcome == 'success' && env.QA_FOREGROUND == '' }}
         run: |
           python -B -m pytest "--junitxml=$env:RUNNER_TEMP/lease.xml" tests/test_integrations/test_windows_session_lease.py *> $null
           exit $LASTEXITCODE
       - name: Terminal control, CLI and native console restoration
         id: terminal
-        if: ${{ !cancelled() && steps.isolation.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.isolation.outcome == 'success' && env.QA_FOREGROUND == '' }}
         run: |
           python -B -m pytest "--junitxml=$env:RUNNER_TEMP/terminal.xml" tests/test_integrations/test_windows_terminal_host.py tests/test_integrations/test_inference_router_session.py::test_peer_cleanup_error_cannot_skip_wallet_revocation *> $null
           exit $LASTEXITCODE
       - name: Installed Codex app-server against synthetic loopback
-        if: ${{ !cancelled() && steps.isolation.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.isolation.outcome == 'success' && env.QA_FOREGROUND == '' }}
         env:
           OV_WINDOWS_CODEX_PAYER_PROBE: '1'
         run: |
@@ -133,11 +142,11 @@ jobs:
           python -B -m pytest "--junitxml=$env:RUNNER_TEMP/codex.xml" tests/test_integrations/test_windows_codex_payer_roundtrip.py *> $null
           exit $LASTEXITCODE
       - name: Installed Claude stream against synthetic loopback
-        if: ${{ !cancelled() && steps.isolation.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.isolation.outcome == 'success' && env.QA_FOREGROUND == '' }}
         run: |
           python -B -m pytest "--junitxml=$env:RUNNER_TEMP/claude.xml" tests/test_integrations/test_windows_claude_stream_native.py *> $null
           exit $LASTEXITCODE
-      - name: Require all named native passes and reject skips
+      - name: Require selected named native passes and reject skips
         if: ${{ !cancelled() && steps.isolation.outcome == 'success' }}
         run: |
           $matrix = foreach ($effort in 'low','high') {
@@ -153,6 +162,10 @@ jobs:
             claude = @('test_pinned_claude_stream_json_round_trip')
             customer = @('test_installed_customer_switch[codex]','test_installed_customer_switch[claude]','test_bad_bank_request_cannot_issue_or_revoke')
           }
+          if ($env:QA_FOREGROUND) {
+            $hostsToTest = if ($env:QA_FOREGROUND -eq 'both') { 'claude', 'codex' } else { $env:QA_FOREGROUND }
+            $required = [ordered]@{ customer = @(foreach ($client in $hostsToTest) { "test_installed_customer_switch[$client]" }) }
+          }
           $ok = $true
           foreach ($group in $required.Keys) {
             $report = Join-Path $env:RUNNER_TEMP "$group.xml"
@@ -166,7 +179,7 @@ jobs:
                 $label = $case.GetAttribute('name') -replace '[^a-zA-Z0-9_.\[\]-]', '_'
                 if ($group -eq 'customer') {
                   $stage = $case.SelectSingleNode("(properties/property[@name='qa_stage'])[last()]")
-                  if ($stage -and $stage.value -match '^(isolation|conpty|native-start|switch-(v|host)|status-[012]|answer-[012]|shutdown)$') {
+                  if ($stage -and $stage.value -match '^(isolation|conpty|native-start|composer|switch-(v|host)|status-[012]|answer-[012]|shutdown)$') {
                     Write-Output "::error::$label checkpoint: $($stage.value)"
                   }
                 }
@@ -178,9 +191,12 @@ jobs:
               if (@($passed | Where-Object { $_ -ceq $name }).Count -ne 1) {
                 Write-Output "::error::Missing required pass: $name"
                 $ok = $false
+              } elseif ($env:QA_FOREGROUND) {
+                Write-Output "::notice::Passed: $name"
               }
             }
             "$group : $($passed.Count) of $($cases.Count) selected cases passed" >> $env:GITHUB_STEP_SUMMARY
           }
           if (!$ok) { throw 'One or more Windows QA gates did not pass' }
+          if ($env:QA_FOREGROUND) { "Targeted foreground QA only: $env:QA_FOREGROUND at $env:GITHUB_SHA." >> $env:GITHUB_STEP_SUMMARY; exit 0 }
           "Installed Windows CLI/Python wheel and native ConPTY with synthetic financial services at $env:GITHUB_SHA. No personal subscription, real payment, npm installer or release certification." >> $env:GITHUB_STEP_SUMMARY

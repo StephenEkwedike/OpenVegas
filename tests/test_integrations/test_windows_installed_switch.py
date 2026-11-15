@@ -103,7 +103,7 @@ def configure(host, exe, env, cwd):
         env['PATH'] += os.pathsep + str(git_cmd)
         (home / '.claude.json').write_text(json.dumps({'hasCompletedOnboarding': True, 'theme': 'dark',
             'customApiKeyResponses': {'approved': [SYNTHETIC_KEY[-20:]]},
-            'projects': {str(cwd): {'hasTrustDialogAccepted': True}}}), encoding='utf-8')
+            'projects': {Path(cwd).resolve().as_posix(): {'hasTrustDialogAccepted': True}}}), encoding='utf-8')
 
 
 def drive(host, sink, port, checkpoint):
@@ -121,6 +121,7 @@ def drive(host, sink, port, checkpoint):
         with conpty.isolated_console(Path(qa.__file__), [host, exe, str(port)], env, cwd) as term:
             checkpoint('native-start')
             term.expect(r'Windows managed ' + host, 'managed launch')
+            checkpoint('composer')
             term.expect(r'OpenAI\s+Codex|Claude\s+Code|shortcuts|for help|Sonnet\s+4\.6', 'native composer')
             time.sleep(.75)
             for i, mode in enumerate(('host', 'v', 'host')):
