@@ -10,6 +10,7 @@ import asyncio
 import ctypes
 import os
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -190,12 +191,26 @@ class OwnedLeader(_PinnedProcess):
         self._reap()
 
 
+def _private_stderr(value):
+    if value == subprocess.DEVNULL:
+        return True
+    if os.name != 'posix' or type(value) is not int or value <= 2:
+        return False
+    import fcntl
+    try:
+        info = os.fstat(value)
+        return (stat.S_ISFIFO(info.st_mode) and info.st_uid == os.geteuid()
+                and fcntl.fcntl(value, fcntl.F_GETFL) & os.O_ACCMODE == os.O_WRONLY)
+    except OSError:
+        return False
+
+
 async def spawn(*args, **kwargs):
     """Used inside the route's cancellation-settled launch transaction."""
     _contract()
     if (kwargs.get('start_new_session') is not True
             or kwargs.get('stdin') != subprocess.DEVNULL
-            or kwargs.get('stderr') != subprocess.DEVNULL
+            or not _private_stderr(kwargs.get('stderr'))
             or kwargs.get('stdout') not in (subprocess.PIPE, subprocess.DEVNULL)):
         raise IntegrationError('Unsupported owned native process launch.')
 

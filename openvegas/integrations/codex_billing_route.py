@@ -30,6 +30,68 @@ _POLICY_CONTEXT = {}
 _LIVE_SOURCE_PROOFS = {}
 
 
+class _StartupDiagnostics:
+    """Drain stderr without retaining native paths, tokens or arbitrary messages."""
+
+    _LABELS = (
+        ('configuration loading failed', (b'failed to load config', b'error loading config')),
+        ('a permission was denied', (b'permission denied', b'operation not permitted')),
+        ('listener setup failed', (b'address already in use', b'failed to bind')),
+        ('a launch argument was rejected', (b'unexpected argument', b'unrecognized option')),
+    )
+
+    def __enter__(self):
+        self.reader, self.writer = os.pipe()
+        self.loop = asyncio.get_running_loop()
+        self.tail, self.labels = b'', set()
+        try:
+            os.set_blocking(self.reader, False)
+            self.loop.add_reader(self.reader, self.drain)
+        except BaseException:
+            os.close(self.reader)
+            os.close(self.writer)
+            raise
+        return self
+
+    def launched(self):
+        os.close(self.writer)
+        self.writer = None
+
+    def drain(self):
+        # Bound each callback as well as memory; a noisy child cannot fill its pipe
+        # or monopolize the event loop while the listener is starting.
+        for _ in range(8):
+            if self.reader is None:
+                return
+            try:
+                chunk = os.read(self.reader, 4096)
+            except BlockingIOError:
+                return
+            if not chunk:
+                self.loop.remove_reader(self.reader)
+                return
+            data = self.tail + chunk.lower()
+            self.labels.update(label for label, patterns in self._LABELS
+                               if any(pattern in data for pattern in patterns))
+            self.tail = data[-32:]
+
+    def failure(self):
+        self.drain()
+        details = '; '.join(label for label, _ in self._LABELS if label in self.labels)
+        return ('Private Codex server did not start. Native startup reported: ' + details
+                + '. No prompt submitted.' if details else
+                'Private Codex server did not start. No prompt submitted.')
+
+    def __exit__(self, *exc):
+        self.loop.remove_reader(self.reader)
+        os.close(self.reader)
+        self.reader = None
+        if self.writer is not None:
+            os.close(self.writer)
+            self.writer = None
+        self.tail = b''
+
+
 def _handoff_server_argv(argv):
     # Shorten only Codex's own grace period for idle, unsubscribed runtimes.
     # Never infer that a second runtime is safe to terminate.
@@ -46,19 +108,21 @@ def _launch_scope(env, cwd):
 
 @asynccontextmanager
 async def _private_server(argv, env, cwd):
-    with tempfile.TemporaryDirectory(prefix='ov-policy-', dir=runtime_parent('/tmp')) as directory:
+    with tempfile.TemporaryDirectory(prefix='ov-policy-', dir=runtime_parent('/tmp')) as directory, \
+            _StartupDiagnostics() as diagnostics:
         socket = Path(directory) / 'native.sock'
         endpoint = 'unix://' + str(socket)
         process, cancelled = await _settle(asyncio.create_task(_spawn_owned(
             *argv(endpoint), env=env, cwd=cwd, stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL, start_new_session=True)))
+            stdout=asyncio.subprocess.DEVNULL, stderr=diagnostics.writer, start_new_session=True)))
+        diagnostics.launched()
         try:
             if cancelled:
                 raise asyncio.CancelledError
             async with asyncio.timeout(12):
                 while not socket.exists():
                     if process.returncode is not None:
-                        raise IntegrationError('Private Codex server did not start.')
+                        raise IntegrationError(diagnostics.failure())
                     await asyncio.sleep(.01)
             socket.chmod(0o600)
             _OWNED_SERVERS[endpoint] = process

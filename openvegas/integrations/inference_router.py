@@ -679,9 +679,14 @@ async def serve(router):
     import uvicorn
 
     sock = socket.socket()
-    sock.bind(('127.0.0.1', 0))
-    sock.listen(128)
-    sock.setblocking(False)
+    try:
+        sock.bind(('127.0.0.1', 0))
+        sock.listen(128)
+        sock.setblocking(False)
+    except OSError:
+        sock.close()
+        raise IntegrationError('This environment could not open the private local inference connection. '
+                               'No native chat, billing switch or model request was started.') from None
     router.authority = f'127.0.0.1:{sock.getsockname()[1]}'
     owned_client = router.client is None
     if owned_client:

@@ -26,6 +26,8 @@ from .credentials import IntegrationError
 from .inference_router_adapter import VERSIONS, ProviderAdapter
 from .inference_router_fixture import SYNTHETIC_KEY
 
+MANAGED_REHEARSAL = 'OPENVEGAS_WINDOWS_MANAGED_REHEARSAL'
+
 
 def find_entry(host, path):
     # Windows SearchPath/shutil.which on older Python can implicitly search
@@ -221,6 +223,10 @@ def launch(host, args=(), *, fixture_port=None, managed=False):
         raise IntegrationError('Native Windows console and a supported host are required.')
     if os.environ.get('OPENVEGAS_NATIVE_FIXTURE') is not None:
         raise IntegrationError('Do not mix POSIX fixtures with the separate Windows rehearsal.')
+    rehearsal = os.environ.get(MANAGED_REHEARSAL)
+    if rehearsal is not None and (rehearsal != '1' or managed or host != 'codex' or args
+                                  or type(fixture_port) is not int or not 1 <= fixture_port <= 65535):
+        raise IntegrationError('Managed rehearsal requires Codex and an explicit Windows fixture port.')
     entry = find_entry(host, os.environ.get('PATH', ''))
     if managed:
         if args or fixture_port is not None:
@@ -244,9 +250,14 @@ def launch(host, args=(), *, fixture_port=None, managed=False):
         with terminal.console_modes():
             return asyncio.run(run_host([exe, *args], host_environment() or os.environ))
     with (pinned_windows_image(host, entry, VERSIONS[host]) as exe, terminal.console_modes(),
-          fresh_environment(host) as (env, cwd), terminal._directory() as directory):
+          fresh_environment(host) as (env, cwd)):
+        if rehearsal is not None:
+            from .windows_managed_rehearsal import run
+            click.echo('Synthetic managed Codex rehearsal only. Requires externally enforced no egress.', err=True)
+            return asyncio.run(run(exe, fixture_port, env, cwd))
         def announce(sid):
             click.echo('Synthetic payer rehearsal only. From another terminal: '
                        f'ov integration terminal --windows-session {sid} --payer status '
                        '(replace status with host or v to switch).', err=True)
-        return asyncio.run(run_routed(host, exe, fixture_port, env, cwd, directory, announce))
+        with terminal._directory() as directory:
+            return asyncio.run(run_routed(host, exe, fixture_port, env, cwd, directory, announce))
