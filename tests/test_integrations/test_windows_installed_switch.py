@@ -103,7 +103,18 @@ def configure(host, exe, env, cwd):
         env['PATH'] += os.pathsep + str(git_cmd)
         (home / '.claude.json').write_text(json.dumps({'hasCompletedOnboarding': True, 'theme': 'dark',
             'customApiKeyResponses': {'approved': [SYNTHETIC_KEY[-20:]]},
-            'projects': {Path(cwd).resolve().as_posix(): {'hasTrustDialogAccepted': True}}}), encoding='utf-8')
+            'projects': {Path(cwd).as_posix(): {'hasTrustDialogAccepted': True}}}), encoding='utf-8')
+
+
+def canonical_fixture(launcher, host, env, cwd):
+    # Windows TEMP can use an 8.3 alias. Give the child and its synthetic
+    # profile one path spelling; never add a second trust entry or trust a parent.
+    root = Path(env['USERPROFILE']).resolve(strict=True)
+    work = root / 'work'
+    if (not re.fullmatch('ov-rehearsal-[0-9a-f]{32}', root.name)
+            or not work.samefile(cwd) or any(work.iterdir())):
+        raise ValueError('Expected the empty disposable fixture workspace.')
+    return launcher._fixture_env(host, root, Path(env['SystemRoot'])), str(work)
 
 
 def drive(host, sink, port, checkpoint):
@@ -116,6 +127,7 @@ def drive(host, sink, port, checkpoint):
     conpty.require_hosted_lane()
     with (pinned_windows_image(host, entry, VERSIONS[host]) as exe,
           launcher.fresh_environment(host) as (env, cwd)):
+        env, cwd = canonical_fixture(launcher, host, env, cwd)
         configure(host, exe, env, cwd)
         checkpoint('conpty')
         with conpty.isolated_console(Path(qa.__file__), [host, exe, str(port)], env, cwd) as term:
@@ -249,6 +261,7 @@ def test_split_primary_device_query_replies_once_without_typing_a_command():
 
 def test_terminal_failure_labels_are_closed_and_no_generic_banner_accepts_trust():
     assert conpty.screen_failure('switch', 'Control check: native-root.') is conpty.Failure.ROOT
+    assert conpty.screen_failure('switch', 'Switch refused. Control check: wallet-prepare.') is conpty.Failure.WALLET_PREPARE
     assert conpty.screen_failure('switch', 'Control check: arbitrary-private-text.') is None
     assert conpty.screen_failure('claude-start', 'Claude Code: Do you trust this folder?') is conpty.Failure.TRUST
     assert conpty.screen_failure('claude-start', 'Claude Code for testing') is None
@@ -256,3 +269,18 @@ def test_terminal_failure_labels_are_closed_and_no_generic_banner_accepts_trust(
     assert conpty.screen_failure('claude-control', 'unrelated unknown command') is None
     with pytest.raises(ValueError):
         conpty.CheckpointMiss('private-text')
+
+
+def test_fixture_reuses_only_the_exact_empty_workspace(tmp_path):
+    from openvegas.integrations import windows_billing_host as launcher
+    root = tmp_path / ('ov-rehearsal-' + 'a' * 32)
+    work = root / 'work'
+    work.mkdir(parents=True)
+    source = {'USERPROFILE': str(root), 'SystemRoot': str(tmp_path)}
+    env, cwd = canonical_fixture(launcher, 'claude', source, work)
+    assert cwd == str(work.resolve()) and env['USERPROFILE'] == str(root.resolve())
+    with pytest.raises(ValueError):
+        canonical_fixture(launcher, 'claude', source, tmp_path)
+    (work / 'not-empty').touch()
+    with pytest.raises(ValueError):
+        canonical_fixture(launcher, 'claude', source, work)

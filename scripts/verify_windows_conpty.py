@@ -44,6 +44,9 @@ class Failure(Enum):
     FENCE = 'native-fence'
     LEASE = 'session-lease'
     COMMAND = 'command-unavailable'
+    WALLET_PREPARE = 'wallet-prepare'
+    WALLET_OUTCOME = 'wallet-outcome'
+    REQUEST = 'request-boundary'
 
 
 class CheckpointMiss(RuntimeError):
@@ -71,7 +74,8 @@ def screen_failure(stage, frame):
             return Failure.COMMAND
     if stage in ('switch', 'claude-control'):
         for reason in (Failure.ROUTE, Failure.INVENTORY, Failure.ROOT, Failure.MODEL,
-                       Failure.WORKSPACE, Failure.FENCE, Failure.LEASE):
+                       Failure.WORKSPACE, Failure.FENCE, Failure.LEASE, Failure.WALLET_PREPARE,
+                       Failure.WALLET_OUTCOME, Failure.REQUEST):
             if 'control check: ' + reason.value + '.' in text:
                 return reason
         if 'local control busy' in text or 'billing control busy' in text:
@@ -139,7 +143,8 @@ class Terminal:
                     Failure.TRUST, Failure.LOGIN, Failure.KEY, Failure.SETUP, Failure.ARGS, Failure.BASH):
                 # Never send keystrokes to a native trust or authentication dialog.
                 raise CheckpointMiss(observed)
-            reason = observed or reason
+            if observed and (reason is None or observed not in (Failure.REFUSED, Failure.HELD)):
+                reason = observed
             visible = Counter(m.group() for m in regex.finditer(frame))
             fresh = visible - old
             if fresh:

@@ -165,6 +165,7 @@ jobs:
               'startup-dialog', 'git-bash-error', 'native-option-error', 'switch-busy',
               'switch-held', 'switch-refused', 'native-route', 'native-inventory', 'native-root',
               'native-model', 'native-workspace', 'native-fence', 'session-lease', 'command-unavailable',
+              'wallet-prepare', 'wallet-outcome', 'request-boundary',
           )
           required = {
               'images': ('test_launches_official_windows_image[codex-0.166.0]',
