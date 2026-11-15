@@ -122,8 +122,8 @@ jobs:
         env:
           EXPECTED_TARGET: ${{ matrix.target }}
         run: |
-          python -c "import json,os; r=json.load(open('dist/native-candidate/candidate.json')); assert r['version']=='0.3.19' and r['os']+'-'+r['arch']==os.environ['EXPECTED_TARGET']; assert r['source_sha256']=='7d888317c941de44d483daf5ef60c46924489a0f78d4d161810b6d02f09cac59'"
-          python -B dist/git-source/scripts/verify_native_router_candidate.py verify --frozen dist/frozen --freeze-sha256 40b6b57911abd203ef7d492a30e4d1c9bf95d3325587b1f6c74e85f55e5c9692 --candidate dist/native-candidate --output dist/native-candidate/independent-verified.json
+          python -c "import json,os; r=json.load(open('dist/native-candidate/candidate.json')); assert r['version']=='0.3.19' and r['os']+'-'+r['arch']==os.environ['EXPECTED_TARGET']; assert r['source_sha256']=='d06f59169b9d8fd45a51663dc7d36c3f989df3bc7c3a42a793685fdac381fc22'"
+          python -B dist/git-source/scripts/verify_native_router_candidate.py verify --frozen dist/frozen --freeze-sha256 ef56c31b384be905cca6b292b656b94bb4e8d78e719b398c2f13dc0e6e16f230 --candidate dist/native-candidate --output dist/native-candidate/independent-verified.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -217,3 +217,12 @@ jobs:
           node -e 'const fs=require("fs"),h=require("crypto");const t=process.platform+"-"+process.arch,r=require("./node_modules/openvegas-ai/release.json"),p=r.platforms[t];if(r.version!=="0.3.19"||h.createHash("sha256").update(fs.readFileSync("node_modules/"+p.package+"/bin/"+p.binary)).digest("hex")!==p.sha256)process.exit(1)'
           node node_modules/openvegas-ai/bin/openvegas.js --version | grep '0\.3\.19'
           node node_modules/openvegas-ai/bin/openvegas.js --verify-bundle
+      - name: Linux system libraries survive a managed shell launch
+        if: runner.os == 'Linux'
+        shell: bash
+        working-directory: installed
+        run: |
+          set -eu
+          export OV_EXPECT_LIBRARY="$RUNNER_TEMP/openvegas-linker-probe"
+          LD_LIBRARY_PATH="$OV_EXPECT_LIBRARY" node node_modules/openvegas-ai/bin/openvegas.js --_terminal-relay -- /bin/sh -c 'test "$LD_LIBRARY_PATH" = "$OV_EXPECT_LIBRARY" && node --version'
+          env -u LD_LIBRARY_PATH -u LD_LIBRARY_PATH_ORIG node node_modules/openvegas-ai/bin/openvegas.js --_terminal-relay -- /bin/sh -c 'test -z "${LD_LIBRARY_PATH-}" && node --version'

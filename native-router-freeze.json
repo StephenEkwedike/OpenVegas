@@ -1,6 +1,6 @@
 {
   "baseline_build_inputs_sha256": null,
-  "baseline_freeze_sha256": "416b1e5ae2f4cf890ca019f7e825e5116652bc9b9375fde891b273282aa76d95",
+  "baseline_freeze_sha256": "40b6b57911abd203ef7d492a30e4d1c9bf95d3325587b1f6c74e85f55e5c9692",
   "checkout_native_inputs": {
     "openvegas/integrations/billing_host.py": "4693b1225a63387b0605ef0db84e223bfb9fffa5dcbe889010ee173e2884a172",
     "openvegas/integrations/codex_live_transport.py": "5985e915c2acd5964fa4754aa9978e888e1ad8abdcb824f3d1132812a51e5364",
@@ -23,6 +23,7 @@
     "openvegas/integrations/native_child_environment.py": "481c9b107a32e3dcf5f5c2cbcc930eb9eba17b55d82a60e543308bc148c7c684",
     "openvegas/integrations/session_ownership.py": "65d2e00a3c7ce60ba19176aaffee3e6a4247aef82593e17dc8bb8896a30fdff9",
     "openvegas/integrations/setup_progress.py": "c7d5db949494e7b070bf14b0a310ea97534e71b7e63946a9baaeed11ccfc36ed",
+    "openvegas/integrations/terminal_relay.py": "fa54c523376e1d8b20d8e70563543f8cce91a3cb5dc9a262670e49237eb1b119",
     "openvegas/integrations/windows_billing_host.py": "22163229ebdd6bc09b8c31797ae333f8b8722d54208fd5dbeed1a3ce52d87456",
     "openvegas/integrations/windows_customer.py": "5f37e20966d46530e400a3815a2011ca3b9017354c3f2efba368455cdd0c6e9b",
     "openvegas/integrations/windows_customer_claude.py": "af522a5e54d216676b80902411c71a38890dcbfc7878badb7e3deebddb164de7",
@@ -33,7 +34,7 @@
     "scripts/frozen_entry.py": "1f39353e7d62f5a12259550cbbd0524adaaa165984d954960a0f3aa37c10a505"
   },
   "format": "openvegas-native-router-candidate-v1",
-  "freezer_sha256": "1c053bf57341ff0a9a0d60154cae719e6d995067f904537b4a7374fb0be5a146",
+  "freezer_sha256": "a6624c946e4ccb89c692261234d6efe6ee590fd02df6568d34476c9444be98bf",
   "frozen": true,
   "inputs": {
     "cli": {
@@ -281,7 +282,7 @@
       "openvegas/integrations/staged_generation.py": "46f0cd09b7e5b8958bcc7aaf9a46cb1ba2b689e8a72d2a593acb8de663f2402e",
       "openvegas/integrations/terminal_handoff.py": "93508bc71817eede7de1ab223c13704d36cbfb1377f67bae93809c3e994cedc4",
       "openvegas/integrations/terminal_profile.py": "e33949ed36431d58bb05f051bc39287efa606a48ec79cbac74a2cd614a180916",
-      "openvegas/integrations/terminal_relay.py": "45b0316a9f8402df51d52b3aaf548227d265794527b9181886e76978bcf0caa8",
+      "openvegas/integrations/terminal_relay.py": "fa54c523376e1d8b20d8e70563543f8cce91a3cb5dc9a262670e49237eb1b119",
       "openvegas/integrations/terminal_shell.py": "5c5835c3b50a032e73835af39cb6c528cfd3db45897b5f0abbdfd29966fa7453",
       "openvegas/integrations/terminal_wallet.py": "fd7270c0c13a6a159d76095e67b64e8b729a031bec3a084c8c71fe5a65828de5",
       "openvegas/integrations/use.py": "f6eb6ccbd849323c21d2adab36c1d5bb7bd5bc0761dd17e42295df51c368a421",
@@ -376,7 +377,7 @@
     "native_terminal_balance_display": "not_run",
     "permission_and_tool_continuity": "not_run"
   },
-  "preparation": "Bundle ALSA-only Linux audio, notices and corresponding sources on both architectures.",
+  "preparation": "Keep bundled linker paths out of managed shells. No release or billing change.",
   "publication_approved": false,
   "published": false,
   "version": "0.3.19"

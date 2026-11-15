@@ -158,10 +158,15 @@ def stop_child(pid, *, timeout=.25):
 
 
 def run(shell):
+    from .native_child_environment import external_child_environment
+
+    # The user's shell and its commands must use the system linker, not
+    # PyInstaller's private libraries from the relay process.
+    child_env = external_child_environment(os.environ)
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         # Shell -c used by profile verification does not require a relay.
         if "-c" in shell:
-            os.execvpe(shell[0], shell, os.environ)
+            os.execvpe(shell[0], shell, child_env)
         raise RuntimeError("OpenVegas Games requires an interactive terminal.")
     if os.tcgetpgrp(0) != os.getpgrp():
         raise RuntimeError("OpenVegas Games does not own the foreground terminal.")
@@ -193,7 +198,7 @@ def run(shell):
     os.chmod(path, 0o600)
     listener.listen(2)
     from .terminal_shell import prepare
-    shell_env = prepare(shell, {**os.environ, SOCKET_ENV: path, TOKEN_ENV: token},
+    shell_env = prepare(shell, {**child_env, SOCKET_ENV: path, TOKEN_ENV: token},
                         Path(directory.name) / "shell")
 
     def resize(*_):
