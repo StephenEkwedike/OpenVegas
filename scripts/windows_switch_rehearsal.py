@@ -58,6 +58,9 @@ class Fixture:
         self.lock = threading.Lock()
         self.root, self.denied_titles, self.first_fault = None, 0, None
         self.denied_wallet = 0
+        self.excess_titles = self.after_seal = self.extra_root = 0
+        self.clean_exit = self.sealed = False
+        self.sent = {a: threading.Event() for a in self.answers}
         self.issue = ContextVar("wire-issue", default="wire")
 
     def arm(self, i):
@@ -68,6 +71,10 @@ class Fixture:
     def turn(self, mode, body, previous=(), root=None):
         with self.lock:
             i = len(self.rows)
+            if self.sealed:
+                self.issue.set("extra-root")
+                self.extra_root+=1
+                raise ValueError("Sealed foreground series")
             self.issue.set("unarmed" if self.armed != i else "payer")
             check(i < len(MODES) and self.armed == i and mode == MODES[i] and not self.bad)
             self.issue.set("model-or-shape")
@@ -89,6 +96,7 @@ class Fixture:
                 self.root = root
             self.model, self.armed = model, None
             self.rows.append(mode)
+            self.sealed = len(self.rows) == len(MODES)
             self.issue.set("none")
             return self.answers[i], [*expected, ("assistant", self.answers[i])]
 
@@ -112,12 +120,16 @@ class Fixture:
                     self.issue.set("helper-root")
                     check(self.root and root!=self.root)
                     self.issue.set("helper-limit")
+                    if self.sealed:
+                        self.after_seal+=1
+                    if mode=="v":
+                        self.denied_wallet+=1
+                    if self.denied_titles>=12:
+                        self.excess_titles+=1
                     check(self.denied_titles<12)
                     self.denied_titles+=1
                     # A wallet helper is a permanent final gate failure. Refuse it
                     # immediately; never let it consume the separate root nonce.
-                    if mode=="v":
-                        self.denied_wallet+=1
                     if scope["type"]=="websocket":
                         check((await receive())["type"]=="websocket.connect")
                         await send({"type":"websocket.close","code":1008})
@@ -146,6 +158,7 @@ class Fixture:
                 check(len(raw) <= LIMIT and dec.eof and not dec.unused_data)
             body = json.loads(raw)
             path = scope["path"]
+            answer = None
             if self.host == "claude" and self.routes(path, "messages/count_tokens"):
                 mime, data = b"application/json", b'{"input_tokens":12}'
             else:
@@ -156,6 +169,8 @@ class Fixture:
                                 for e in frames(self.host, body["model"], answer, "resp_" + token_hex(12)))
             await send({"type": "http.response.start", "status": 200, "headers": [(b"content-type", mime)]})
             await send({"type": "http.response.body", "body": data})
+            if answer:
+                self.sent[answer].set()
         except Exception:
             self.first_fault=self.first_fault or self.issue.get()
 
@@ -189,6 +204,8 @@ class Fixture:
                 answer, history[rid] = self.turn(mode, body, prior, root)
             for e in frames("codex", body["model"], answer, rid):
                 await send({"type": "websocket.send", "text": json.dumps(e)})
+            if answer:
+                self.sent[answer].set()
 
 
 def frames(host, model, answer, rid):
@@ -250,13 +267,22 @@ def interact(host, term, fixture, control, checkpoint):
         enter(term, fixture.prompts[i], checkpoint, "turn-" + str(i), host=host)
         term.expect(re.escape(fixture.answers[i]), "rendered synthetic answer", timeout=40, diagnose="claude-start")
         fixture.rendered += 1
-        time.sleep(1)
+        # User-visible text can precede the supplier's completed frame. For
+        # shutdown wait for actual delivery, not an unconditional extra second.
+        if i == len(MODES)-1:
+            checkpoint("sealed-final-frame")
+            check(fixture.sealed and fixture.sent[fixture.answers[i]].wait(5))
+        else:
+            time.sleep(1)
     checkpoint("rehearsal-exit")
     enter(term, "/exit", checkpoint, "exit", host=host)
+    checkpoint("owned-process-exit")
     term.require_success()
-    check(fixture.rows == list(MODES) and not fixture.bad and fixture.armed is None)
+    fixture.clean_exit=True
+    checkpoint("foreground-exited-zero")
+    check(fixture.rows == list(MODES) and fixture.sealed and fixture.armed is None)
     checkpoint("rehearsal-helper-policy")
-    check(not fixture.denied_wallet)
+    check(not fixture.denied_wallet and not fixture.bad and not fixture.extra_root)
 
 
 def payer(node, app, env, cwd, sid, action, expected):
@@ -286,11 +312,19 @@ async def run(host, drive, checkpoint, stats):
                     await asyncio.sleep(.02)
             await asyncio.to_thread(drive, host, checkpoint, fixture, sock.getsockname()[1])
         finally:
+            server.should_exit = True
+            await asyncio.wait_for(serving, 10)
+
             if host=="codex":
+                print(f"::notice::cleanup codex exit_zero={int(fixture.clean_exit)} sealed={int(fixture.sealed)} "
+                      f"final_frame={int(fixture.sent[fixture.answers[-1]].is_set())} root_answers={len(fixture.rows)} "
+                      f"extra_root={fixture.extra_root} title_over_cap={fixture.excess_titles} "
+                      f"title_after_seal={fixture.after_seal}",flush=True)
                 reason=fixture.first_fault or ("wallet-helper" if fixture.denied_wallet else "none")
                 print(f"::notice::wire codex denied_titles={fixture.denied_titles} denied_wallet={fixture.denied_wallet} root={int(fixture.root is not None)} fault={reason}",flush=True)
             stats.update(supplier_answers=len(fixture.rows), linked=max(0, len(fixture.rows)-1),
                          rendered=fixture.rendered, switch_acks=fixture.switch_acks,
                          status_checks=fixture.status_checks, rejected=int(fixture.bad or bool(fixture.denied_wallet)))
-            server.should_exit = True
-            await asyncio.wait_for(serving, 10)
+        if host == "codex":
+            check(fixture.clean_exit and fixture.sealed and not fixture.extra_root
+                  and not fixture.denied_wallet and not fixture.bad)

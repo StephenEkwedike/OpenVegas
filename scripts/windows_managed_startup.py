@@ -192,7 +192,7 @@ def main(args):
     require(args == ["rehearsal"] and sys.platform == "win32")
     lane = args[0]
     ok = True
-    for host in ("claude",):
+    for host in ("codex",):
         stages = ["private-root"]
         stats = {}
         try:

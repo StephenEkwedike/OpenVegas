@@ -9,7 +9,7 @@ jobs:
   windows-offline:
     if: github.repository == 'StephenEkwedike/OpenVegas' && !github.event.repository.private
     runs-on: windows-2022
-    timeout-minutes: 40
+    timeout-minutes: 20
     env:
       CI: 'true'
       DISABLE_TELEMETRY: '1'
@@ -43,22 +43,8 @@ jobs:
           github-token: ${{ github.token }}
           merge-multiple: true
           path: packs
-      - uses: actions/checkout@v5
-        with:
-          ref: c1f97e3e91fa45b0d784184b157dcd3398c5c294
-          path: baseline
-          persist-credentials: false
-      - name: Check all 331 public source inputs and apply only the reviewed fixture hunk
-        run: python -B -m scripts.windows_fixture_build stage
-      - name: Build isolated Windows PE, inspect compiled modules, pack and verify without npm
-        run: python -B -m scripts.windows_fixture_build build
-      - uses: actions/upload-artifact@v4
-        with:
-          name: windows-claude-fixture-only-unpublished
-          path: fixture-artifacts/
-          retention-days: 3
-          if-no-files-found: error
-
+      - name: Verify and unpack reviewed customer files without installation
+        run: python -IB scripts/windows_managed_startup.py unpack
       - name: Get standalone native publisher images and pin all three executables
         run: |
           $dir = (New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'native-hosts')).FullName
@@ -73,7 +59,7 @@ jobs:
           $js = (Get-Item -LiteralPath 'installed/node_modules/openvegas-ai/bin/openvegas.js').FullName
           if ((Get-FileHash $cx).Hash -ine '9d563ee4e0441ff9d59d612013e0460ddf8e5709735c2d9f6b98b7ef8ca4eb42' -or
               (Get-FileHash $cc).Hash -ine '345996b4bdbae21d817f750fae2f34cbf8d81224a5444c78136091d121beb298' -or
-              (Get-FileHash $pe).Hash -ine $env:OV_FIXTURE_PE_HASH -or (Get-FileHash $js).Hash -ine $pin.launcher) {
+              (Get-FileHash $pe).Hash -ine $pin.pe -or (Get-FileHash $js).Hash -ine $pin.launcher) {
               throw 'Unexpected Windows test image'
           }
           "OV_WINDOWS_CODEX_EXE=$cx" >> $env:GITHUB_ENV
@@ -81,6 +67,15 @@ jobs:
           "OV_QA_NODE=$((Get-Command node.exe).Source)" >> $env:GITHUB_ENV
           "OV_QA_PE=$pe" >> $env:GITHUB_ENV
           "OV_QA_APP=$js" >> $env:GITHUB_ENV
+      - name: Verify complete publisher Codex layout for rehearsal comparison
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'publisher-codex.tar.gz'
+          $dir = Join-Path $env:RUNNER_TEMP 'native-hosts/publisher-codex'
+          curl.exe -qfsSL --retry 2 --max-time 180 -o "$archive" https://github.com/openai/codex/releases/download/rust-v0.166.0/codex-package-x86_64-pc-windows-msvc.tar.gz
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python -IB scripts/windows_codex_bundle.py "$archive" "$dir"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          "OV_QA_CODEX_BUNDLE_EXE=$((Get-Item -LiteralPath (Join-Path $dir 'bin/codex.exe')).FullName)" >> $env:GITHUB_ENV
       - name: Install test-side terminal and private-directory dependencies
         run: |
           $pin = Join-Path $env:RUNNER_TEMP 'conpty-wheels.txt'
@@ -121,7 +116,7 @@ jobs:
               throw 'Effective executable-specific outbound block missing'
             }
           }
-      - name: Verify three linked Claude replies in the packaged fixture-only candidate
+      - name: Verify Codex foreground exit with sealed root ledger on the Claude-tested package
         env:
           OV_WINDOWS_CONPTY_ISOLATED: '1'
         run: python -B -m scripts.windows_managed_startup rehearsal
