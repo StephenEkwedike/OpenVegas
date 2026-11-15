@@ -17,7 +17,7 @@ def require_hosted_lane():
     required = {
         'CI': 'true', 'GITHUB_ACTIONS': 'true', 'RUNNER_ENVIRONMENT': 'github-hosted',
         'GITHUB_EVENT_NAME': 'push', 'GITHUB_WORKFLOW': 'Windows managed startup without inference',
-        'GITHUB_REF': 'refs/heads/codex/qa-win-foreground-8005302f',
+        'GITHUB_REF': 'refs/heads/codex/qa-win-claude-critical',
         'OV_WINDOWS_CONPTY_ISOLATED': '1',
     }
     if sys.platform != 'win32' or any(os.environ.get(k) != v for k, v in required.items()):

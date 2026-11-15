@@ -1,7 +1,7 @@
 name: Windows managed startup without inference
 on:
   push:
-    branches: ['codex/qa-win-foreground-8005302f']
+    branches: ['codex/qa-win-claude-critical']
 permissions:
   contents: read
   actions: read
@@ -116,7 +116,7 @@ jobs:
               throw 'Effective executable-specific outbound block missing'
             }
           }
-      - name: Verify both native foreground sessions on the exact combined installer
+      - name: Verify the Claude native foreground session on the exact combined installer
         env:
           OV_WINDOWS_CONPTY_ISOLATED: '1'
         run: python -B -m scripts.windows_managed_startup rehearsal

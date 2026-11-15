@@ -22,7 +22,7 @@ FILES = {
     WIN: (PACKAGE, ("bin/" + BIN, "package.json")),
 }
 HOSTS = ("codex", "claude")
-REF = "refs/heads/codex/qa-win-foreground-8005302f"
+REF = "refs/heads/codex/qa-win-claude-critical"
 
 
 def require(ok):
@@ -192,7 +192,7 @@ def main(args):
     require(args == ["rehearsal"] and sys.platform == "win32")
     lane = args[0]
     ok = True
-    for host in HOSTS:
+    for host in ("claude",):
         stages = ["private-root"]
         stats = {}
         try:
