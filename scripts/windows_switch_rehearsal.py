@@ -183,7 +183,9 @@ def interact(host, term, fixture, control, checkpoint):
         check(not pty.screen_failure("claude-start", term.frame()))
         checkpoint("rehearsal-answer-" + str(i))
         fixture.arm(i)
-        term.type_line(fixture.prompts[i])
+        from scripts.windows_codex_editor import enter
+        check(host == "codex")
+        enter(term, fixture.prompts[i], checkpoint, "turn-" + str(i))
         term.expect(re.escape(fixture.answers[i]), "rendered synthetic answer", timeout=40, diagnose="claude-start")
         fixture.rendered += 1
         time.sleep(1)

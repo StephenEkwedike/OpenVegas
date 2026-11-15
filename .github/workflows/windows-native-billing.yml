@@ -67,6 +67,15 @@ jobs:
           "OV_QA_NODE=$((Get-Command node.exe).Source)" >> $env:GITHUB_ENV
           "OV_QA_PE=$pe" >> $env:GITHUB_ENV
           "OV_QA_APP=$js" >> $env:GITHUB_ENV
+      - name: Verify complete publisher Codex layout for rehearsal comparison
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'publisher-codex.tar.gz'
+          $dir = Join-Path $env:RUNNER_TEMP 'native-hosts/publisher-codex'
+          curl.exe -qfsSL --retry 2 --max-time 180 -o "$archive" https://github.com/openai/codex/releases/download/rust-v0.166.0/codex-package-x86_64-pc-windows-msvc.tar.gz
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python -IB scripts/windows_codex_bundle.py "$archive" "$dir"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          "OV_QA_CODEX_BUNDLE_EXE=$((Get-Item -LiteralPath (Join-Path $dir 'bin/codex.exe')).FullName)" >> $env:GITHUB_ENV
       - name: Install test-side terminal and private-directory dependencies
         run: |
           $pin = Join-Path $env:RUNNER_TEMP 'conpty-wheels.txt'
@@ -107,11 +116,11 @@ jobs:
               throw 'Effective executable-specific outbound block missing'
             }
           }
-      - name: Observe actual managed start, local host status, clean exit for both native UIs
+      - name: Codex managed status after confirmed native editor echo (original standalone image)
         env:
           OV_WINDOWS_CONPTY_ISOLATED: '1'
         run: python -B -m scripts.windows_managed_startup managed
-      - name: Windows switch rehearsal, synthetic, not hosted
+      - name: Windows switch rehearsal, synthetic, not hosted (Codex publisher bundle)
         if: ${{ !cancelled() && steps.isolation.outcome == 'success' }}
         env:
           OV_WINDOWS_CONPTY_ISOLATED: '1'

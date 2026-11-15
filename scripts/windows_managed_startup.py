@@ -132,8 +132,10 @@ def observe(host, term, checkpoint):
                     "local command registration", timeout=90, diagnose="claude-start")
     checkpoint("local-status")
     require(not pty.screen_failure("claude-start", term.frame()))
-    term.type_line("openvegas status" if host == "codex" else "/ov-billing status")
-    term.expect(r"Payer:\s*host;\s*balance unavailable\.", "unfunded local status", timeout=35, diagnose="claude-control")
+    from scripts.windows_codex_editor import enter
+    require(host == "codex")
+    enter(term, "openvegas status", checkpoint, "status")
+    term.expect(r"Payer:\s*host;\s*balance\s+unavailable\.", "unfunded local status", timeout=35, diagnose="claude-control")
     checkpoint("native-exit")
     term.type_line("/exit")
     term.require_success()
@@ -148,6 +150,10 @@ def drive(host, checkpoint, fixture=None, port=None):
     root = Path(os.environ["RUNNER_TEMP"]).resolve(strict=True) / ("ov-startup-" + token_hex(16))
     require(not root.exists())
     exe = Path(os.environ["OV_WINDOWS_" + host.upper() + "_EXE"]).resolve(strict=True)
+    if fixture is not None:
+        exe = Path(os.environ["OV_QA_CODEX_BUNDLE_EXE"]).resolve(strict=True)
+        require(exe.name == "codex.exe" and exe.parent.name == "bin"
+                and exe.parent.parent.name == "publisher-codex")
     args = ["child", host, os.environ["OV_QA_NODE"], os.environ["OV_QA_APP"]]
     with ExitStack() as held:
         for rel in ("", "codex", "claude", "work", "tmp", ".openvegas", "AppData", "AppData/Local", "AppData/Roaming"):
@@ -180,7 +186,7 @@ def main(args):
     require(args in (["managed"], ["rehearsal"]) and sys.platform == "win32")
     lane = args[0]
     ok = True
-    for host in HOSTS:
+    for host in ("codex",):
         stages = ["private-root"]
         stats = {}
         try:
