@@ -18,6 +18,24 @@ from tests.test_integrations import test_windows_claude_stream_native as claude
 from tests.test_integrations import test_windows_codex_payer_roundtrip as codex
 
 
+def deliberate_claude_input(payload, prompt):
+    messages = payload['messages']
+    if not messages or messages[-1].get('role') != 'user':
+        return False
+    for msg in messages:
+        if msg['role'] != 'user':
+            continue
+        content = msg['content']
+        blocks = [content] if isinstance(content, str) else [b.get('text', '') for b in content]
+        for block in blocks:
+            if '/ov-billing' in block.lower() and not (
+                    block.strip().startswith('<system-reminder>') and block.strip().endswith('</system-reminder>')):
+                return False
+    content = messages[-1]['content']
+    return content == prompt if isinstance(content, str) else any(
+        b.get('type') == 'text' and b.get('text') == prompt for b in content)
+
+
 @asynccontextmanager
 async def supplier(host):
     if host == 'codex':
@@ -25,7 +43,7 @@ async def supplier(host):
             sink.token = qa.GRANT
             yield sink, port
         return
-    seen, faults = [], []
+    seen, faults, armed = [], [], []
 
     async def http(reader, writer):
         status, media, data = 400, 'application/json', b'{}'
@@ -49,14 +67,15 @@ async def supplier(host):
                 else:
                     mode = {'/_host/v1/messages': 'host', '/integrations/native/v1/messages': 'v'}[path]
                     payload = json.loads(body)
-                    if any('/ov-billing' in json.dumps(m['content']).lower()
-                           for m in payload['messages'] if m['role'] == 'user'):
+                    if armed != [len(seen)] or not deliberate_claude_input(payload, claude.PROMPTS[len(seen)]):
+                        faults.append('control-or-unsolicited')
                         raise ValueError
                     claude._validate_turn(len(seen), mode, payload, headers)
+                    armed.clear()
                     data, media = claude._sse(len(seen)), 'text/event-stream'
                     seen.append(mode)
                 status = 200
-        except (ValueError, KeyError, TypeError, OSError, TimeoutError, asyncio.IncompleteReadError,
+        except (ValueError, KeyError, IndexError, AttributeError, TypeError, OSError, TimeoutError, asyncio.IncompleteReadError,
                 asyncio.LimitOverrunError, zlib.error):
             faults.append('unexpected-request')
         try:
@@ -68,7 +87,7 @@ async def supplier(host):
 
     server = await asyncio.start_server(http, '127.0.0.1', 0)
     async with server:
-        yield (seen, faults), server.sockets[0].getsockname()[1]
+        yield (seen, faults, armed), server.sockets[0].getsockname()[1]
 
 
 def configure(host, exe, env, cwd):
@@ -175,7 +194,8 @@ def drive(host, sink, port, checkpoint):
                     if refusal:
                         raise conpty.CheckpointMiss(refusal)
                 term.type_line(prefix + 'status')
-                term.expect(r'Payer:\s*' + mode + r';\s*\$V\s*73\.25\.', 'confirmed balance and payer',
+                balance = qa.AFTER_WALLET if i == 2 else qa.BALANCE
+                term.expect(r'Payer:\s*' + mode + r';\s*\$V\s*' + re.escape(balance) + r'\.', 'confirmed balance and payer',
                             diagnose='claude-control' if host == 'claude' else None)
                 checkpoint('answer-' + str(i))
                 if host == 'codex':
@@ -184,8 +204,19 @@ def drive(host, sink, port, checkpoint):
                     answer = term.expect(r'fixture-reply-[0-9a-f]{32}', 'native answer')
                     assert answer == sink.last_answer
                 else:
+                    seen, faults, armed = sink
+                    if faults or armed or len(seen) != i:
+                        raise conpty.CheckpointMiss(conpty.Failure.FORWARDED if 'control-or-unsolicited' in faults
+                                                    else conpty.Failure.PROTOCOL)
+                    armed.append(i)
                     term.type_line(claude.PROMPTS[i])
-                    term.expect(re.escape(claude.ANSWERS[i]), 'native answer')
+                    try:
+                        term.expect(re.escape(claude.ANSWERS[i]), 'native answer', diagnose='answer')
+                    except conpty.CheckpointMiss:
+                        reason = (conpty.Failure.FORWARDED if 'control-or-unsolicited' in faults else
+                                  conpty.Failure.PROTOCOL if faults else conpty.Failure.DRAW if len(seen) > i else
+                                  conpty.Failure.NOT_REACHED)
+                        raise conpty.CheckpointMiss(reason) from None
             checkpoint('shutdown')
             term.type_line('/exit')
             term.require_success()
@@ -210,7 +241,7 @@ async def test_installed_customer_switch(host, request):
         assert all(r['wire_model'] == qa.MODELS['codex'] and r['wire_effort'] == 'low' for r in sink.rows)
         assert all(r['prior_reply_linked'] for r in sink.rows[1:])
     else:
-        assert sink == (['host', 'v', 'host'], [])
+        assert sink == (['host', 'v', 'host'], [], [])
 
 
 def test_bad_bank_request_cannot_issue_or_revoke():
@@ -221,6 +252,16 @@ def test_bad_bank_request_cannot_issue_or_revoke():
         assert client.post('/integrations/native/sessions', json={},
                            headers={'authorization': 'Bearer ' + qa.DEVICE}).status_code == 403
         assert bank.state == 'initial'
+
+
+def test_claude_requires_deliberate_current_prompt_not_a_command():
+    def message(*blocks):
+        return {'messages': [{'role': 'user', 'content': [{'type': 'text', 'text': b} for b in blocks]}]}
+
+    prompt = claude.PROMPTS[0]
+    assert deliberate_claude_input(message('<system-reminder>Available: /ov-billing</system-reminder>', prompt), prompt)
+    assert not deliberate_claude_input(message('/ov-billing status', prompt), prompt)
+    assert not deliberate_claude_input(message('not the current prompt'), prompt)
 
 
 def test_console_keeps_coalesced_composer_and_answers_split_query():

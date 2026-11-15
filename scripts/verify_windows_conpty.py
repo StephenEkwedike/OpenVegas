@@ -47,6 +47,10 @@ class Failure(Enum):
     WALLET_PREPARE = 'wallet-prepare'
     WALLET_OUTCOME = 'wallet-outcome'
     REQUEST = 'request-boundary'
+    NOT_REACHED = 'supplier-not-reached'
+    PROTOCOL = 'supplier-protocol'
+    FORWARDED = 'control-as-prompt'
+    DRAW = 'answer-not-rendered'
 
 
 class CheckpointMiss(RuntimeError):

@@ -166,6 +166,7 @@ jobs:
               'switch-held', 'switch-refused', 'native-route', 'native-inventory', 'native-root',
               'native-model', 'native-workspace', 'native-fence', 'session-lease', 'command-unavailable',
               'wallet-prepare', 'wallet-outcome', 'request-boundary',
+              'supplier-not-reached', 'supplier-protocol', 'control-as-prompt', 'answer-not-rendered',
           )
           stages = (
               'isolation', 'fixture-canonical', 'fixture-configure', 'conpty', 'native-start', 'composer',

@@ -18,6 +18,7 @@ MODELS = {'codex': 'gpt-6-astra', 'claude': 'claude-sonnet-4-6'}
 DEVICE = 'ov_device_windows_qa_not_a_credential'
 GRANT = 'ov_native_fixture_windows_conpty_only'
 BALANCE = '73.25'
+AFTER_WALLET = '73.24'
 SESSION = 'windows-qa-synthetic'
 CONTROL_RECEIPT = 'control-result'
 CONTROL_CHECKS = frozenset(('native-route', 'native-inventory', 'native-root', 'native-model',
@@ -59,7 +60,7 @@ class Bank:
             return self.reject()
         method = request.method
         if account and method == 'GET':
-            op, value = 'balance', {'balance': BALANCE}
+            op, value = 'balance', {'balance': AFTER_WALLET if self.state == 'closed' else BALANCE}
         elif path == '/integrations/native/options?host=' + self.host and method == 'GET':
             op, value = 'options', {**self.selection, 'wallet_billing': True,
                 'balance_v': BALANCE, 'wallet_limit_policy': 'live_balance',
