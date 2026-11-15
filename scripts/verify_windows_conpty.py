@@ -16,8 +16,8 @@ from pathlib import Path
 def require_hosted_lane():
     required = {
         'CI': 'true', 'GITHUB_ACTIONS': 'true', 'RUNNER_ENVIRONMENT': 'github-hosted',
-        'GITHUB_EVENT_NAME': 'push', 'GITHUB_WORKFLOW': 'Windows repaired customer foreground (offline)',
-        'GITHUB_REF': 'refs/heads/codex/qa-repaired-win32-0319-foreground',
+        'GITHUB_EVENT_NAME': 'push', 'GITHUB_WORKFLOW': 'Windows managed startup without inference',
+        'GITHUB_REF': 'refs/heads/codex/qa-win32-private-root-0319',
         'OV_WINDOWS_CONPTY_ISOLATED': '1',
     }
     if sys.platform != 'win32' or any(os.environ.get(k) != v for k, v in required.items()):
