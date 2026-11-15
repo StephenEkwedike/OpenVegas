@@ -116,11 +116,11 @@ jobs:
               throw 'Effective executable-specific outbound block missing'
             }
           }
-      - name: Exact Codex switches with optional native non-admin sandbox only
+      - name: Exact Codex root turns with separate denial for unwitnessed host titles
         env:
           OV_WINDOWS_CONPTY_ISOLATED: '1'
         run: python -B -m scripts.windows_managed_startup rehearsal
-      - name: Isolate Claude profile startup using native composer and loopback
+      - name: Check whether Claude fixture profile alone can render a loopback answer
         if: ${{ !cancelled() && steps.isolation.outcome == 'success' }}
         env:
           OV_WINDOWS_CONPTY_ISOLATED: '1'

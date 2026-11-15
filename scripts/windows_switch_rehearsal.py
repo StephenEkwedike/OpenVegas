@@ -8,6 +8,8 @@ import subprocess
 import threading
 import time
 import zlib
+from uuid import UUID
+from contextvars import ContextVar
 
 MODES = ("host", "v", "host")
 LIMIT = 2**20
@@ -16,6 +18,20 @@ LIMIT = 2**20
 def check(value):
     if not value:
         raise ValueError("Synthetic turn not established")
+
+
+def metadata(scope):
+    # Read only these three non-secret correlation fields; claims never authorize a turn.
+    keys=(b"x-codex-turn-metadata",b"thread-id",b"session-id")
+    fields=[[v for k,v in scope.get("headers",()) if k==key] for key in keys]
+    if not all(len(v)==1 and len(v[0])<=8192 for v in fields):
+        return None,None
+    claim=json.loads(fields[0][0])
+    sid=fields[1][0].decode("ascii")
+    if (fields[1]!=fields[2] or str(UUID(sid))!=sid or claim.get("thread_id")!=sid
+            or claim.get("session_id")!=sid):
+        return None,None
+    return claim.get("thread_source"),sid
 
 
 def markers(messages, known):
@@ -40,16 +56,20 @@ class Fixture:
         self.rows, self.bad, self.armed, self.model = [], False, None, None
         self.rendered = self.switch_acks = self.status_checks = 0
         self.lock = threading.Lock()
+        self.root, self.denied_titles, self.first_fault = None, 0, None
+        self.issue = ContextVar("wire-issue", default="wire")
 
     def arm(self, i):
         with self.lock:
             check(self.armed is None and len(self.rows) == i and not self.bad)
             self.armed = i
 
-    def turn(self, mode, body, previous=()):
+    def turn(self, mode, body, previous=(), root=None):
         with self.lock:
             i = len(self.rows)
+            self.issue.set("unarmed" if self.armed != i else "payer")
             check(i < len(MODES) and self.armed == i and mode == MODES[i] and not self.bad)
+            self.issue.set("model-or-shape")
             model = body.get("model")
             check(isinstance(model, str) and 0 < len(model) < 160 and self.model in (None, model))
             messages = body.get("messages" if self.host == "claude" else "input")
@@ -60,9 +80,15 @@ class Fixture:
                 expected.append(("user", self.prompts[j]))
                 if j < i:
                     expected.append(("assistant", self.answers[j]))
+            self.issue.set("history")
             check(observed == expected)
+            if self.host == "codex":
+                self.issue.set("different-root")
+                check(root is not None and self.root in (None,root))
+                self.root = root
             self.model, self.armed = model, None
             self.rows.append(mode)
+            self.issue.set("none")
             return self.answers[i], [*expected, ("assistant", self.answers[i])]
 
     @staticmethod
@@ -73,8 +99,29 @@ class Fixture:
         # The production rehearsal adapter already restricts the identity. This
         # fixture never reads Authorization, records headers, or forwards traffic.
         try:
+            root = None
+            if self.host == "codex":
+                source,root=metadata(scope)
+                mode=self.routes(scope["path"],"responses")
+                if source=="thread_title":
+                    # Stock PE has no independent helper witness. Never synthesize
+                    # a title, forward it, or credit it as a customer/root answer.
+                    self.issue.set("unexpected-helper")
+                    check(mode=="host" and self.root and root!=self.root and self.denied_titles<12)
+                    self.denied_titles+=1
+                    if scope["type"]=="websocket":
+                        check((await receive())["type"]=="websocket.connect")
+                        await send({"type":"websocket.close","code":1008})
+                    else:
+                        await send({"type":"http.response.start","status":403,"headers":[]})
+                        await send({"type":"http.response.body","body":b"{}"})
+                    self.issue.set("none")
+                    return
+                self.issue.set("root-metadata")
+                check(source=="user" and root)
+                self.issue.set("wire")
             if scope["type"] == "websocket":
-                return await self.ws(scope, receive, send)
+                return await self.ws(scope, receive, send, root)
             check(scope["type"] == "http" and scope["method"] == "POST")
             raw = bytearray()
             while True:
@@ -94,13 +141,15 @@ class Fixture:
                 mime, data = b"application/json", b'{"input_tokens":12}'
             else:
                 mode = self.routes(path, "responses" if self.host == "codex" else "messages")
-                answer, _ = self.turn(mode, body)
+                answer, _ = self.turn(mode, body, root=root)
                 mime = b"text/event-stream"
                 data = b"".join(("event: " + e["type"] + "\ndata: " + json.dumps(e) + "\n\n").encode()
                                 for e in frames(self.host, body["model"], answer, "resp_" + token_hex(12)))
             await send({"type": "http.response.start", "status": 200, "headers": [(b"content-type", mime)]})
             await send({"type": "http.response.body", "body": data})
         except Exception:
+            self.first_fault=self.first_fault or self.issue.get()
+
             self.bad = True
             if scope["type"] == "websocket":
                 await send({"type": "websocket.close", "code": 1008})
@@ -108,7 +157,7 @@ class Fixture:
                 await send({"type": "http.response.start", "status": 400, "headers": []})
                 await send({"type": "http.response.body", "body": b"{}"})
 
-    async def ws(self, scope, receive, send):
+    async def ws(self, scope, receive, send, root):
         mode = self.routes(scope["path"], "responses")
         check(self.host == "codex" and mode and (await receive())["type"] == "websocket.connect")
         await send({"type": "websocket.accept"})
@@ -126,8 +175,9 @@ class Fixture:
                 answer, history[rid] = None, []
             else:
                 prev = body.get("previous_response_id")
+                self.issue.set("foreign-previous")
                 prior = history[prev] if prev else []
-                answer, history[rid] = self.turn(mode, body, prior)
+                answer, history[rid] = self.turn(mode, body, prior, root)
             for e in frames("codex", body["model"], answer, rid):
                 await send({"type": "websocket.send", "text": json.dumps(e)})
 
@@ -225,6 +275,9 @@ async def run(host, drive, checkpoint, stats):
                     await asyncio.sleep(.02)
             await asyncio.to_thread(drive, host, checkpoint, fixture, sock.getsockname()[1])
         finally:
+            if host=="codex":
+                reason=fixture.first_fault or "none"
+                print(f"::notice::wire codex denied_titles={fixture.denied_titles} root={int(fixture.root is not None)} fault={reason}",flush=True)
             stats.update(supplier_answers=len(fixture.rows), linked=max(0, len(fixture.rows)-1),
                          rendered=fixture.rendered, switch_acks=fixture.switch_acks,
                          status_checks=fixture.status_checks, rejected=int(fixture.bad))
