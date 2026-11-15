@@ -116,7 +116,7 @@ jobs:
               throw 'Effective executable-specific outbound block missing'
             }
           }
-      - name: Verify Codex foreground exit with sealed root ledger on the Claude-tested package
+      - name: Verify both native foreground sessions on the exact combined installer
         env:
           OV_WINDOWS_CONPTY_ISOLATED: '1'
         run: python -B -m scripts.windows_managed_startup rehearsal

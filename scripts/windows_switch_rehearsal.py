@@ -63,6 +63,7 @@ class Fixture:
         self.name_proof = "unobserved"
         self.first_submit = False
         self.pre_root_ingress = self.title_attempts = self.wallet_title_attempts = 0
+        self.early_host_ws = self.early_empty_warmup = 0
         self.sent = {a: threading.Event() for a in self.answers}
         self.issue = ContextVar("wire-issue", default="wire")
 
@@ -116,11 +117,17 @@ class Fixture:
         try:
             root = None
             if self.host == "codex":
-                with self.lock:
-                    if not self.first_submit:
-                        self.pre_root_ingress += 1
                 source,root=metadata(scope)
                 mode=self.routes(scope["path"],"responses")
+                with self.lock:
+                    if not self.first_submit:
+                        if scope["type"] == "websocket" and mode == "host" and source == "user" and root:
+                            self.early_host_ws += 1
+                        else:
+                            self.pre_root_ingress += 1
+                            if source != "thread_title":
+                                self.issue.set("early-operation")
+                                raise ValueError("Unexpected pre-submit contact")
                 if source=="thread_title":
                     self.title_attempts += 1
                     self.wallet_title_attempts += int(mode == "v")
@@ -205,6 +212,15 @@ class Fixture:
             check(0 < len(raw) <= LIMIT)
             body = json.loads(raw)
             check(body.get("type") == "response.create" and len(history) < 12)
+            with self.lock:
+                if not self.first_submit:
+                    if (mode == "host" and body.get("generate") is False
+                            and body.get("input", []) == [] and not body.get("previous_response_id")):
+                        self.early_empty_warmup += 1
+                    else:
+                        self.issue.set("early-operation")
+                        self.pre_root_ingress += 1
+                        raise ValueError("Unexpected pre-submit frame")
             rid = "resp_" + token_hex(12)
             if body.get("generate") is False:
                 answer, history[rid] = None, []
@@ -359,6 +375,7 @@ async def run(host, drive, checkpoint, stats):
             await asyncio.wait_for(serving, 10)
 
             if host=="codex":
+                print(f"::notice::pre-submit host_ws={fixture.early_host_ws} empty_warmup={fixture.early_empty_warmup} denied={fixture.pre_root_ingress}", flush=True)
                 print(f"::notice::named codex proof={fixture.name_proof} first_submit={int(fixture.first_submit)} "
                       f"pre_root_ingress={fixture.pre_root_ingress} title_attempts={fixture.title_attempts} "
                       f"wallet_title_attempts={fixture.wallet_title_attempts} rendered={fixture.rendered} "
