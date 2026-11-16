@@ -1,7 +1,7 @@
 name: Windows managed startup without inference
 on:
   push:
-    branches: ['codex/qa-win-claude-critical']
+    branches: ['codex/qa-win-claude-f9487f0a']
 permissions:
   contents: read
   actions: read
