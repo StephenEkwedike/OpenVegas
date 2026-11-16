@@ -21,7 +21,7 @@ from .broker import Broker
 from .claude_generation_host import SWITCH_TIMEOUT, ManagedClaude
 from .claude_generation_observer import ClaudeGenerationObserver
 from .credentials import IntegrationError
-from .inference_router_adapter import ProviderAdapter
+from .inference_router_adapter import ProviderAdapter, claude_routing_env
 from .inference_router_session import RouterSession, claude_wallet_callbacks
 
 # This deliberately has no http.fetch, turn/tool inventories, prompt replay,
@@ -88,7 +88,7 @@ export function register(on) {
             || !/^[a-f0-9]{32}$/.test(request.nonce ?? '') || request.nonce === answered) return;
         const model = await $.session.model();
         const metadata = { session_id: await $.session.id(), cwd: await $.session.cwd(), model,
-          base_url: await $.env.get('ANTHROPIC_BASE_URL') };
+          base_url: (await $.env.get('ANTHROPIC_UNIX_SOCKET')) ? null : await $.env.get('ANTHROPIC_BASE_URL') };
         if (model !== await $.session.model()) return;
         await $.fs.write(responsePath, JSON.stringify({ generation, nonce: request.nonce, metadata }));
         answered = request.nonce;
@@ -205,10 +205,8 @@ def verify_settings(env, cwd):
                 raise ValueError
             settings = json.loads(path.read_text())
             values = settings.get('env', {})
-            if not isinstance(values, dict) or any(
+            if not isinstance(values, dict) or claude_routing_env(values) or any(
                 key == 'ANTHROPIC_CUSTOM_HEADERS' or key == 'OPENVEGAS_LOCAL_ROUTER_AUTH'
-                or key.startswith('CLAUDE_CODE_USE_')
-                or (key.startswith('ANTHROPIC_') and key.endswith('BASE_URL'))
                 or key.lower() in {'http_proxy', 'https_proxy', 'all_proxy'} for key in values):
                 raise ValueError
     except (OSError, ValueError, AttributeError):

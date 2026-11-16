@@ -7,20 +7,22 @@ auth.json and Keychain. The ordinary native TUI attaches over a private socket.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from copy import deepcopy
 from pathlib import Path
 
 from websockets.asyncio.client import unix_connect
 
 from .credentials import IntegrationError
-from .runtime_directory import runtime_parent
+from .runtime_directory import hosted_mac_test_root, runtime_parent
 from .host_adapter import LocalServerLaunch
 from .native_owned_process import OwnedProcess
 from .native_owned_process import spawn as _spawn_owned
@@ -106,11 +108,48 @@ def _launch_scope(env, cwd):
                 'cwd': os.path.realpath(cwd)}
 
 
+@contextmanager
+def _server_rendezvous(managed):
+    root = hosted_mac_test_root() if managed else None
+    if root is None:
+        with tempfile.TemporaryDirectory(prefix='ov-policy-', dir=runtime_parent('/tmp')) as directory:
+            yield Path(directory) / 'native.sock', None
+        return
+    directory = root / 'ov-policy-managed'
+    try:
+        directory.mkdir(mode=0o700)
+    except FileExistsError:
+        raise IntegrationError('Private Codex test endpoint already exists; no server started.') from None
+    alias = directory / 'native.sock'
+    # Codex 0.166.0 publishes a symlink to the hash of the canonical advertised
+    # path. Never enumerate the native daemon directory or chmod through a link.
+    target = root.parent / f'codex-daemon-{os.geteuid()}' / hashlib.sha256(os.fsencode(alias)).hexdigest()
+    original = directory.lstat()
+    # A failed launch or retirement leaves this slot reserved inside the QA
+    # root. In particular a subsequent client cannot adopt an uncertain server.
+    yield alias, target
+    if not os.path.samestat(original, directory.lstat()):
+        raise IntegrationError('Private Codex test directory changed; cleanup refused.')
+    if alias.is_symlink() and os.readlink(alias) == str(target):
+        alias.unlink()
+    try:
+        directory.rmdir()
+    except OSError as exc:
+        raise IntegrationError('Private Codex test directory was not empty; contents preserved.') from exc
+
+
+def _check_test_socket(alias, target):
+    if not alias.is_symlink() or os.readlink(alias) != str(target):
+        raise IntegrationError('Private Codex test endpoint did not match the requested socket.')
+    info = target.lstat()
+    if not stat.S_ISSOCK(info.st_mode) or info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o600:
+        raise IntegrationError('Native Codex socket is not private; refusing to connect.')
+
+
 @asynccontextmanager
-async def _private_server(argv, env, cwd):
-    with tempfile.TemporaryDirectory(prefix='ov-policy-', dir=runtime_parent('/tmp')) as directory, \
+async def _private_server(argv, env, cwd, *, managed=False):
+    with _server_rendezvous(managed) as (socket, expected_target), \
             _StartupDiagnostics() as diagnostics:
-        socket = Path(directory) / 'native.sock'
         endpoint = 'unix://' + str(socket)
         process, cancelled = await _settle(asyncio.create_task(_spawn_owned(
             *argv(endpoint), env=env, cwd=cwd, stdin=asyncio.subprocess.DEVNULL,
@@ -120,11 +159,14 @@ async def _private_server(argv, env, cwd):
             if cancelled:
                 raise asyncio.CancelledError
             async with asyncio.timeout(12):
-                while not socket.exists():
+                while not (os.path.lexists(socket) if expected_target is not None else socket.exists()):
                     if process.returncode is not None:
                         raise IntegrationError(diagnostics.failure())
                     await asyncio.sleep(.01)
-            socket.chmod(0o600)
+            if expected_target is None:
+                socket.chmod(0o600)
+            else:
+                _check_test_socket(socket, expected_target)
             _OWNED_SERVERS[endpoint] = process
             _POLICY_CONTEXT[endpoint] = _launch_scope(env, cwd)
             yield endpoint

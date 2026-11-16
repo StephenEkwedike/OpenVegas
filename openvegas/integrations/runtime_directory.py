@@ -38,6 +38,23 @@ def runtime_parent(default=None):
     return root
 
 
+def hosted_mac_test_root():
+    if (sys.platform == "darwin" and os.environ.get("OPENVEGAS_HOSTED_LAUNCH") == "1"
+            and os.environ.get(TEST_REF_ENV) == "1"):
+        root = runtime_parent()
+        if root is None:
+            raise IntegrationError("Private Mac test launch is missing its runtime directory.")
+        return root
+    return None
+
+
+def router_port():
+    root = hosted_mac_test_root()
+    # The QA supervisor can name one endpoint before spawning the router.
+    # This is a routing address, never authentication or permission to spend.
+    return 49152 + int(root.name[-4:], 16) % 16384 if root is not None else 0
+
+
 def qa_grant_reference(session_id):
     if (sys.platform == "darwin" and os.environ.get(TEST_REF_ENV) == "1" and os.environ.get(RUNTIME_ENV)
             and isinstance(session_id, str) and re.fullmatch(r"[0-9a-f]{32}", session_id)):

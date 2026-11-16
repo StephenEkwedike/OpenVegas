@@ -23,6 +23,7 @@ from websockets.asyncio.client import connect
 from .credentials import IntegrationError
 from .inference_router_adapter import LOCAL_AUTH_HEADER
 from .inference_router_state import RouterStateError
+from .runtime_directory import router_port
 
 MAX_BODY = 16 * 1024 * 1024
 MAX_EVENT = 1024 * 1024
@@ -678,9 +679,10 @@ async def serve(router):
     """Start a private listener; shipping header mode never puts auth in a URL."""
     import uvicorn
 
+    port = router_port()
     sock = socket.socket()
     try:
-        sock.bind(('127.0.0.1', 0))
+        sock.bind(('127.0.0.1', port))
         sock.listen(128)
         sock.setblocking(False)
     except OSError:

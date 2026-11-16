@@ -30,9 +30,10 @@ async function metadata($) {
   const policy = await $.settings.read({source:'policy'});
   const env = (await $.settings.read({key:'env'})) ?? {};
   if (!policy || Object.keys(policy).length || Object.keys(env).some(k =>
-      /^(ANTHROPIC_.*BASE_URL|ANTHROPIC_CUSTOM_HEADERS|CLAUDE_CODE_USE_.*|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY)$/i.test(k)))
+      /^(ANTHROPIC_.*BASE_URL|ANTHROPIC_UNIX_SOCKET|ANTHROPIC_CUSTOM_HEADERS|CLAUDE_CODE_USE_.*|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY)$/i.test(k)))
     throw Error();
-  if ((await $.session.version()).version !== '2.1.322' || await $.env.get('ANTHROPIC_BASE_URL') !== base)
+  if ((await $.session.version()).version !== '2.1.322' || await $.env.get('ANTHROPIC_UNIX_SOCKET')
+      || await $.env.get('ANTHROPIC_BASE_URL') !== base)
     throw Error();
   return {identifier:await $.session.id(), model:await $.session.model(), cwd:await $.session.cwd(), base_url:base};
 }
@@ -65,6 +66,7 @@ export function register(on) {
     try {
       // Only a person's explicit status check repeats readiness, never a payer mutation.
       if (action === 'status') await verifyReady($);
+      else await metadata($);
       let reply = await send($, {event:'start', action});
       for (let i=0; i<3 && reply.challenge; i++)
         reply = await send($, {event:'observe', challenge:reply.challenge, value:await metadata($)});
@@ -91,6 +93,7 @@ def unsafe_key(key):
             "HTTPS_PROXY",
             "ALL_PROXY",
             "ANTHROPIC_CUSTOM_HEADERS",
+            "ANTHROPIC_UNIX_SOCKET",
             "CLAUDE_CODE_SIMPLE",
             "CLAUDE_CODE_SETTINGS_PATH",
             "OPENVEGAS_LOCAL_ROUTER_AUTH",

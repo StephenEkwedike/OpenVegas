@@ -106,7 +106,8 @@ class ManagedCodexRouter(RuntimeOwner):
                 async with AsyncExitStack() as stack:
                     self.source_endpoint = await stack.enter_async_context(_private_server(
                         lambda endpoint: _handoff_server_argv([self.executable, *overlay,
-                            '--no-daemon', 'app-server', '--listen', endpoint]), server_env, self.cwd))
+                            '--no-daemon', 'app-server', '--listen', endpoint]), server_env, self.cwd,
+                        managed=True))
                     self.session.bind_native(_OWNED_SERVERS[self.source_endpoint])
                     await route_config(self.source_endpoint, self.cwd, self._router_url)
                     async with RequestStableTransport(self.source_endpoint, on_notice=s.emit) as transport:

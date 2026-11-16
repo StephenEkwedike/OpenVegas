@@ -242,8 +242,9 @@ def _local_url(value, *, header_auth=False):
              "Native launch requires a verified session-local loopback URL.")
 
 
-def _claude_routing_env(env):
-    return any(k == "ANTHROPIC_BASE_URL" or k.startswith("CLAUDE_CODE_USE_")
+def claude_routing_env(env):
+    # The native Unix-socket transport selects its destination independently of the base URL.
+    return any(k == "ANTHROPIC_UNIX_SOCKET" or k.startswith("CLAUDE_CODE_USE_")
                or (k.startswith("ANTHROPIC_") and k.endswith("BASE_URL")) for k in env)
 
 
@@ -291,7 +292,7 @@ def launch_overlay(host, version, local_url, env, args, *, local_capability=None
         _require(not any(k in env for k in ("OPENAI_BASE_URL", "CODEX_PROVIDER", "CODEX_CONFIG")),
                  "Existing native routing override is not supported; launch unchanged.")
     else:
-        _require(not _claude_routing_env(env),
+        _require(not claude_routing_env(env),
                  "Existing native routing override is not supported; launch unchanged.")
     i = 0
     while i < len(original):
@@ -321,7 +322,7 @@ def launch_overlay(host, version, local_url, env, args, *, local_capability=None
                 try:
                     settings = json.loads(value)
                     _require(isinstance(settings, dict) and isinstance(settings.get("env", {}), dict))
-                    _require(not _claude_routing_env(settings.get("env", {})))
+                    _require(not claude_routing_env(settings.get("env", {})))
                     if local_capability is not None:
                         _require(not {LOCAL_AUTH_ENV, "ANTHROPIC_CUSTOM_HEADERS"}
                                  & settings.get("env", {}).keys())
