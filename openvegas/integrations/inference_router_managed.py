@@ -30,7 +30,7 @@ from .runtime_directory import record_test_wallet_switch
 
 async def original_upstream(executable, env, cwd):
     """Read auth *kind*, never its secret, from an owned unmodified native server."""
-    async with host_server(executable, env, cwd=cwd) as endpoint:
+    async with host_server(executable, env, cwd=cwd, identity_probe=True) as endpoint:
         await route_config(endpoint, cwd)
         async with policy._reader(endpoint) as call:
             result = await call('account/read', {'refreshToken': False})
@@ -107,7 +107,7 @@ class ManagedCodexRouter(RuntimeOwner):
                     self.source_endpoint = await stack.enter_async_context(_private_server(
                         lambda endpoint: _handoff_server_argv([self.executable, *overlay,
                             '--no-daemon', 'app-server', '--listen', endpoint]), server_env, self.cwd,
-                        managed=True))
+                        qa_role='managed'))
                     self.session.bind_native(_OWNED_SERVERS[self.source_endpoint])
                     await route_config(self.source_endpoint, self.cwd, self._router_url)
                     async with RequestStableTransport(self.source_endpoint, on_notice=s.emit) as transport:

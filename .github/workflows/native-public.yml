@@ -3,7 +3,7 @@ name: Native 0.3.19 candidates (never publish)
 on:
   workflow_dispatch:
   push:
-    branches: ['codex/native-qa-0319-a55ea959']
+    branches: ['codex/native-qa-0319-f9487f0a']
 
 permissions:
   contents: read
@@ -117,8 +117,8 @@ jobs:
       - name: Build and independently verify frozen binary and Mac profile
         working-directory: dist/frozen/cli
         env:
-          FREEZE_PIN: 'a3583cca4b4c460308502f6fab31f453603cfdeefb89a3412c24267abbb2b5a8'
-          SOURCE_PIN: 'a55ea959761bcf32bc97f08ce7099eba480c44707a25056f4f3fd280352583df'
+          FREEZE_PIN: 'de3bafb97355ff9cee2ebf9e54e4c54bf2f2a7fb73e5783a06f1f2a79cf2d152'
+          SOURCE_PIN: 'f9487f0ab57448f4d2128cc5e009801f456ac4192075e6e7d1b59a6e7d5135b3'
           TARGET: ${{ matrix.target }}
         run: python -B ../../git-source/scripts/ci_runtime_binary.py --output "${{ github.workspace }}/dist/native-candidate"
       - uses: actions/upload-artifact@v4
@@ -241,7 +241,7 @@ jobs:
           host_pins = {'linux-x64': {'codex': 'b8a11fedf24b2dfb59a70c9e52b030f9a508dcd49cd2dd0d41956f4c785156b8', 'claude': 'bfb3703ad5380242328459bc62ada4bde8ae7ba57c6e1eeadb9c00e08874c478'}, 'linux-arm64': {'codex': 'f2e6c980c937e734644bed1b4a9a018d3e63a0ccbe71aafc85c86a8c6e4b462a', 'claude': 'f220ca50ea4f3222043ff83cc224a1262e0196e9897acc0871efa94235b0c1fd'}, 'win32-x64': {'codex': '9d563ee4e0441ff9d59d612013e0460ddf8e5709735c2d9f6b98b7ef8ca4eb42', 'claude': '345996b4bdbae21d817f750fae2f34cbf8d81224a5444c78136091d121beb298'}, 'darwin-x64': {'codex': '1361e18268866b7f9f5e8703fabcea0a2a990a439eedcce03940abb4ba9eaaeb', 'claude': 'b513d15117cbf1bb05095dab41963fd394ff40de1fa99dcc6d7d1033bf292e9b'}, 'darwin-arm64': {'codex': '39acf979729dd290f9a24ee38b2914e036c91b65952872e28ae2a6b88a7db7c1', 'claude': 'a9d237949db816a0b7afd88a9a8e1df36b3a597a30f5a41d1c0539eb180a3450'}}[target]
           assert {k:sha(p) for k,p in exes.items()}==host_pins
           index = json.loads((customer/'release.json').read_bytes())
-          assert index['source_sha256']=='a55ea959761bcf32bc97f08ce7099eba480c44707a25056f4f3fd280352583df' and index['version']=='0.3.19'
+          assert index['source_sha256']=='f9487f0ab57448f4d2128cc5e009801f456ac4192075e6e7d1b59a6e7d5135b3' and index['version']=='0.3.19'
           p = index['platforms'][target]
           assert p['package']=='@lordesteph/openvegas-'+target and p['binary']=='openvegas-'+target+suffix
           assert sha(m/p['package']/'bin'/p['binary'])==p['sha256']

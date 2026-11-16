@@ -109,13 +109,15 @@ def _launch_scope(env, cwd):
 
 
 @contextmanager
-def _server_rendezvous(managed):
-    root = hosted_mac_test_root() if managed else None
+def _server_rendezvous(qa_role):
+    if qa_role not in (None, 'identity', 'managed'):
+        raise IntegrationError('Unknown private Codex test server role.')
+    root = hosted_mac_test_root() if qa_role is not None else None
     if root is None:
         with tempfile.TemporaryDirectory(prefix='ov-policy-', dir=runtime_parent('/tmp')) as directory:
             yield Path(directory) / 'native.sock', None
         return
-    directory = root / 'ov-policy-managed'
+    directory = root / ('ov-policy-' + qa_role)
     try:
         directory.mkdir(mode=0o700)
     except FileExistsError:
@@ -147,8 +149,8 @@ def _check_test_socket(alias, target):
 
 
 @asynccontextmanager
-async def _private_server(argv, env, cwd, *, managed=False):
-    with _server_rendezvous(managed) as (socket, expected_target), \
+async def _private_server(argv, env, cwd, *, qa_role=None):
+    with _server_rendezvous(qa_role) as (socket, expected_target), \
             _StartupDiagnostics() as diagnostics:
         endpoint = 'unix://' + str(socket)
         process, cancelled = await _settle(asyncio.create_task(_spawn_owned(
@@ -175,13 +177,14 @@ async def _private_server(argv, env, cwd, *, managed=False):
 
 
 @asynccontextmanager
-async def host_server(executable, env, *, cwd, server_args=()):
+async def host_server(executable, env, *, cwd, server_args=(), identity_probe=False):
     """Original native auth/config only. Do not reinterpret arbitrary CLI flags."""
     if (env.get('OPENVEGAS_NATIVE_TOKEN') or not Path(cwd).is_absolute()
             or not Path(cwd).is_dir() or server_args):
         raise IntegrationError('Unsupported original Codex server arguments or environment.')
     async with _private_server(lambda endpoint: _handoff_server_argv(
-            [executable, '--no-daemon', 'app-server', '--listen', endpoint]), env, cwd) as endpoint:
+            [executable, '--no-daemon', 'app-server', '--listen', endpoint]), env, cwd,
+            qa_role='identity' if identity_probe else None) as endpoint:
         yield endpoint
 
 
