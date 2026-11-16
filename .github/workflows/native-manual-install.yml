@@ -1,0 +1,41 @@
+name: Check exact staged npm installer
+
+on:
+  push:
+    branches: ['codex/qa-install-0319-b5c44898']
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  install:
+    name: Install ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: macos-15, target: darwin-arm64}
+          - {runner: macos-15-intel, target: darwin-x64}
+          - {runner: windows-2022, target: win32-x64}
+          - {runner: ubuntu-22.04, target: linux-x64}
+          - {runner: ubuntu-22.04-arm, target: linux-arm64}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.15.0'
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: Download previously built QA archive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api 'repos/StephenEkwedike/OpenVegas/actions/artifacts/14189017067/zip' > customer-tarballs-unpublished.zip
+      - name: Install offline and invoke npm launchers
+        run: python -IB scripts/check_staged_installer.py --expect-target ${{ matrix.target }}
