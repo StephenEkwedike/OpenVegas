@@ -48,6 +48,10 @@ def _selection(row):
                                          sort_keys=True).encode()).hexdigest()
     _check(fingerprint == expected and native._decimal(price.get('v_per_supplier_usd')) == rate * multiplier,
            'The backend returned inconsistent direct pricing.')
+    if 'ordinary_scope_revision' in price:
+        scope = price['ordinary_scope_revision']
+        _check(isinstance(scope, str) and re.fullmatch(r'[0-9a-f]{64}', scope),
+               'The backend returned an invalid native wallet scope.')
     for field in ('supplier_input_usd_per_million', 'supplier_output_usd_per_million'):
         native._decimal(price.get(field), allow_zero=True)
     return {k: row[k] for k in ('host', 'provider', 'model', 'max_tokens')}
@@ -108,7 +112,7 @@ async def _run_local(argv, env):
             raise asyncio.CancelledError
 
 
-async def _session(host, broker, info, directory, runner, emit):
+async def _session(host, broker, info, directory, runner, emit, confirm):
     device = broker.credentials.load()
     _check(isinstance(device, str) and device.startswith('ov_device_'),
            'Existing OpenVegas device sign-in required. No session opened.')
@@ -141,6 +145,14 @@ async def _session(host, broker, info, directory, runner, emit):
          "Each request needs available funds; no purchases or top-ups.")
     emit('No chat was resumed. No managed play/switch controls here. Quit to the shell for the lobby '
          'or return to your managed session. Hosted search and subagents are disabled.')
+    try:
+        accepted = confirm('Start this chat using your available $V?', default=False)
+    except click.Abort:
+        emit('Cancelled. No wallet session opened.')
+        return 130
+    if not accepted:
+        emit('Cancelled. No wallet session opened.')
+        return 0
     token = None
     try:
         # If the terminal closes during issuance, finish receiving the handle
@@ -188,7 +200,8 @@ async def _session(host, broker, info, directory, runner, emit):
         env = _child_env(host, broker.backend, row['model'], row['max_tokens'], token)
         # A unique provider table cannot merge previously configured auth hooks.
         argv = native.host_argv(info['executable'], host, broker.backend, row['model'], [],
-                                local_tools_only=True, provider_identity='openvegas_wallet_' + secrets.token_hex(8))
+                                local_tools_only=True, provider_identity='openvegas_wallet_' + secrets.token_hex(8),
+                                supports_websockets='ordinary_scope_revision' in price)
         argv[1:1] = ['--no-daemon', '--disable', 'multi_agent', '--disable', 'multi_agent_v2',
                      '-c', 'model_catalog_json=' + json.dumps(str(model_file))]
         if reviewed is not None:
@@ -202,9 +215,9 @@ async def _session(host, broker, info, directory, runner, emit):
     return code if closed else code or 1
 
 
-async def launch(host, *, broker=None, runner=None, emit=click.echo):
+async def launch(host, *, broker=None, runner=None, emit=click.echo, confirm=click.confirm):
     _check(all(stream.isatty() for stream in (sys.stdin, sys.stdout, sys.stderr)),
-           '--wallet requires an interactive local terminal. No grant opened.')
+           'A wallet chat requires an interactive local terminal. No grant opened.')
     _check(host == 'codex', 'Fresh Claude wallet launch is unavailable: subscription isolation with '
            'managed policy intact is not verified. No grant opened; host billing is unchanged.')
     info = native.detect(host)
@@ -213,7 +226,7 @@ async def launch(host, *, broker=None, runner=None, emit=click.echo):
     broker = broker or Broker()
     try:
         with tempfile.TemporaryDirectory(prefix='ov-wallet-') as directory:
-            return await _session(host, broker, info, directory, runner or _run_local, emit)
+            return await _session(host, broker, info, directory, runner or _run_local, emit, confirm)
     except IntegrationError:
         raise
     except Exception:  # noqa: BLE001 - never echo a credential-bearing subprocess or transport error

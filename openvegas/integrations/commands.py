@@ -147,6 +147,8 @@ def go(host, dry_run, yes, allow_file_credential, keep_game_approvals, verbose):
                 click.echo("Public pets were not updated; existing files preserved. Run ov integration pets --install --upgrade for details.")
         new_terminal = _offer_default_terminal()
         click.secho("OpenVegas ready. Wallet: " + format_v(account["balance"]), fg="blue")
+        if "codex" in hosts:
+            click.echo("For an OpenVegas-funded Codex chat: npx openvegas-ai codex. Review the price before starting.")
         click.echo("Open a new VS Code terminal, then run codex or claude." if new_terminal else
                    "Restart Claude/Codex; accept its one-time plugin trust prompt.")
         click.echo("Play: Claude /openvegas play | Codex $openvegas play. Pets: /pets.")

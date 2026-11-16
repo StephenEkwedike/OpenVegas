@@ -275,7 +275,7 @@ def codex_resume_argv(executable, endpoint, model, host_args):
 
 
 def host_argv(executable, host, backend, model, host_args, *, local_tools_only=False, hosted_web=False,
-              provider_identity='openvegas_v'):
+              provider_identity='openvegas_v', supports_websockets=False):
     index = validate_host_args(host, host_args)
     if host == 'claude':
         if model == 'anthropic/claude-haiku-4.5':
@@ -289,7 +289,7 @@ def host_argv(executable, host, backend, model, host_args, *, local_tools_only=F
     provider = {
         'name': 'OpenVegas $V', 'base_url': backend + '/integrations/native/v1',
         'env_key': 'OPENVEGAS_NATIVE_TOKEN', 'wire_api': 'responses', 'requires_openai_auth': False,
-        'request_max_retries': 0, 'stream_max_retries': 0, 'supports_websockets': False,
+        'request_max_retries': 0, 'stream_max_retries': 0, 'supports_websockets': supports_websockets,
     }
     # A complete table, not individual leaf merges with a stale provider's auth
     # settings. Dedicated flags take precedence without rewriting user config.
@@ -608,11 +608,13 @@ class HostCommand(NativeCommand):
         super().__init__(host, callback=native.callback,
                          params=[copy.copy(p) for p in native.params if p.name != 'host'],
                          help=f'Launch {host} with a confirmed OpenVegas $V budget. Native options follow --.'
-                         + (' Or use --wallet alone for a fresh local wallet chat.' if host == 'codex' else ''))
+                         + (' On macOS and Linux, no arguments (or --wallet) opens a fresh wallet chat after price confirmation.' if host == 'codex' else ''))
 
     def parse_args(self, ctx, args):
-        # Only a shell alias and an exact standalone flag can consent. Never
-        # reinterpret a prompt or a host argument after the literal delimiter.
+        # Choosing a route is not spending consent. The fresh launcher quotes
+        # first. Never reinterpret a host argument after the literal delimiter.
+        if self.fixed_host == 'codex' and not args and os.name == 'posix':
+            ctx.meta['fresh_wallet'] = True
         prefix = args[:args.index('--')] if '--' in args else args
         if '--wallet' in prefix:
             if list(args) != ['--wallet']:
