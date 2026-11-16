@@ -17,7 +17,7 @@ def require_hosted_lane():
     required = {
         'CI': 'true', 'GITHUB_ACTIONS': 'true', 'RUNNER_ENVIRONMENT': 'github-hosted',
         'GITHUB_EVENT_NAME': 'push', 'GITHUB_WORKFLOW': 'Windows stock managed critical QA (offline)',
-        'GITHUB_REF': 'refs/heads/codex/qa-win-stock-critical',
+        'GITHUB_REF': 'refs/heads/codex/qa-win-codex-f9487f0a',
         'OV_WINDOWS_CONPTY_ISOLATED': '1',
     }
     if sys.platform != 'win32' or any(os.environ.get(k) != v for k, v in required.items()):

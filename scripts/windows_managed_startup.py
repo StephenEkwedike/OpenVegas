@@ -22,7 +22,7 @@ FILES = {
     WIN: (PACKAGE, ("bin/" + BIN, "package.json")),
 }
 HOSTS = ("codex", "claude")
-REF = "refs/heads/codex/qa-win-stock-critical"
+REF = "refs/heads/codex/qa-win-codex-f9487f0a"
 
 
 def require(ok):

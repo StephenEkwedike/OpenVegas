@@ -1,7 +1,7 @@
 name: Windows stock managed critical QA (offline)
 on:
   push:
-    branches: ['codex/qa-win-stock-critical']
+    branches: ['codex/qa-win-codex-f9487f0a']
 permissions:
   contents: read
   actions: read
