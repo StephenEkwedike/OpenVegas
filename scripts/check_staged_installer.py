@@ -9,8 +9,8 @@ import subprocess
 import tempfile
 import zipfile
 
-ARCHIVE = "b5c448980f744037dd70390f7d2279b3d9e337c984174dfda290244881787e6e"
-INDEX = "cb4ef579590aaa15fad8aa98301d979c084ecd0abaa75c72c282a89e6e1565cb"
+ARCHIVE = "c8f92bbc21b4dc04e7f03772b1c9aaecf2f74b50bc547367a2812e8329191376"
+INDEX = "9fa6b306ce5016adf3568d5a65719dad4a955b89f9932139d568d0d7fd75c884"
 LAUNCHER = "437a0ca08f9a4459c716b1fba541b6a450e659d54f4aca5aa3dee9c9f66f6d40"
 VERSION = "0.3.19"
 TARGETS = ("darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64", "win32-x64")

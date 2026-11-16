@@ -2,7 +2,7 @@ name: Check exact staged npm installer
 
 on:
   push:
-    branches: ['codex/qa-install-0319-b5c44898']
+    branches: ['codex/qa-install-0319-c8f92bbc']
 
 permissions:
   actions: read
@@ -36,6 +36,6 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh api 'repos/StephenEkwedike/OpenVegas/actions/artifacts/14189017067/zip' > customer-tarballs-unpublished.zip
+        run: gh api 'repos/StephenEkwedike/OpenVegas/actions/artifacts/14203019206/zip' > customer-tarballs-unpublished.zip
       - name: Install offline and invoke npm launchers
         run: python -IB scripts/check_staged_installer.py --expect-target ${{ matrix.target }}
