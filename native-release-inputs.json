@@ -194,7 +194,7 @@
     "openvegas/integrations/codex_handoff_policy.py": "dca0510259bed5535387f9d3c972d2e5e0e6e937a2c72805f1d8c22af6da7419",
     "openvegas/integrations/codex_live_switch.py": "bc633c4800575e4d12f27ff85c78971482a9e17ad2b33f76b2da3ed59c0982d1",
     "openvegas/integrations/codex_live_transport.py": "e4c0f10ddcd6c18e0386ce13a6f8c89255cf72c0368d1b1453f79eda71933c2c",
-    "openvegas/integrations/codex_pets.py": "61e52849ca308c15b91a398152c28b246227ebfc890ed6bb867bcf0db69f7e55",
+    "openvegas/integrations/codex_pets.py": "25216b9c852985210492ef996a009f54c8f89653860b8cfd20e72aa03e0415a5",
     "openvegas/integrations/codex_stable_transport.py": "f2000295be52bbe26474f080f8880eebebce1159a610389979b803e84e148533",
     "openvegas/integrations/codex_title_origin.py": "cf1cc4b2c99d6c9677a3f277c0eff4424f28b281e2009901e5558807db13bfef",
     "openvegas/integrations/commands.py": "9c8ad0779980396014a1544902f04c2e5a712562619694f1f9de285f5bef9eb8",
@@ -331,9 +331,9 @@
   },
   "native_paid_enabled": false,
   "repository_files": {
-    ".github/workflows/native-public.yml": "e07798eaee9afb9b09b7d5ccaa715ace88391b220db296be39f698b87b31916a",
+    ".github/workflows/native-public.yml": "724e7d7e27fb69573366fa0b1fe67c267a3c09bb342348f8a20be0414d3c210d",
     "ci-build-requirements.txt": "9abfa42c3c675a76a4edb4db8e2c296467ec38da27522c15633456d3478f5a09",
-    "native-router-freeze.json": "1575632a1ac98e02bc1a11bd3a7235bf10c8f11236cf6b5dbac39f9e07d02d9d",
+    "native-router-freeze.json": "b622f28ce76da7d421f22e0f00ba97bf0c61cfd485c5a9d0592dcf8b263407b3",
     "npm-cli/bin/release.js": "437a0ca08f9a4459c716b1fba541b6a450e659d54f4aca5aa3dee9c9f66f6d40",
     "openvegas-0.3.22.dist-info/METADATA": "a66731f6e8770aee5252b1874d5914c5cd18801640a230343eb7c16781b68409",
     "openvegas-0.3.22.dist-info/RECORD": "8bd9abf8b2cdca37797bf97f6af9fa23ddb87d9e932c8f2bf4268deb5af2cea2",
@@ -534,7 +534,7 @@
     "openvegas/integrations/codex_handoff_policy.py": "dca0510259bed5535387f9d3c972d2e5e0e6e937a2c72805f1d8c22af6da7419",
     "openvegas/integrations/codex_live_switch.py": "bc633c4800575e4d12f27ff85c78971482a9e17ad2b33f76b2da3ed59c0982d1",
     "openvegas/integrations/codex_live_transport.py": "e4c0f10ddcd6c18e0386ce13a6f8c89255cf72c0368d1b1453f79eda71933c2c",
-    "openvegas/integrations/codex_pets.py": "61e52849ca308c15b91a398152c28b246227ebfc890ed6bb867bcf0db69f7e55",
+    "openvegas/integrations/codex_pets.py": "25216b9c852985210492ef996a009f54c8f89653860b8cfd20e72aa03e0415a5",
     "openvegas/integrations/codex_stable_transport.py": "f2000295be52bbe26474f080f8880eebebce1159a610389979b803e84e148533",
     "openvegas/integrations/codex_title_origin.py": "cf1cc4b2c99d6c9677a3f277c0eff4424f28b281e2009901e5558807db13bfef",
     "openvegas/integrations/commands.py": "9c8ad0779980396014a1544902f04c2e5a712562619694f1f9de285f5bef9eb8",
@@ -668,7 +668,7 @@
     "requirements.lock": "74cf80310c10efff836d8e29e4165abb225d779c3ec86c16ee23a5c2c4996162",
     "scripts/assemble_npm_release.py": "394689db9e93170279a5f3597ea83f940845459e343173869754ced88c137256",
     "scripts/build_cli_candidate.py": "bc5de76962997d3dfc5a90c84dbca8af524695053d67b9d1074a49c3b23915fb",
-    "scripts/ci_prepare_native_frozen.py": "5c53fa83d5a3754f03cedb7ccaecf658c7128d9c8a4296e2bbab11190b1cdde6",
+    "scripts/ci_prepare_native_frozen.py": "3f3fc82b1d3c2f49ec502292669cd79f4d3d10d0e91873eb020af5fd68c5c1c2",
     "scripts/ci_runtime_assemble.py": "409968f6efce2587b161626aedfe74d20b41e58f33dbba888dbfcfcea3e01db3",
     "scripts/ci_runtime_binary.py": "f7e09ca011cec523058486c64214aec6bacaad617961318b19a4e3901100d826",
     "scripts/ci_runtime_tarballs.py": "2a7a34fccc2e5d209f7107fcd570cc2f66b45a81ac88c4b58634121b5227851c",
@@ -677,6 +677,6 @@
     "scripts/verify_native_release_source.py": "7aa8864711e960a2eb457dbc60952a97285c8e5e088c85039f0b91a2e802a479",
     "scripts/verify_native_router_candidate.py": "b3e487bb1490356d0f7125741d5f4e02a2adac724a01fd3db58a3b882e128425"
   },
-  "source_sha256": "e2ae201f3b086cea925e7232e80e6d1246a02a96f85c8579ee366da7ee64f3ca",
+  "source_sha256": "c5cc4fe1a06246c5c256032ad78e76db58f56aae54bd4c658bedef62da022801",
   "version": "0.3.22"
 }

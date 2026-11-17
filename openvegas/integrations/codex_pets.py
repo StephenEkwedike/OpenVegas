@@ -235,10 +235,13 @@ def _equipped_pair(owned):
 @asynccontextmanager
 async def equipped_pet_args(broker, argv=()):
     """Set only the managed TUI's pet for this process, never its saved preference."""
-    args = []
+    explicit_pet = any("tui.pet=" in arg.replace(" ", "") for arg in argv)
+    # An empty override list revives the native saved preview (for example Q50).
+    # Codex 0.166/0.169 use this sentinel to hide it without changing config.toml.
+    args = [] if explicit_pet else ["-c", 'tui.pet="disabled"']
     with ExitStack() as cleanup:
         try:
-            if not any("tui.pet=" in arg.replace(" ", "") for arg in argv):
+            if not explicit_pet:
                 from .cosmetics import _HostAssets, _HostLibrary
                 from openvegas.emotes.resources import Catalog
                 from openvegas.emotes.selection import SelectionStore
@@ -277,7 +280,8 @@ async def equipped_pet_args(broker, argv=()):
                         (directory / "pet.json").write_bytes(_json(manifest))
                         args = ["-c", "tui.pet=" + json.dumps(directory.as_posix(), ensure_ascii=False)]
         except (OSError, IntegrationError, ValueError, TimeoutError):
-            pass  # A missing wallet or unsupported display must never prevent a normal chat.
+            print("OpenVegas: equipped character unavailable. No saved preview substituted; "
+                  "start a new session to retry. Chat is still available.", file=sys.stderr)
         yield args
 
 

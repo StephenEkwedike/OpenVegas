@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 source, output = (Path(arg).resolve() for arg in sys.argv[1:])
-expected = '1575632a1ac98e02bc1a11bd3a7235bf10c8f11236cf6b5dbac39f9e07d02d9d'
+expected = 'b622f28ce76da7d421f22e0f00ba97bf0c61cfd485c5a9d0592dcf8b263407b3'
 raw = (source / 'native-router-freeze.json').read_bytes()
 assert hashlib.sha256(raw).hexdigest() == expected
 receipt = json.loads(raw)
