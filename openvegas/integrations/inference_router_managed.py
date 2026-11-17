@@ -104,6 +104,8 @@ class ManagedCodexRouter(RuntimeOwner):
                                            effective_policy_verified=True) as (server_env, overlay):
                 self._router_url = self.session._url
                 async with AsyncExitStack() as stack:
+                    from .codex_pets import equipped_pet_args
+                    visual = await stack.enter_async_context(equipped_pet_args(broker, argv))
                     self.source_endpoint = await stack.enter_async_context(_private_server(
                         lambda endpoint: _handoff_server_argv([self.executable, *overlay,
                             '--no-daemon', 'app-server', '--listen', endpoint]), server_env, self.cwd,
@@ -118,7 +120,7 @@ class ManagedCodexRouter(RuntimeOwner):
                         s.codex_endpoint, s.live_owner = self.source_endpoint, self
                         try:
                             return await s._terminal_child(
-                                [self.executable, '--remote', transport.endpoint, *argv], self.env)
+                                [self.executable, *visual, '--remote', transport.endpoint, *argv], self.env)
                         finally:
                             self.ending = True
                             if self.task is not None:

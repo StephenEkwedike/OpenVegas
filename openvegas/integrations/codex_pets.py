@@ -1,6 +1,7 @@
-"""Preview pets for Codex CLI 0.163.0; no entitlement or network access.
+"""Codex pet atlas builder and session-scoped Shop equipment.
 
-The native host persists decoded frames. Never add owned/premium pack loaders here.
+Codex keeps decoded frames locally; only freshly verified equipped art is handed
+to the managed native session. Standalone preview exports remain public only.
 Private artwork studies require a separate explicit local-review opt-in.
 Installation is atomic per pet and does not select a pet or edit config.
 Explicit upgrades accept only byte-verified prior exports, with retained backups.
@@ -9,6 +10,7 @@ Building is portable; secure installation supports macOS/Linux, not Windows.
 
 from __future__ import annotations
 
+import asyncio
 import ctypes
 import errno
 import hashlib
@@ -17,14 +19,16 @@ import json
 import os
 import stat
 import sys
+import tempfile
 import uuid
-from contextlib import contextmanager
+from contextlib import ExitStack, asynccontextmanager, contextmanager
 from pathlib import Path
 
 from PIL import Image, ImageOps
 
 from openvegas.emotes.resources import PackRepository
 from ._q50_export_history import Q50_PRIOR_EXPORTS
+from .credentials import IntegrationError
 
 PREVIEW_PAIRS = (
     ("beat-maker", "skyline-dunk"),
@@ -78,15 +82,26 @@ def _pack_layout(pack, indices, content_box=CONTENT_BOX):
     return bounds, size, offset
 
 
-def build_pet(companion_slug: str, completion_slug: str, *, demo=False,
-              _legacy_layout=False, _legacy_motion_timing=False, _legacy_size=False) -> tuple[dict, bytes]:
+def build_pet(companion_slug: str | None, completion_slug: str | None, *, demo=False,
+              equipped=False, _legacy_layout=False, _legacy_motion_timing=False, _legacy_size=False) -> tuple[dict, bytes]:
     """Return a native manifest and deterministic PNG from allowlisted packaged art."""
     pair = (companion_slug, completion_slug)
-    if pair not in PREVIEW_PAIRS + REVIEW_PAIRS + LOCAL_REVIEW_PAIRS or (demo and pair not in PREVIEW_PAIRS + LOCAL_REVIEW_PAIRS):
+    if equipped:
+        if (demo or not any(pair) or any(slug is not None and slug not in
+                {p[index] for p in PREVIEW_PAIRS} for index, slug in enumerate(pair))):
+            raise CodexPetError("Unsupported public equipment artwork")
+    elif pair not in PREVIEW_PAIRS + REVIEW_PAIRS + LOCAL_REVIEW_PAIRS or (demo and pair not in PREVIEW_PAIRS + LOCAL_REVIEW_PAIRS):
         raise CodexPetError("Only reviewed public preview pairs are supported")
     repository = PackRepository()
-    companion = repository.load(companion_slug)
-    completion = repository.load(completion_slug)
+    companion = repository.load(companion_slug) if companion_slug else None
+    completion = repository.load(completion_slug) if completion_slug else None
+    return _atlas(pair, companion, completion, demo=demo, _legacy_layout=_legacy_layout,
+                  _legacy_motion_timing=_legacy_motion_timing, _legacy_size=_legacy_size)
+
+
+def _atlas(pair, companion, completion, *, owned=False, demo=False, _legacy_layout=False,
+           _legacy_motion_timing=False, _legacy_size=False):
+    companion_slug, completion_slug = pair
     motion = companion_slug == "q50-jewelry-motion"
     # Codex 0.163 requires a fixed 1536x1872 sheet but accepts a custom grid.
     old_size = _legacy_size or _legacy_layout or _legacy_motion_timing
@@ -97,6 +112,9 @@ def build_pet(companion_slug: str, completion_slug: str, *, demo=False,
     mappings = []
     slot = 0
     for pack in (companion, completion):
+        if pack is None:
+            mappings.append({})
+            continue
         if motion and mappings:
             mappings.append(mappings[0])
             continue
@@ -140,24 +158,32 @@ def build_pet(companion_slug: str, completion_slug: str, *, demo=False,
         return {"frames": [mapping[i] for i in clip.frames], "fps": fps,
                 "loop": loop, "fallback": "idle"}
 
-    idle = mappings[0][companion.manifest.animations["idle"].frames[0]]
+    idle = mappings[0][companion.manifest.animations["idle"].frames[0]] if companion else slot
+    if idle >= rows * columns:
+        raise CodexPetError("No transparent idle frame available")
+    still = {"frames": [idle], "fps": 1, "loop": False, "fallback": "idle"}
     manifest = {
-        "id": NAMESPACE + companion_slug + "-" + completion_slug,
-        "displayName": (f"OpenVegas {companion.manifest.display_name} + "
-                        f"{completion.manifest.display_name} (Preview)"),
+        "id": NAMESPACE + (companion_slug or "none") + "-" + (completion_slug or "none"),
+        "displayName": "OpenVegas " + " + ".join(p.manifest.display_name for p in (companion, completion) if p) + " (Preview)",
         "description": "OpenVegas public previews only; not premium owned cosmetics.",
         "spritesheetPath": "spritesheet.png",
         "frame": {"width": cell_size[0], "height": cell_size[1], "columns": columns, "rows": rows},
         "animations": {
             "idle": {"frames": [idle], "fps": 1, "loop": True, "fallback": "idle"},
             # Override every CLI 0.163 default: inherited indices target another atlas.
-            **{name: track(companion, mappings[0], "waiting", loop=True)
+            **{name: track(companion, mappings[0], "waiting", loop=True) if companion else still
                for name in _DANCE_TRACKS},
             "failed": {"frames": [idle], "fps": 1, "loop": True, "fallback": "idle"},
             "sad": {"frames": [idle], "fps": 1, "loop": True, "fallback": "idle"},
-            "review": track(completion, mappings[1], "complete", loop=False),
+            "review": track(completion, mappings[1], "complete", loop=False) if completion else still,
         },
     }
+    if owned:
+        manifest["id"] = "openvegas-equipped-" + (companion_slug or "none") + "-" + (completion_slug or "none")
+        manifest["displayName"] = "OpenVegas " + " + ".join(p.manifest.display_name for p in (companion, completion) if p)
+        manifest["description"] = "Equipped Shop artwork for this session."
+        if companion:
+            manifest["animations"]["idle"] = track(companion, mappings[0], "idle", loop=True)
     if demo:
         # Separate, explicitly labeled visual tests. Normal pets still follow
         # genuine host lifecycle, and private entitlements never enter this cache.
@@ -186,6 +212,73 @@ def build_pet(companion_slug: str, completion_slug: str, *, demo=False,
     atlas.save(output, format="PNG")
     atlas.close()
     return manifest, output.getvalue()
+
+
+def _equipped_pair(owned):
+    if not isinstance(owned, dict) or not isinstance(owned.get("account_id"), str) or not owned["account_id"]:
+        return None, None
+    selected, entitlements = owned.get("equipped"), owned.get("entitlements")
+    if not isinstance(selected, dict) or not isinstance(entitlements, list) or len(entitlements) > 256:
+        return None, None
+    pair = []
+    for index, slot in enumerate(("companion", "completion")):
+        item = selected.get(slot)
+        slug = next((p[index] for p in PREVIEW_PAIRS if item == "openvegas." + p[index]), None)
+        rows = [e for e in entitlements if isinstance(e, dict) and e.get("item_id") == item]
+        valid = (slug and len(rows) == 1 and rows[0].get("slot") == slot
+                 and rows[0].get("pack_id") == item and rows[0].get("effective_status") == "active"
+                 and rows[0].get("activatable") is True and rows[0].get("equipped") is True)
+        pair.append(slug if valid else None)
+    return tuple(pair)
+
+
+@asynccontextmanager
+async def equipped_pet_args(broker, argv=()):
+    """Set only the managed TUI's pet for this process, never its saved preference."""
+    args = []
+    with ExitStack() as cleanup:
+        try:
+            if not any("tui.pet=" in arg.replace(" ", "") for arg in argv):
+                from .cosmetics import _HostAssets, _HostLibrary
+                from openvegas.emotes.resources import Catalog
+                from openvegas.emotes.selection import SelectionStore
+                async with asyncio.timeout(9):
+                    owned = await broker.cosmetics_owned("codex")
+                    pair = _equipped_pair(owned)
+                    if any(pair):
+                        directory = Path(cleanup.enter_context(tempfile.TemporaryDirectory(prefix="ov-pet-"))).resolve()
+                        api = _HostAssets(broker, "codex", (broker.backend, owned["account_id"]))
+                        with tempfile.TemporaryDirectory(dir=directory) as scratch:
+                            library = _HostLibrary(api, Path(scratch) / "cache", SelectionStore(Path(scratch) / "selection"))
+                            try:
+                                selection = await library.sync()
+                                if pair != _equipped_pair(selection["owned"]):
+                                    raise CodexPetError("Equipment changed during startup")
+                                catalog = library.catalog(Catalog())
+                                repo = library.repository(PackRepository())
+                                packs = []
+                                for slot, slug in zip(("companion", "completion"), pair):
+                                    key = selection["selected_slots"][slot]
+                                    if slug is None and key is None:
+                                        packs.append(None)
+                                    elif slug and key == "openvegas." + slug and library.authorize(key):
+                                        pack = repo.load(catalog.resource_for(key))
+                                        if slot not in pack.manifest.tags or pack.manifest.pack_id != key:
+                                            raise CodexPetError("Unexpected Shop pack")
+                                        packs.append(pack)
+                                    else:
+                                        raise CodexPetError("Equipped pack not authorized")
+                                manifest, png = _atlas(pair, *packs, owned=True)
+                                if not all(library.authorize(p.manifest.pack_id) for p in packs if p):
+                                    raise CodexPetError("Equipment authorization expired")
+                            finally:
+                                library.close()
+                        (directory / "spritesheet.png").write_bytes(png)
+                        (directory / "pet.json").write_bytes(_json(manifest))
+                        args = ["-c", "tui.pet=" + json.dumps(directory.as_posix(), ensure_ascii=False)]
+        except (OSError, IntegrationError, ValueError, TimeoutError):
+            pass  # A missing wallet or unsupported display must never prevent a normal chat.
+        yield args
 
 
 def _json(value: dict) -> bytes:

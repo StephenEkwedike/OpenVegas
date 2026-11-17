@@ -549,8 +549,10 @@ async def bridge(ws, pipe, owner, tui):
 
 
 async def run(owner, exe, env):
+    from .codex_pets import equipped_pet_args
     session = owner.session
     async with (
+        equipped_pet_args(owner.broker) as visual,
         session.launch(
             version=VERSIONS["codex"], env=env, args=[], effective_policy_verified=True
         ) as (child_env, overlay),
@@ -592,7 +594,7 @@ async def run(owner, exe, env):
                     err=True,
                 )
                 tui = subprocess.Popen(  # noqa: ASYNC220 - Retain CreateProcess handle before yielding.
-                    [exe, "--remote", url, "--remote-auth-token-env", "OV_CODEX_UI_TOKEN"],
+                    [exe, *visual, "--remote", url, "--remote-auth-token-env", "OV_CODEX_UI_TOKEN"],
                     env={**env, "OV_CODEX_UI_TOKEN": secret},
                     cwd=owner.cwd,
                     shell=False,
