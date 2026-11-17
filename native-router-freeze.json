@@ -1,6 +1,6 @@
 {
   "baseline_build_inputs_sha256": null,
-  "baseline_freeze_sha256": "b622f28ce76da7d421f22e0f00ba97bf0c61cfd485c5a9d0592dcf8b263407b3",
+  "baseline_freeze_sha256": "a9920ca2bb6bf74ed7475d110795f3e0d7d7d21fe0af6ea84d1293082c56aa20",
   "checkout_native_inputs": {
     "openvegas/integrations/assets/claude-command-ownership.js": "691a73b22195574e8a3194ee347910440f5f3084313d121b9e7b636a40612126",
     "openvegas/integrations/assets/claude-generation-observer.js": "2a52e5c1ecde344f7720eef310d800fcc6a6907157383d8e6c27ecc24d7da3e6",
@@ -32,7 +32,7 @@
     "openvegas/integrations/inference_router_session.py": "8418caae4c26c0db004b042c123e38c44cce8e0c8a637707acb866616d9ef29c",
     "openvegas/integrations/inference_router_shutdown_receipt.py": "31021d6b7f4ef884852fc9c9aa154322d311e059f22e1f9b4ad27f24f1c7a9de",
     "openvegas/integrations/inference_router_state.py": "e4529b9221b4d8a63dc6d960f5d595767f59d6dd0b4e3b3b1a885c368f7a724c",
-    "openvegas/integrations/inference_router_wallet.py": "a84a1ebf2caef54ebf58f7d98bae44d1ad5732032d3dc7924fad02bc53a2c282",
+    "openvegas/integrations/inference_router_wallet.py": "621002f67d0c6d6be97d0894aa2ac8024556f5b0c21b88020087e58b224ae0dd",
     "openvegas/integrations/inference_router_windows.py": "a19c0f2fec4bad9a7ed536e28e4967929f960f7103d2e67f83350fa9014fc9a0",
     "openvegas/integrations/installer.py": "3e10ec78a4ed2896ab83c1de7bc3676a51445944adff390b5e1166b8495993fa",
     "openvegas/integrations/mcp_server.py": "387a961a506a7ae961acb02a68fa41660a6e1d2497a8c97b9829c5afa4eb66dc",
@@ -43,7 +43,8 @@
     "openvegas/integrations/session_ownership.py": "65d2e00a3c7ce60ba19176aaffee3e6a4247aef82593e17dc8bb8896a30fdff9",
     "openvegas/integrations/setup_progress.py": "c7d5db949494e7b070bf14b0a310ea97534e71b7e63946a9baaeed11ccfc36ed",
     "openvegas/integrations/terminal_relay.py": "9700d6ecd845d61aaed8470d0ae241d475bcc6daadbf0bab7c349413dcb32eef",
-    "openvegas/integrations/wallet_startup.py": "bdcad56e0723adddf51b64b9e3dc2500ec03d74f8846e67e6d3b8b24b143a11b",
+    "openvegas/integrations/wallet_offer_digest.py": "4591ecd100c2d58d33e8013665d56154444e36032fc8fba27b8ae960c775dd28",
+    "openvegas/integrations/wallet_startup.py": "be2cd043e032a541431cc7fd25d305a9603a303b8c201f89df5598b0ab985f1c",
     "openvegas/integrations/windows_billing_host.py": "c08c8f1e9884dbfea9128813a1c7ac4aab8af02b38a4a0f1dccbc22f0c8291ec",
     "openvegas/integrations/windows_customer.py": "bc5e63474fce80a39c123c772e4fe662139f558f8f3a3f6d0567cd097e08e031",
     "openvegas/integrations/windows_customer_claude.py": "161cf70b9b67f7c22595ed6ff4a38df8b9ecf5ed327eea690680958fdc38127e",
@@ -59,12 +60,12 @@
   "frozen": true,
   "inputs": {
     "cli": {
-      "openvegas-0.3.23.dist-info/METADATA": "d2c395240bdad1f4351326377a6fd1f1f026b6a95a58df7dbef23e9b407a1e00",
-      "openvegas-0.3.23.dist-info/RECORD": "2e4f22a588f572dd07c43752eb580b5bdc654d20c6e02e13e7eb367ce1ac8927",
-      "openvegas-0.3.23.dist-info/WHEEL": "61532836a2b3111b7ec23519c09df7c41180c27165fb872a6d8913b566b88ad1",
-      "openvegas-0.3.23.dist-info/entry_points.txt": "2af366ec5eccda1438b59e0a1485d8db2d0d556b49820ca053e3aee185a4bbf1",
-      "openvegas-0.3.23.dist-info/top_level.txt": "d721166c5df01379cecbe646bb22b8dc6a651555becdc07ac05321294903d3ed",
-      "openvegas/__init__.py": "278fcdf4ee90d84ba8a1a40379e659594d2ef6dc0f8d218749199f203e059bde",
+      "openvegas-0.3.24.dist-info/METADATA": "c5e914aa20db81349f890badb207940395ac38503f740d410f549c9479b7186b",
+      "openvegas-0.3.24.dist-info/RECORD": "cfa7aae33420405992e1e51b3a099281b6fde90928bce691edfa8bdabc621540",
+      "openvegas-0.3.24.dist-info/WHEEL": "61532836a2b3111b7ec23519c09df7c41180c27165fb872a6d8913b566b88ad1",
+      "openvegas-0.3.24.dist-info/entry_points.txt": "2af366ec5eccda1438b59e0a1485d8db2d0d556b49820ca053e3aee185a4bbf1",
+      "openvegas-0.3.24.dist-info/top_level.txt": "d721166c5df01379cecbe646bb22b8dc6a651555becdc07ac05321294903d3ed",
+      "openvegas/__init__.py": "9204a8e466cff7608276737f458225c6fd28f65259e6997b086fb5fe4f10b707",
       "openvegas/agent/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "openvegas/agent/boost.py": "0f32e6a3b8ab05ff4de551be27cc93ddc6f6a94d51c23d0238c59d0cf2e721a8",
       "openvegas/agent/dashboard_cli.py": "5fb46dc1b39dbad4b26a210dedd418bd0df4099bfecabf60d2fa7275da4bdea1",
@@ -289,7 +290,7 @@
       "openvegas/integrations/inference_router_session.py": "8418caae4c26c0db004b042c123e38c44cce8e0c8a637707acb866616d9ef29c",
       "openvegas/integrations/inference_router_shutdown_receipt.py": "31021d6b7f4ef884852fc9c9aa154322d311e059f22e1f9b4ad27f24f1c7a9de",
       "openvegas/integrations/inference_router_state.py": "e4529b9221b4d8a63dc6d960f5d595767f59d6dd0b4e3b3b1a885c368f7a724c",
-      "openvegas/integrations/inference_router_wallet.py": "a84a1ebf2caef54ebf58f7d98bae44d1ad5732032d3dc7924fad02bc53a2c282",
+      "openvegas/integrations/inference_router_wallet.py": "621002f67d0c6d6be97d0894aa2ac8024556f5b0c21b88020087e58b224ae0dd",
       "openvegas/integrations/inference_router_windows.py": "a19c0f2fec4bad9a7ed536e28e4967929f960f7103d2e67f83350fa9014fc9a0",
       "openvegas/integrations/installer.py": "3e10ec78a4ed2896ab83c1de7bc3676a51445944adff390b5e1166b8495993fa",
       "openvegas/integrations/local_controls.py": "5dca95017959a50921305a19d8b88a95f09a14f42dc7d0bff059e0b95d5d6612",
@@ -310,7 +311,8 @@
       "openvegas/integrations/terminal_shell.py": "5c5835c3b50a032e73835af39cb6c528cfd3db45897b5f0abbdfd29966fa7453",
       "openvegas/integrations/terminal_wallet.py": "fd7270c0c13a6a159d76095e67b64e8b729a031bec3a084c8c71fe5a65828de5",
       "openvegas/integrations/use.py": "f6eb6ccbd849323c21d2adab36c1d5bb7bd5bc0761dd17e42295df51c368a421",
-      "openvegas/integrations/wallet_startup.py": "bdcad56e0723adddf51b64b9e3dc2500ec03d74f8846e67e6d3b8b24b143a11b",
+      "openvegas/integrations/wallet_offer_digest.py": "4591ecd100c2d58d33e8013665d56154444e36032fc8fba27b8ae960c775dd28",
+      "openvegas/integrations/wallet_startup.py": "be2cd043e032a541431cc7fd25d305a9603a303b8c201f89df5598b0ab985f1c",
       "openvegas/integrations/windows_billing_host.py": "c08c8f1e9884dbfea9128813a1c7ac4aab8af02b38a4a0f1dccbc22f0c8291ec",
       "openvegas/integrations/windows_customer.py": "bc5e63474fce80a39c123c772e4fe662139f558f8f3a3f6d0567cd097e08e031",
       "openvegas/integrations/windows_customer_claude.py": "161cf70b9b67f7c22595ed6ff4a38df8b9ecf5ed327eea690680958fdc38127e",
@@ -389,7 +391,7 @@
       "openvegas/tv/schema.py": "04fc726c06c893666cccff91c9548a5432b3348b07832879a992159018c780e7",
       "openvegas/wallet/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "openvegas/wallet/ledger.py": "4de7fe7b84f5431c311d4f83d6624c37d2178b9d7b4ebe186b60f5737c6ddf11",
-      "pyproject.toml": "8f47c02dcab77fe65bcd2f4902593da269474754ff8c2702309c619a838c2712",
+      "pyproject.toml": "bde8f81d08164261f34a6fbcdd1da78a865d28f3870d693cbc5b34cbca813f27",
       "requirements.lock": "74cf80310c10efff836d8e29e4165abb225d779c3ec86c16ee23a5c2c4996162",
       "scripts/build_cli_candidate.py": "bc5de76962997d3dfc5a90c84dbca8af524695053d67b9d1074a49c3b23915fb",
       "scripts/frozen_entry.py": "1f39353e7d62f5a12259550cbbd0524adaaa165984d954960a0f3aa37c10a505"
@@ -403,8 +405,8 @@
     "native_terminal_balance_display": "not_run",
     "permission_and_tool_continuity": "not_run"
   },
-  "preparation": "Private wallet-first 0.3.23 on candidate5; no upload or publication.",
+  "preparation": "Private wallet consent 0.3.24 on public 0.3.23; no upload or publication.",
   "publication_approved": false,
   "published": false,
-  "version": "0.3.23"
+  "version": "0.3.24"
 }

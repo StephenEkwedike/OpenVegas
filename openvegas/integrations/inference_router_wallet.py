@@ -35,7 +35,7 @@ class CodexWalletGrant:
         return self.boundary is None or self.boundary.state in {
             'new', 'quoting', 'quoted', 'rejected', 'closed'}
 
-    async def open(self, model, *, confirm_quote=None):
+    async def open(self, model, *, confirm_quote=None, review_catalog=None):
         require(not self.started, 'Wallet preparation cannot be retried.')
         self.started = True
         device = self.broker.credentials.load()
@@ -67,9 +67,15 @@ class CodexWalletGrant:
             if inspect.isawaitable(accepted):
                 accepted = await accepted
             require(accepted is True, 'Wallet quote was not confirmed; no grant opened.')
+        consent = {}
+        if review_catalog is not None:
+            from .wallet_offer_digest import offer_digest
+            consent['consent_catalog_digest'] = offer_digest(options['models'], fields['max_tokens'])
+            require(review_catalog(quote, options, device) is True,
+                    'Wallet quote was not confirmed; no grant opened.')
         issued = self.wall_clock()
         grant = await boundary.request('POST', '/native/sessions', token=device, data={
-            **fields, 'billing_mode': 'wallet', 'confirmed': True,
+            **fields, **consent, 'billing_mode': 'wallet', 'confirmed': True,
             'pricing_fingerprint': fingerprint})
         require(isinstance(grant, dict) and boundary.state == 'issued'
                 and grant.get('pricing') == pricing and grant.get('billing_mode') == 'wallet'
