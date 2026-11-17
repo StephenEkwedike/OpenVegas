@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: openvegas
-Version: 0.3.20
+Version: 0.3.21
 Summary: Terminal Arcade for Developers — mint, wager, and redeem $V for AI inference
 License-Expression: MIT
 Requires-Python: >=3.11

@@ -58,17 +58,22 @@ class RequestStableTransport(StableTransport):
     """Reuse the native input/cancellation relay, not the old work inventory."""
 
     request_boundary = True
-    # Codex can fetch large native history pages at startup. Only the owned
-    # backend reader gets the larger envelope, never the sending TUI.
-    backend_limits = MappingProxyType({**_LIMITS, 'max_size': 16 * 1024 * 1024, 'max_queue': 1})
+    # Native plugin catalogs include bundled documentation and can exceed 16 MiB.
+    # Only a matched metadata reply gets this allowance, never TUI input.
+    backend_limits = MappingProxyType({**_LIMITS, 'max_size': 64 * 1024 * 1024, 'max_queue': 1})
     _large_history_reads = frozenset({'thread/read', 'thread/list', 'thread/turns/list', 'thread/items/list'})
 
     def _read_backend_frame(self, raw):
         frame = _frame(raw)
-        oversized = len(raw) > _MAX_FRAME or (
-            len(raw) > _MAX_FRAME // 4 and not raw.isascii() and len(raw.encode('utf-8')) > _MAX_FRAME)
-        if oversized and ('method' in frame or 'result' not in frame or self._phase not in {'open', 'frozen'}
-                          or self._out.get(frame.get('id')) not in self._large_history_reads):
+        size = len(raw) if raw.isascii() else len(raw.encode('utf-8'))
+        operation = self._out.get(frame.get('id'))
+        limit = _MAX_FRAME
+        if 'method' not in frame and 'result' in frame and self._phase in {'open', 'frozen'}:
+            if operation == 'plugin/list':
+                limit = 64 * 1024 * 1024
+            elif operation in self._large_history_reads:
+                limit = 16 * 1024 * 1024
+        if size > limit:
             raise TransportUncertain('Oversized native message is not a pending history read.')
         return frame
 

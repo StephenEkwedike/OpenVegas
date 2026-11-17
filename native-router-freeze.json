@@ -24,7 +24,7 @@
     "openvegas/integrations/inference_router_fixture.py": "26cb165c054bc4b1a85d062b20398a820d837f99bad7092e75d9567a3a57a41f",
     "openvegas/integrations/inference_router_linux.py": "3f7cfe873e335fb1a673d821786b72536cd97e4a005980f28779cc4609197d0e",
     "openvegas/integrations/inference_router_managed.py": "b8488e48162f80c234cbd54ef1c9b8c14a1101d66333f04a8bd25670ebc26af5",
-    "openvegas/integrations/inference_router_request_boundary.py": "3ecb4c1a00d3539790705b6f93b0ade44c5b7d13df52fe77e97b1dcea67d2df0",
+    "openvegas/integrations/inference_router_request_boundary.py": "a54974d7d88eebb1e2eb4d9c64f29f584561ea34a3d2d3c31473a05051b42425",
     "openvegas/integrations/inference_router_session.py": "41f54b86024d02ad7616f40fd1556207625dbec419bf8c64226df326d84d5c81",
     "openvegas/integrations/inference_router_shutdown_receipt.py": "31021d6b7f4ef884852fc9c9aa154322d311e059f22e1f9b4ad27f24f1c7a9de",
     "openvegas/integrations/inference_router_state.py": "e4529b9221b4d8a63dc6d960f5d595767f59d6dd0b4e3b3b1a885c368f7a724c",
@@ -54,12 +54,12 @@
   "frozen": true,
   "inputs": {
     "cli": {
-      "openvegas-0.3.20.dist-info/METADATA": "9a5e9a4a93273b6a489f11dff040455c33e998b6feaacae5f9e029e477032beb",
-      "openvegas-0.3.20.dist-info/RECORD": "ab7b5dad27ae34c1e06575b111c27d42ff5bb65d54a9284c3959390417cdb54b",
-      "openvegas-0.3.20.dist-info/WHEEL": "61532836a2b3111b7ec23519c09df7c41180c27165fb872a6d8913b566b88ad1",
-      "openvegas-0.3.20.dist-info/entry_points.txt": "2af366ec5eccda1438b59e0a1485d8db2d0d556b49820ca053e3aee185a4bbf1",
-      "openvegas-0.3.20.dist-info/top_level.txt": "d721166c5df01379cecbe646bb22b8dc6a651555becdc07ac05321294903d3ed",
-      "openvegas/__init__.py": "d4cd7aa73309d66b61bb02ceff7d51cd475e842c8b3f783dd9954a6b8316f57b",
+      "openvegas-0.3.21.dist-info/METADATA": "a147f0fe0006764d94571832dca65f94077416a230034af52a169afa02d524c7",
+      "openvegas-0.3.21.dist-info/RECORD": "5334e7d233ecbf847969d4f47129f519803a01cf4808d2102aac9fb0dba7bf19",
+      "openvegas-0.3.21.dist-info/WHEEL": "61532836a2b3111b7ec23519c09df7c41180c27165fb872a6d8913b566b88ad1",
+      "openvegas-0.3.21.dist-info/entry_points.txt": "2af366ec5eccda1438b59e0a1485d8db2d0d556b49820ca053e3aee185a4bbf1",
+      "openvegas-0.3.21.dist-info/top_level.txt": "d721166c5df01379cecbe646bb22b8dc6a651555becdc07ac05321294903d3ed",
+      "openvegas/__init__.py": "2c26cd1351b33c8f7ad71a98a6ee5de7d2e1dc3845b167462731035dcdf30318",
       "openvegas/agent/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "openvegas/agent/boost.py": "0f32e6a3b8ab05ff4de551be27cc93ddc6f6a94d51c23d0238c59d0cf2e721a8",
       "openvegas/agent/dashboard_cli.py": "5fb46dc1b39dbad4b26a210dedd418bd0df4099bfecabf60d2fa7275da4bdea1",
@@ -280,7 +280,7 @@
       "openvegas/integrations/inference_router_fixture.py": "26cb165c054bc4b1a85d062b20398a820d837f99bad7092e75d9567a3a57a41f",
       "openvegas/integrations/inference_router_linux.py": "3f7cfe873e335fb1a673d821786b72536cd97e4a005980f28779cc4609197d0e",
       "openvegas/integrations/inference_router_managed.py": "b8488e48162f80c234cbd54ef1c9b8c14a1101d66333f04a8bd25670ebc26af5",
-      "openvegas/integrations/inference_router_request_boundary.py": "3ecb4c1a00d3539790705b6f93b0ade44c5b7d13df52fe77e97b1dcea67d2df0",
+      "openvegas/integrations/inference_router_request_boundary.py": "a54974d7d88eebb1e2eb4d9c64f29f584561ea34a3d2d3c31473a05051b42425",
       "openvegas/integrations/inference_router_session.py": "41f54b86024d02ad7616f40fd1556207625dbec419bf8c64226df326d84d5c81",
       "openvegas/integrations/inference_router_shutdown_receipt.py": "31021d6b7f4ef884852fc9c9aa154322d311e059f22e1f9b4ad27f24f1c7a9de",
       "openvegas/integrations/inference_router_state.py": "e4529b9221b4d8a63dc6d960f5d595767f59d6dd0b4e3b3b1a885c368f7a724c",
@@ -383,7 +383,7 @@
       "openvegas/tv/schema.py": "04fc726c06c893666cccff91c9548a5432b3348b07832879a992159018c780e7",
       "openvegas/wallet/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "openvegas/wallet/ledger.py": "4de7fe7b84f5431c311d4f83d6624c37d2178b9d7b4ebe186b60f5737c6ddf11",
-      "pyproject.toml": "c3201fa4eff458553cc591c64bff749e0055889ced153d302c5d17ab871c949c",
+      "pyproject.toml": "7e60be63c0eb6336a0cd0559bfcf00e3539e1b614fe53ea71e03ca95407877f8",
       "requirements.lock": "74cf80310c10efff836d8e29e4165abb225d779c3ec86c16ee23a5c2c4996162",
       "scripts/build_cli_candidate.py": "bc5de76962997d3dfc5a90c84dbca8af524695053d67b9d1074a49c3b23915fb",
       "scripts/frozen_entry.py": "1f39353e7d62f5a12259550cbbd0524adaaa165984d954960a0f3aa37c10a505"
@@ -400,5 +400,5 @@
   "preparation": "Hash-pinned native runtime directory candidate; not a release approval.",
   "publication_approved": false,
   "published": false,
-  "version": "0.3.20"
+  "version": "0.3.21"
 }

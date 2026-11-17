@@ -7,18 +7,18 @@ import sys
 from pathlib import Path
 
 source, output = (Path(arg).resolve() for arg in sys.argv[1:])
-expected = 'e6f70cc478dedd5758b9b1abba7619111748f9b1424b5e6605399d62473c3518'
+expected = '387b6359d1f29a5b68d670a532d10eb783b7158311faa08c7bcd62d126890650'
 raw = (source / 'native-router-freeze.json').read_bytes()
 assert hashlib.sha256(raw).hexdigest() == expected
 receipt = json.loads(raw)
-assert receipt['version'] == '0.3.20'
+assert receipt['version'] == '0.3.21'
 spec = importlib.util.spec_from_file_location('source_verifier', source / 'scripts/verify_native_release_source.py')
 helper = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(helper)
 helper.stage(source, output / 'cli')
 (output / 'cli/release-inputs.json').replace(output / 'public-export-receipt.json')
 for name, digest in receipt['inputs']['cli'].items():
-    if name.startswith('openvegas-0.3.20.dist-info/'):
+    if name.startswith('openvegas-0.3.21.dist-info/'):
         data = helper.read(source, name, digest)
         path = output / 'cli' / name
         path.parent.mkdir(parents=True, exist_ok=True)
