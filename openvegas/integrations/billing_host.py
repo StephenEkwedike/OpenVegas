@@ -41,7 +41,9 @@ def native_router_requested(host, version, env, *, eligible=True):
     requested = env.get('OPENVEGAS_NATIVE_ROUTER')
     if requested is not None:
         return requested == '1'
-    return eligible and (host, version) in {('codex', '0.166.0'), ('claude', '2.1.322')}
+    from .host_adapter import supported_version
+    return eligible and ((host == 'codex' and supported_version(host, version))
+                         or (host, version) == ('claude', '2.1.322'))
 
 
 def _codex_management():
@@ -752,6 +754,12 @@ class Supervisor:
                 except IntegrationError:
                     if self.generation != 1:
                         raise
+                    from .host_adapter import supported_version
+                    if not supported_version('codex', self.launch_spec.version):
+                        self.emit('This Codex version is not supported by OpenVegas yet. '
+                                  'Running ordinary Codex with host billing and its saved pet. '
+                                  'Update OpenVegas to enable $V and Shop character sync; '
+                                  'no wallet session was opened.')
                 else:
                     if self.generation == 1 and self.env.get('OPENVEGAS_CODEX_LIVE_SWITCH', '1') == '1':
                         if native_router_requested(self.host, self.launch_spec.version, self.env):

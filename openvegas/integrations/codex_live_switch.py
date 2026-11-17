@@ -791,6 +791,7 @@ class RuntimeOwner:
                         wallet_mode=True,
                         codex_handoff_source=source,
                         live_codex_executable=self.executable,
+                        live_codex_version=s.launch_spec.version,
                     )
                 finally:
                     try:

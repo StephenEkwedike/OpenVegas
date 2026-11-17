@@ -197,10 +197,11 @@ async def _reader(endpoint):
 
 
 def _identity(thread, sid, *, for_intent=False):
+    from .host_adapter import supported_version
     _require(
         thread["id"] == sid
         and thread["modelProvider"] == "openai"
-        and thread["cliVersion"] == "0.166.0"
+        and supported_version('codex', thread["cliVersion"])
         and thread["ephemeral"] is False
         and thread["parentThreadId"] is None
         and (

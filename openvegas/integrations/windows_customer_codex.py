@@ -554,7 +554,7 @@ async def run(owner, exe, env):
     async with (
         equipped_pet_args(owner.broker) as visual,
         session.launch(
-            version=VERSIONS["codex"], env=env, args=[], effective_policy_verified=True
+            version=owner.version, env=env, args=[], effective_policy_verified=True
         ) as (child_env, overlay),
         server_process(exe, child_env, owner.cwd, overlay) as server,
     ):

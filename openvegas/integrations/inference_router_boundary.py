@@ -130,7 +130,10 @@ class CodexWorkLedger:
     implementations remain available for those unsupported conditions.
     """
 
-    def __init__(self):
+    def __init__(self, version='0.166.0'):
+        from .host_adapter import require_version
+        require_version('codex', version)
+        self.version = version
         self.revision = 0
         self.reason = None
         self.root = None
@@ -172,7 +175,7 @@ class CodexWorkLedger:
             return self._root(sid)
         if (not _identifier(sid) or sid in self.closed_helpers
                 or thread.get('ephemeral') is not True or thread.get('parentThreadId') is not None
-                or thread.get('modelProvider') != 'openai' or thread.get('cliVersion') != '0.166.0'
+                or thread.get('modelProvider') != 'openai' or thread.get('cliVersion') != self.version
                 or thread.get('source') not in ('cli', 'vscode', 'appServer')
                 or sid not in self.helpers and (not owned_helper_start or len(self.helpers) >= 128)):
             self.block('additional_or_unknown_thread')
@@ -244,7 +247,7 @@ class CodexWorkLedger:
             result = frame.get('result', {})
             if name == 'initialize':
                 version = result.get('userAgent', '')
-                if not isinstance(version, str) or not version.split(' ')[0].endswith('/0.166.0'):
+                if not isinstance(version, str) or not version.split(' ')[0].endswith('/' + self.version):
                     self.block('unsupported_native_version')
                 else:
                     self.initialized = True
@@ -402,9 +405,9 @@ class _ObservedSocket:
 class ObservedStableTransport(StableTransport):
     """Original transport fences plus lifetime-bound task metadata observation."""
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, native_version='0.166.0', **kwargs):
         super().__init__(*args, **kwargs)
-        self.work = CodexWorkLedger()
+        self.work = CodexWorkLedger(native_version)
 
     async def _connect_backend(self):
         # Keep the existing endpoint/epoch/front checks. Install observation

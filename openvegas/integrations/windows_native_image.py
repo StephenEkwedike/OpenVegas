@@ -15,6 +15,10 @@ from .credentials import IntegrationError
 
 # Executable members of the registry-integrity-verified Windows x64 packages.
 _IMAGES = {
+    ("codex", "0.169.0"): (
+        382529840,
+        "ce1945eb440b5481ed1233ebaf32b7056ee7e4e452fa62ffe1cbfb26103cdee0",
+    ),
     ("codex", "0.166.0"): (
         371735856,
         "9d563ee4e0441ff9d59d612013e0460ddf8e5709735c2d9f6b98b7ef8ca4eb42",
@@ -107,3 +111,18 @@ def pinned_windows_image(host, executable, version):
         raise IntegrationError("A single installed Windows executable is required.")
     with _held_image(win._WindowsAPI(), candidates[0], *pin) as path:
         yield path
+
+
+@contextmanager
+def installed_windows_image(host, executable):
+    """Choose a reviewed size, then authenticate the complete held image before use."""
+    candidates = [p for p in _locations(host, executable) if Path(p).is_file()]
+    if len(candidates) != 1:
+        raise IntegrationError("A single installed Windows executable is required.")
+    size = Path(candidates[0]).stat().st_size
+    versions = [v for (h, v), pin in _IMAGES.items() if h == host and pin[0] == size]
+    if len(versions) != 1:
+        raise IntegrationError("Unsupported native Windows version; update OpenVegas. No wallet opened.")
+    version = versions[0]
+    with pinned_windows_image(host, executable, version) as path:
+        yield path, version

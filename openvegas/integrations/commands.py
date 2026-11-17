@@ -149,8 +149,10 @@ def go(host, dry_run, yes, allow_file_credential, keep_game_approvals, verbose):
         click.secho("OpenVegas ready. Wallet: " + format_v(account["balance"]), fg="blue")
         if "codex" in hosts:
             click.echo("For an OpenVegas-funded Codex chat: npx openvegas-ai codex. Review the price before starting.")
-        click.echo("Open a new VS Code terminal, then run codex or claude." if new_terminal else
-                   "Restart Claude/Codex; accept its one-time plugin trust prompt.")
+        click.echo(("Open a new VS Code terminal, then run codex or claude. " if new_terminal else
+                    "Restart Claude/Codex. ") +
+                   "Review OpenVegas in /hooks and the host's trust prompt. If declined, hooks stay off; "
+                   "reopen /hooks to review. Other hooks and tools are not auto-approved.")
         click.echo("Play: Claude /openvegas play | Codex $openvegas play. Pets: /pets.")
         if verbose:
             click.echo("Controls: " + ", ".join(action["name"] for action in action_catalog()) + ".")

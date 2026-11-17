@@ -370,6 +370,8 @@ def _validate_grant_catalog(value, *, version, session_id, catalog_hash, identif
     from .codex_catalog_schema import valid_native_row
     from .host_adapter import require_version
     require_version('codex', version)
+    from .host_adapter import codex_catalog_version
+    version = codex_catalog_version(version)
     message = 'Reviewed native metadata does not match this grant; no model substituted.'
     if (not isinstance(value, dict) or set(value) != {
             'schema_version', 'client_version', 'session_id', 'catalog_hash', 'catalog_fence_hash',
@@ -411,6 +413,8 @@ def _validate_grant_catalog(value, *, version, session_id, catalog_hash, identif
 def _reviewed_catalog_mode(*, version, session_id, catalog_hash, grant_status=None):
     """Only an absent advertisement is legacy; a broken one never downgrades."""
     import re
+    from .host_adapter import codex_catalog_version
+    version = codex_catalog_version(version)
 
     setting = os.getenv('OPENVEGAS_CODEX_CATALOG_DELIVERY', '')
     if setting not in ('', 'reviewed-v1'):
@@ -444,6 +448,8 @@ async def _grant_catalog(broker, token, *, version, session_id, catalog_hash, id
         return None
     require_version('codex', version)
     import re
+    from .host_adapter import codex_catalog_version
+    version = codex_catalog_version(version)
     if (not isinstance(token, str) or not re.fullmatch(r'ov_native_[A-Za-z0-9_-]{16,128}', token)
             or not isinstance(catalog_hash, str) or not re.fullmatch(r'[a-f0-9]{64}', catalog_hash)):
         raise IntegrationError('Reviewed Codex metadata requires an exact native grant binding.')

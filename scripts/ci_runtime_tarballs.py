@@ -12,7 +12,7 @@ from pathlib import Path
 
 P = Path
 TARGETS = {"darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64", "win32-x64"}
-VERSION = "0.3.21"
+VERSION = "0.3.22"
 MAIN = "openvegas-ai"
 MAIN_FILES = ["README.md", "bin/openvegas.js", "package.json", "release.json"]
 def sha(p):
@@ -98,7 +98,7 @@ def hosts(t):
                         "--max-time", "180", "--max-filesize", "700000000", "-o", str(target), url], check=True)
     cx = dest / ("codex" + ext)
     cc = dest / ("claude" + ext)
-    url = "https://github.com/openai/codex/releases/download/rust-v0.166.0/codex-" + triple
+    url = "https://github.com/openai/codex/releases/download/rust-v0.169.0/codex-" + triple
     if ext:
         fetch(url + ext, cx)
     else:

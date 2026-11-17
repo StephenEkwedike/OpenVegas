@@ -181,7 +181,11 @@ class ProviderAdapter:
             elif path == "/models":
                 _require(method == "GET" and set(params) <= {"client_version"})
                 if mode == "v":
-                    _require(params == {"client_version": VERSIONS["codex"]})
+                    from .host_adapter import supported_version
+                    _require(set(params) == {'client_version'}
+                             and supported_version('codex', params['client_version']))
+                    # This is catalog schema negotiation, not the native executable identity.
+                    query = '?client_version=' + VERSIONS['codex']
                     response_kind = "codex_catalog_envelope"
                 suffix = "/codex/catalog"
             elif path in {"/alpha/search", "/v1/alpha/search"}:
@@ -266,7 +270,9 @@ def launch_overlay(host, version, local_url, env, args, *, local_capability=None
     the effective built-in provider/settings before allowing native requests;
     indirect managed/user configuration is deliberately not read here.
     """
-    _require(host in VERSIONS and version == VERSIONS[host],
+    from .host_adapter import supported_version
+    _require((host == 'codex' and supported_version(host, version))
+             or (host == 'claude' and version == VERSIONS[host]),
              "This native version is not verified for the local inference adapter.")
     _require(type(peer_authenticated) is bool)
     _require(not peer_authenticated or (host == "codex" and local_capability is None),

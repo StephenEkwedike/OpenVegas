@@ -233,9 +233,11 @@ def launch(host, args=(), *, fixture_port=None, managed=False):
             raise IntegrationError('Managed Windows billing accepts no fixture, prompt or launch overrides.')
         from . import windows_customer
         from .native import host_environment
-        with terminal.console_modes(), pinned_windows_image(host, entry, VERSIONS[host]) as exe:
+        from .windows_native_image import installed_windows_image
+        with terminal.console_modes(), installed_windows_image(host, entry) as (exe, version):
             try:
-                return asyncio.run(windows_customer.run(host, exe, host_environment() or os.environ, os.getcwd()))
+                return asyncio.run(windows_customer.run(host, exe, host_environment() or os.environ,
+                                                       os.getcwd(), version=version))
             except (OSError, ImportError, ValueError, TypeError, KeyError, TimeoutError):
                 raise IntegrationError('Managed Windows billing unavailable. No automatic payer fallback.') from None
     if fixture_port is not None and (args or type(fixture_port) is not int or not 1 <= fixture_port <= 65535):

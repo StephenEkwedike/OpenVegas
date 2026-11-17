@@ -340,7 +340,7 @@ async def launch(host, model, limit_v, max_output_tokens=2048, *, yes=False, dry
                  host_args=(), broker=None, emit=click.echo, confirm=None, local_tools_only=False,
                  provider='openrouter', runner=None, resume_provider=None, compact=False,
                  control_environment=None, wallet_mode=False, codex_handoff_source=None,
-                 live_codex_executable=None):
+                 live_codex_executable=None, live_codex_version=None):
     """Return the host exit code. Injection points are for bounded offline tests."""
     if host not in {'claude', 'codex'} or not isinstance(model, str) or not _MODEL.fullmatch(model):
         raise IntegrationError('Choose a supported host and an exact model identifier.')
@@ -366,6 +366,8 @@ async def launch(host, model, limit_v, max_output_tokens=2048, *, yes=False, dry
         validate_control_environment(control_environment)
     if live_codex_executable is not None and (codex_handoff_source is None or not control_environment):
         raise IntegrationError('Live executable binding requires a verified managed Codex handoff.')
+    if live_codex_version is not None and live_codex_executable is None:
+        raise IntegrationError('Live version binding requires a verified managed Codex executable.')
     if codex_handoff_source is not None or (host == 'codex' and wallet_mode and control_environment):
         from .codex_handoff_policy import require_snapshot
         require_snapshot(codex_handoff_source)
@@ -397,8 +399,9 @@ async def launch(host, model, limit_v, max_output_tokens=2048, *, yes=False, dry
         # Re-resolve the normal installation; a caller-supplied path is a
         # comparison value, never an executable override or a shell command.
         from .codex_binary import resolve_native_codex
-        from .host_adapter import PINNED_VERSIONS
-        version = PINNED_VERSIONS['codex']
+        from .host_adapter import PINNED_VERSIONS, require_version
+        version = live_codex_version or PINNED_VERSIONS['codex']
+        require_version('codex', version)
         binary = await asyncio.to_thread(resolve_native_codex, shutil.which('codex'), version)
         if binary != live_codex_executable:
             raise IntegrationError('Native Codex installation changed before wallet launch; no grant requested.')

@@ -112,7 +112,8 @@ class ManagedCodexRouter(RuntimeOwner):
                         qa_role='managed'))
                     self.session.bind_native(_OWNED_SERVERS[self.source_endpoint])
                     await route_config(self.source_endpoint, self.cwd, self._router_url)
-                    async with RequestStableTransport(self.source_endpoint, on_notice=s.emit) as transport:
+                    async with RequestStableTransport(self.source_endpoint, on_notice=s.emit,
+                                                      native_version=s.launch_spec.version) as transport:
                         self.transport = transport
                         transport.title_origins = self.session.router.title_origins
                         transport.require_cancel_ack = True

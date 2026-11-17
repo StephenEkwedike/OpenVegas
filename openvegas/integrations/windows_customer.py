@@ -106,8 +106,9 @@ class Broker(DeviceBroker):
 
 
 class Customer:
-    def __init__(self, host, broker, upstream, cwd):
+    def __init__(self, host, broker, upstream, cwd, *, version=None):
         self.host, self.broker, self.cwd = host, broker, cwd
+        self.version = version or VERSIONS[host]
         self.current = self.observe = self.guard = self.lease = self.sid = None
         self.refusal = None
         self.busy = False
@@ -116,7 +117,7 @@ class Customer:
             from .windows_customer_codex import RootAdapter, RootIngress
 
             callbacks = codex_wallet_callbacks(
-                broker, active_model=self.model, version=VERSIONS[host]
+                broker, active_model=self.model, version=self.version
             )
             adapter = RootAdapter(
                 host, upstream, broker.backend + "/integrations/native", lambda: self.sid
@@ -252,14 +253,14 @@ class Customer:
 
 
 @asynccontextmanager
-async def customer(host, upstream, cwd):
+async def customer(host, upstream, cwd, *, version=None):
     from openvegas.config import FALLBACK_DEFAULT_BACKEND_URL
 
     broker = Broker()
     try:
         # Neither a fixture URL nor a custom destination is a customer backend.
         require(broker.backend == FALLBACK_DEFAULT_BACKEND_URL)
-        owner = Customer(host, broker, upstream, cwd)
+        owner = Customer(host, broker, upstream, cwd, version=version)
         try:
             yield owner
         finally:
@@ -288,7 +289,7 @@ def environment(env):
     return {k.upper(): v for k, v in env.items() if not k.upper().startswith(("OPENVEGAS_", "OV_"))}
 
 
-async def run(host, exe, env, cwd):
+async def run(host, exe, env, cwd, *, version=None):
     env = environment(env)
     if host == "codex":
         from . import windows_customer_codex as client
@@ -299,5 +300,5 @@ async def run(host, exe, env, cwd):
 
         client.check_settings(env, cwd)
         upstream = "https://api.anthropic.com"
-    async with customer(host, upstream, cwd) as owner:
+    async with customer(host, upstream, cwd, version=version) as owner:
         return await client.run(owner, exe, env)

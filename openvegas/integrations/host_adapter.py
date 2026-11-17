@@ -14,11 +14,24 @@ from .credentials import IntegrationError
 
 ADAPTER_VERSION = 'native-fixes-20261104.1'
 PINNED_VERSIONS = {'codex': '0.166.0', 'claude': '2.1.301'}
+SUPPORTED_VERSIONS = {'codex': frozenset({'0.166.0', '0.169.0'}),
+                      'claude': frozenset({'2.1.301'})}
+
+
+def supported_version(host, version):
+    return isinstance(version, str) and version in SUPPORTED_VERSIONS.get(host, ())
 
 
 def require_version(host, version):
-    if PINNED_VERSIONS.get(host) != version:
-        raise IntegrationError('Unsupported host adapter version; host billing unchanged.')
+    if not supported_version(host, version):
+        raise IntegrationError('Unsupported host adapter version; update OpenVegas or use a supported '
+                               'native version. No wallet request was sent; host billing unchanged.')
+
+
+def codex_catalog_version(version):
+    """Both reviewed clients decode the existing signed model-catalog format."""
+    require_version('codex', version)
+    return '0.166.0'
 
 
 @dataclass(frozen=True)
