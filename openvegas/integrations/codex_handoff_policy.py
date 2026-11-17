@@ -32,6 +32,12 @@ def _digest(value):
     return hashlib.sha256(data).hexdigest()
 
 
+def _supported_server_agent(value):
+    from .host_adapter import supported_version
+    match = re.match(r"^[A-Za-z0-9_.-]+/(\d+\.\d+\.\d+)(?: |$)", value) if isinstance(value, str) else None
+    return bool(match and supported_version('codex', match.group(1)))
+
+
 @dataclass(frozen=True, repr=False)
 class IdleEvidence:
     thread_id: str
@@ -179,8 +185,7 @@ async def _reader(endpoint):
                 },
             )
             _require(
-                isinstance(handshake.get("userAgent"), str)
-                and re.match(r"^[A-Za-z0-9_.-]+/0\.166\.0(?: |$)", handshake["userAgent"]),
+                _supported_server_agent(handshake.get("userAgent")),
                 "unverified server version",
             )
             await ws.send('{"method":"initialized","params":{}}')
