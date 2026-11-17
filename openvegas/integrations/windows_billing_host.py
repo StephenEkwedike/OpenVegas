@@ -234,9 +234,13 @@ def launch(host, args=(), *, fixture_port=None, managed=False):
         from . import windows_customer
         from .native import host_environment
         from .windows_native_image import installed_windows_image
+        env = dict(host_environment() or os.environ)
+        if host == 'codex' and 'OPENVEGAS_INITIAL_BILLING' in os.environ:
+            # Host-home isolation must not erase an explicit payer selection.
+            env['OPENVEGAS_INITIAL_BILLING'] = os.environ['OPENVEGAS_INITIAL_BILLING']
         with terminal.console_modes(), installed_windows_image(host, entry) as (exe, version):
             try:
-                return asyncio.run(windows_customer.run(host, exe, host_environment() or os.environ,
+                return asyncio.run(windows_customer.run(host, exe, env,
                                                        os.getcwd(), version=version))
             except (OSError, ImportError, ValueError, TypeError, KeyError, TimeoutError):
                 raise IntegrationError('Managed Windows billing unavailable. No automatic payer fallback.') from None

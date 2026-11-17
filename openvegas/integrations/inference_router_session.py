@@ -43,6 +43,7 @@ class RouterSession:
             raise IntegrationError('Legacy task-scoped routing needs a task verifier.')
         self._wallet = None
         self._url = None
+        self._launched = False
         self._closed = False
         self._revoke = revoke_wallet
         self._timeout = timeout
@@ -91,6 +92,26 @@ class RouterSession:
     def __repr__(self):
         return '<RouterSession private-native-route>'
 
+    def install_initial_wallet(self, access):
+        """Install reviewed access before any listener or native request exists."""
+        status = self.state.status()
+        if (self._url is not None or self.router.authority is not None
+                or self._launched or self._closed or self.controls._closed
+                or not self.state.request_boundary or self.state.mode != 'host'
+                or self.state.generation != 0 or status['attempts'] != 0
+                or self.state.pending is not None or self._wallet is not None
+                or self.controls.wallet_grant is not None):
+            raise IntegrationError('Initial wallet access requires an unused, unlaunched request router.')
+        if (not isinstance(access, WalletAccess) or not isinstance(access.token, str)
+                or re.fullmatch(r'ov_native_[A-Za-z0-9_-]{16,128}', access.token) is None
+                or type(access.expires_at) not in (int, float)
+                or not time.time() < access.expires_at < float('inf')):
+            raise IntegrationError('Initial wallet access is invalid or expired; no payer changed.')
+        # No await: startup has no live boundary to bypass or request to drain.
+        ticket = self.state.prepare('v')
+        self.state.commit(ticket, request_boundary_verified=True)
+        self._wallet = self.controls.wallet_grant = access
+
     def _token(self):
         if self.state.mode == 'host':
             return None
@@ -122,9 +143,12 @@ class RouterSession:
     @asynccontextmanager
     async def launch(self, *, version, env, args, effective_policy_verified=False):
         """Yield process-only inputs once. Caller owns the unchanged native child."""
-        if effective_policy_verified is not True or self._url is not None or self._closed:
+        if self._launched or self._url is not None or self._closed:
             raise IntegrationError('Native launch policy must be verified before using the router.')
+        self._launched = True
         try:
+            if effective_policy_verified is not True:
+                raise IntegrationError('Native launch policy must be verified before using the router.')
             async with AsyncExitStack() as transport:
                 close_peer = getattr(self._peer, 'close', None)
                 if close_peer is not None:

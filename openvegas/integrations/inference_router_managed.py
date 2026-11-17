@@ -42,6 +42,43 @@ async def original_upstream(executable, env, cwd):
             else 'https://api.openai.com/v1')
 
 
+async def wallet_launch_selection(executable, env, cwd, spec):
+    """Read the effective native model, not account secrets or chat content."""
+    from .billing_host import exact_model, session_id
+
+    async with host_server(executable, env, cwd=cwd, identity_probe=True) as endpoint:
+        config = await route_config(endpoint, cwd)
+        async with policy._reader(endpoint) as call:
+            result = await call('account/read', {'refreshToken': False})
+            account = result.get('account')
+            kind = account.get('type') if isinstance(account, dict) else None
+            require(kind in {None, 'chatgpt', 'apiKey'}, 'Unsupported native authentication type.')
+            model = spec.model
+            args = spec.original_argv
+            if not model and 'resume' in args:
+                index = args.index('resume') + 1
+                sid = args[index] if index < len(args) else None
+                require(session_id(sid) is not None, 'An exact conversation is required for wallet resume.')
+                thread = (await call('thread/read', {'threadId': sid, 'includeTurns': False}))['thread']
+                require(thread.get('id') == sid and thread.get('modelProvider') == 'openai'
+                        and thread.get('cwd') == cwd, 'Wallet resume selection changed.')
+                model = thread.get('model')
+            if not model:
+                model = config.get('model')
+            if not model:
+                result = await call('model/list', {'includeHidden': True, 'limit': 100})
+                rows = result.get('data')
+                require(isinstance(rows, list) and len(rows) <= 100 and result.get('nextCursor') is None,
+                        'Native default model cannot be verified.')
+                defaults = [row.get('model') for row in rows
+                            if isinstance(row, dict) and row.get('isDefault') is True]
+                require(len(defaults) == 1, 'Native default model is ambiguous.')
+                model = defaults[0]
+            require(exact_model(model), 'Native model is unavailable; no wallet grant opened.')
+    return (('https://chatgpt.com/backend-api/codex' if kind == 'chatgpt'
+             else 'https://api.openai.com/v1'), model)
+
+
 class ManagedCodexRouter(RuntimeOwner):
     """Reuse authenticated commands/leases and native input fencing, not replay."""
 
@@ -54,6 +91,7 @@ class ManagedCodexRouter(RuntimeOwner):
         self._display_task = None
         self._display_revision = 0
         self._prepared = None
+        self._initial_wallet = None
         self.switch = SimpleNamespace(uncertain=False, phase='idle')
 
     def finish_switch_window(self, *, committed=False):
@@ -90,14 +128,35 @@ class ManagedCodexRouter(RuntimeOwner):
             resolve_native_codex, s.executable, s.launch_spec.version)
         broker = Broker()
         try:
-            upstream = await original_upstream(self.executable, self.env, self.cwd)
+            wallet_first = getattr(s, 'initial_billing', 'host') == 'v'
+            if wallet_first:
+                upstream, self._model = await wallet_launch_selection(
+                    self.executable, self.env, self.cwd, s.launch_spec)
+            else:
+                upstream = await original_upstream(self.executable, self.env, self.cwd)
             prepare, revoke = codex_wallet_callbacks(broker, active_model=lambda: self._model,
                                                      version=s.launch_spec.version)
             self._prepared = prepare
+
+            async def close_access(access):
+                if access is self._initial_wallet:
+                    await access.grant.close()
+                    return access.grant.released
+                return await revoke(access)
+
             self.session = RouterSession(ProviderAdapter('codex', upstream,
                 broker.backend + '/integrations/native'), task_boundary=self._boundary,
-                commit_guard=self._assert_commit, prepare_wallet=prepare, revoke_wallet=revoke,
+                commit_guard=self._assert_commit, prepare_wallet=prepare, revoke_wallet=close_access,
                 status_changed=s.wallet_status_changed, local_auth='peer', request_boundary=True)
+            if wallet_first:
+                from .wallet_startup import prepare_wallet
+                self._initial_wallet = await prepare_wallet(broker, self._model, s.launch_spec.version,
+                                                            emit=s.emit)
+                self.session.install_initial_wallet(self._initial_wallet)
+                s.mode = self.session.state.mode
+                s.restore_model = self._model
+                if not s.launch_spec.model:
+                    argv = [*argv, '--model', self._model]
             from .codex_title_origin import TitleOrigins
             self.session.router.title_origins = TitleOrigins(self.session.state)
             async with self.session.launch(version=s.launch_spec.version, env=self.env, args=[],
@@ -153,6 +212,11 @@ class ManagedCodexRouter(RuntimeOwner):
                         # is installed. Its mutation owner still needs closure.
                         _, interrupted = await _settle(asyncio.create_task(grant.close()))
                         cancelled |= interrupted
+            if self._initial_wallet is not None:
+                grant = self._initial_wallet.grant
+                if grant.boundary is not None and grant.boundary.state == 'issued':
+                    _, interrupted = await _settle(asyncio.create_task(grant.close()))
+                    cancelled |= interrupted
         finally:
             _, interrupted = await _settle(asyncio.create_task(broker.close()))
             cancelled |= interrupted

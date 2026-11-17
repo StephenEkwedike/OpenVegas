@@ -19,7 +19,7 @@ from .billing_host import exact_model, session_id
 from .codex_handoff_policy import _identity
 from .credentials import IntegrationError
 from .inference_router import MAX_BODY
-from .inference_router_adapter import VERSIONS, ProviderAdapter
+from .inference_router_adapter import ProviderAdapter
 from .inference_router_windows import WindowsTCPPeerAuth
 from .use import parse_command
 from .windows_customer import Check, CheckRefused, Selection, checking, require
@@ -278,7 +278,37 @@ class Pipe:
                     future.set_exception(IntegrationError("Native metadata connection ended."))
 
 
-async def route(pipe, cwd, expected=None):
+async def effective_model(pipe, cfg):
+    model = cfg.get("model")
+    if model is not None:
+        require(exact_model(model))
+        return model
+    defaults, seen, cursor, count = [], set(), None, 0
+    for _ in range(128):
+        params = {"includeHidden": True, "limit": 100}
+        if cursor is not None:
+            params["cursor"] = cursor
+        result = await pipe.call("model/list", params)
+        require(isinstance(result, dict))
+        rows = result.get("data")
+        require(isinstance(rows, list) and count + len(rows) <= 128)
+        count += len(rows)
+        for row in rows:
+            require(isinstance(row, dict))
+            if row.get("isDefault") is True:
+                require(exact_model(row.get("model")))
+                defaults.append(row["model"])
+        cursor = result.get("nextCursor")
+        if cursor is None:
+            require(len(defaults) == 1)
+            return defaults[0]
+        require(rows and isinstance(cursor, str) and 0 < len(cursor) <= 4096
+                and cursor not in seen)
+        seen.add(cursor)
+    raise IntegrationError("Native default model could not be verified; no payer fallback.")
+
+
+async def route(pipe, cwd, expected=None, *, include_model=False, require_login=True):
     cfg = (await pipe.call("config/read", {"cwd": cwd, "includeLayers": True}))["config"]
     require(
         cfg.get("model_provider") in (None, "openai")
@@ -286,12 +316,14 @@ async def route(pipe, cwd, expected=None):
         and cfg.get("openai_base_url")
         in ((None, "", ORIGINS["apiKey"]) if expected is None else (expected,))
     )
-    kind = (await pipe.call("account/read", {"refreshToken": False}))["account"]["type"]
-    require(kind in ORIGINS)
-    return ORIGINS[kind]
+    account = (await pipe.call("account/read", {"refreshToken": False}))["account"]
+    kind = account.get("type") if isinstance(account, dict) else None
+    require(kind in ORIGINS or (account is None and not require_login))
+    upstream = ORIGINS[kind] if kind is not None else ORIGINS["apiKey"]
+    return (upstream, await effective_model(pipe, cfg)) if include_model else upstream
 
 
-async def original_upstream(exe, env, cwd):
+async def original_upstream(exe, env, cwd, *, include_model=False, require_login=True):
     require(
         not any(
             k in env
@@ -316,7 +348,7 @@ async def original_upstream(exe, env, cwd):
                 },
             )
             await pipe.send({"method": "initialized", "params": {}})
-            return await route(pipe, cwd)
+            return await route(pipe, cwd, include_model=include_model, require_login=require_login)
         finally:
             reader.cancel()
             await asyncio.gather(reader, return_exceptions=True)
@@ -407,8 +439,12 @@ def _root_identity(thread, sid, cwd):
 
 async def selection(pipe, owner, params):
     sid = params.get("threadId")
+    state = getattr(owner.session, "state", None)
+    wallet = getattr(state, "mode", None) == "v"
+    to_host = getattr(getattr(state, "pending", None), "target", None) == "host"
     with checking(Check.ROUTE):
-        require(await route(pipe, owner.cwd, owner.session._url) == owner.session.adapter.host_base)
+        require(await route(pipe, owner.cwd, owner.session._url, require_login=not wallet or to_host)
+                == owner.session.adapter.host_base)
     with checking(Check.INVENTORY):
         loaded = await pipe.call("thread/loaded/list", {"limit": 32})
         pipe.threads.verify(sid, loaded, bounded=root_bounded(owner.session))
@@ -499,6 +535,17 @@ async def bridge(ws, pipe, owner, tui):
             if pending is not None and pending.done():
                 await pending
                 pending = None
+            if (owner.initial_model is not None and owner.sid is None
+                    and method in ("turn/start", "turn/steer")):
+                # Only metadata from this connection's native root can authorize
+                # its first turn. No prompt or tool policy is rewritten.
+                require(method == "turn/start" and pending is None and root_bounded(owner.session))
+                revision = pipe.threads.fence(True)
+                guard()
+                value = await selection(pipe, owner, params)
+                guard()
+                require(pipe.threads.fence(True) == revision)
+                owner.bind_initial_root(value)
             action = action_for(method, params)
             if action:
                 require(key is not None)
@@ -517,7 +564,10 @@ async def bridge(ws, pipe, owner, tui):
                 or (
                     owner.session.state.mode == "v"
                     and (
-                        method in ("thread/start", "thread/resume", "thread/fork")
+                        (method in ("thread/start", "thread/resume", "thread/fork")
+                         and not (method == "thread/start" and owner.initial_model is not None
+                                  and owner.sid is None and not pipe.threads.roots
+                                  and not pipe.threads.pending and not params.get("ephemeral")))
                         or (
                             method in ("turn/start", "turn/steer")
                             and params.get("threadId") != owner.sid
@@ -529,7 +579,8 @@ async def bridge(ws, pipe, owner, tui):
             else:
                 if method in ("thread/start", "thread/resume", "thread/fork"):
                     require(
-                        await route(pipe, owner.cwd, owner.session._url)
+                        await route(pipe, owner.cwd, owner.session._url,
+                                    require_login=owner.session.state.mode != "v")
                         == owner.session.adapter.host_base
                     )
                 await pipe.send(msg)
@@ -554,7 +605,9 @@ async def run(owner, exe, env):
     async with (
         equipped_pet_args(owner.broker) as visual,
         session.launch(
-            version=owner.version, env=env, args=[], effective_policy_verified=True
+            version=owner.version, env=env,
+            args=["-c", "model=" + json.dumps(owner.initial_model)] if owner.initial_model else [],
+            effective_policy_verified=True
         ) as (child_env, overlay),
         server_process(exe, child_env, owner.cwd, overlay) as server,
     ):
@@ -594,7 +647,8 @@ async def run(owner, exe, env):
                     err=True,
                 )
                 tui = subprocess.Popen(  # noqa: ASYNC220 - Retain CreateProcess handle before yielding.
-                    [exe, *visual, "--remote", url, "--remote-auth-token-env", "OV_CODEX_UI_TOKEN"],
+                    [exe, *visual, *(["--model", owner.initial_model] if owner.initial_model else []),
+                     "--remote", url, "--remote-auth-token-env", "OV_CODEX_UI_TOKEN"],
                     env={**env, "OV_CODEX_UI_TOKEN": secret},
                     cwd=owner.cwd,
                     shell=False,

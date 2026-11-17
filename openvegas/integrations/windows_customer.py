@@ -110,6 +110,8 @@ class Customer:
         self.host, self.broker, self.cwd = host, broker, cwd
         self.version = version or VERSIONS[host]
         self.current = self.observe = self.guard = self.lease = self.sid = None
+        self.initial_model = None
+        self.initial_access = None
         self.refusal = None
         self.busy = False
         if host == "codex":
@@ -127,6 +129,15 @@ class Customer:
             callbacks = claude_wallet_callbacks(broker, active_model=self.model)
             adapter = ProviderAdapter(host, upstream, broker.backend + "/integrations/native")
         self.prepare, revoke = callbacks
+        if host == "codex":
+            switch_revoke = revoke
+
+            async def revoke(access):
+                if self.initial_access is not None and access is self.initial_access:
+                    await access.grant.close()
+                    return access.grant.released
+                return await switch_revoke(access)
+
         self.session = RouterSession(
             adapter,
             prepare_wallet=self.prepare,
@@ -144,6 +155,24 @@ class Customer:
     def model(self):
         require(self.current is not None)
         return self.current.model
+
+    def bind_initial_root(self, value):
+        require(
+            self.host == "codex" and self.initial_model is not None
+            and self.session.state.mode == "v" and self.session.state.pending is None
+            and self.sid is None and self.lease is None
+        )
+        with checking(Check.IDENTITY):
+            require(isinstance(value, Selection) and session_id(value.identifier))
+        with checking(Check.WORKSPACE):
+            require(same_workspace(value.cwd, self.cwd))
+        with checking(Check.ROUTE):
+            require(value.base_url == self.session._url)
+        with checking(Check.MODEL):
+            require(exact_model(value.model))
+        with checking(Check.LEASE):
+            self.lease = SessionLease(self.host, value.identifier)
+        self.sid = value.identifier
 
     async def boundary(self, ticket):
         try:
@@ -241,7 +270,10 @@ class Customer:
         try:
             await self.session.controls.settle_callbacks()
             # A validated issue can fail before RouterSession receives WalletAccess.
-            for grant in self.prepare.retained_grants:
+            grants = list(self.prepare.retained_grants)
+            if self.initial_access is not None:
+                grants.append(self.initial_access.grant)
+            for grant in grants:
                 owner = getattr(grant, "boundary", grant)
                 if owner is not None and owner.state == "issued":
                     await grant.close()
@@ -290,15 +322,33 @@ def environment(env):
 
 
 async def run(host, exe, env, cwd, *, version=None):
+    initial = "host"
+    if host == "codex":
+        from .wallet_startup import initial_billing
+
+        initial = initial_billing({k.upper(): v for k, v in env.items()})
     env = environment(env)
     if host == "codex":
         from . import windows_customer_codex as client
 
-        upstream = await client.original_upstream(exe, env, cwd)
+        if initial == "v":
+            upstream, model = await client.original_upstream(
+                exe, env, cwd, include_model=True, require_login=False
+            )
+        else:
+            upstream = await client.original_upstream(exe, env, cwd)
     else:
         from . import windows_customer_claude as client
 
         client.check_settings(env, cwd)
         upstream = "https://api.anthropic.com"
     async with customer(host, upstream, cwd, version=version) as owner:
+        if initial == "v":
+            from .wallet_startup import prepare_wallet
+
+            access = await prepare_wallet(owner.broker, model, owner.version)
+            # Retain ownership even if installation or listener startup fails.
+            owner.initial_access = access
+            owner.session.install_initial_wallet(access)
+            owner.initial_model = model
         return await client.run(owner, exe, env)

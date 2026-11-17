@@ -30,8 +30,8 @@ from .billing_choices import model_choices, wallet_ceiling
 from .broker import Broker
 from .credentials import IntegrationError
 from .host_adapter import HostLaunchSpec
-from .runtime_directory import runtime_parent
 from .native_child_environment import external_child_environment
+from .runtime_directory import runtime_parent
 from .use import SOCKET, TOKEN
 
 ARM_SECONDS = 60
@@ -158,8 +158,12 @@ def resume_args(host, args, identifier, model=None):
 
 
 class Supervisor:
-    def __init__(self, host, executable, args, env, *, emit=click.echo, version='unverified'):
+    def __init__(self, host, executable, args, env, *, emit=click.echo, version='unverified',
+                 initial_billing='host'):
         self.host, self.executable, self.args, self.env = host, executable, list(args), dict(env)
+        if initial_billing not in {'host', 'v'} or (host != 'codex' and initial_billing != 'host'):
+            raise IntegrationError('Unsupported initial billing; no native session opened.')
+        self.initial_billing = initial_billing
         self.emit = emit
         self.child = None
         self.identifier = self.original_model = None
@@ -708,6 +712,16 @@ class Supervisor:
         self.token = staged_token or secrets.token_urlsafe(32)
         self.env[TOKEN] = env[TOKEN] = self.token
         self.transition_state = 'ATTACH_VERIFIED_TARGET' if self.generation > 1 else 'HOST_ACTIVE'
+        if self.host == 'codex' and self.generation == 1 and self.initial_billing == 'v':
+            if (not self.modern_relay
+                    or self.env.get('OPENVEGAS_CODEX_LIVE_SWITCH', '1') != '1'
+                    or not native_router_requested(self.host, self.launch_spec.version, self.env)):
+                raise IntegrationError('$V startup requires the supported managed router. '
+                                       'No host-billing fallback was started.')
+            client = self.launch_spec.managed_codex_client(self.env)
+            _codex_management()
+            from .inference_router_managed import ManagedCodexRouter
+            return await ManagedCodexRouter(self, env).run(client)
         claude_router_eligible = (self.host == 'claude' and self.modern_relay
             and self.generation == 1 and self.mode == 'host'
             and self.launch_spec.version == '2.1.322' and os.isatty(0) and os.isatty(1))
@@ -1188,6 +1202,8 @@ def main(host, args):
     if configured() is not None:
         click.echo('Offline native acceptance: synthetic loopback billing only.', err=True)
     env = external_child_environment(native.host_environment() or os.environ)
+    if host == 'codex' and 'OPENVEGAS_INITIAL_BILLING' in os.environ:
+        env['OPENVEGAS_INITIAL_BILLING'] = os.environ['OPENVEGAS_INITIAL_BILLING']
     # Noninteractive/admin invocations stay completely outside the supervisor.
     from .host_invocation import passthrough
     if not os.isatty(0) or passthrough(host, args):
@@ -1199,7 +1215,10 @@ def main(host, args):
     if not info:
         raise IntegrationError('Native executable unavailable.')
     try:
-        return asyncio.run(Supervisor(host, info['executable'], args, env, version=info['version']).run())
+        from .wallet_startup import initial_billing
+        payer = initial_billing(env) if host == 'codex' else 'host'
+        return asyncio.run(Supervisor(host, info['executable'], args, env,
+                                     version=info['version'], initial_billing=payer).run())
     except IntegrationError as exc:
         click.echo(str(exc), err=True)
         return 1

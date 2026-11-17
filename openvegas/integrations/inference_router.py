@@ -176,8 +176,23 @@ class NativeSocket:
                 raise IntegrationError('Native response identity was already used or cannot be retained.')
             self.response_hash = digest
             seen.add(digest)
-        elif self.response_hash != digest or response.get('status') != 'completed':
+        elif self.response_hash != digest or not complete_response(event):
             raise IntegrationError('Native completion is not for the admitted response.')
+
+
+def complete_response(event):
+    """Recognize a Codex terminal event, not end-of-turn or payment settlement."""
+    if not isinstance(event, dict) or event.get('type') != 'response.completed':
+        return False
+    response = event.get('response')
+    if not isinstance(response, dict):
+        return False
+    rid = response.get('id')
+    # Match the existing WebSocket identity bounds. Codex 0.166/0.169 omit
+    # status in valid completions, and end_turn=false still ends this response.
+    return (isinstance(rid, str) and 1 <= len(rid) <= 256 and rid.isascii()
+            and ('status' not in response or response['status'] == 'completed')
+            and (response.get('end_turn') is None or type(response['end_turn']) is bool))
 
 
 class Completion:
@@ -188,28 +203,68 @@ class Completion:
         self.response_kind = response_kind
         self._sensitive_values = tuple(value for value in sensitive_values if isinstance(value, str) and value)
         self.buffer = bytearray()
+        self._event_data = bytearray()
+        self._event_size = 0
+        self._skip_lf = False
         self.invalid = streaming and response_kind == 'codex_alpha_search'
 
     def feed(self, data):
         if self.invalid:
+            return
+        if self.streaming:
+            self._feed_sse(data)
             return
         if self.response_kind == 'codex_alpha_search' and len(self.buffer) + len(data) > MAX_EVENT:
             self.invalid = True
             self.buffer.clear()
             return
         self.buffer.extend(data)
-        if self.streaming:
-            while b'\n' in self.buffer:
-                line, _, rest = self.buffer.partition(b'\n')
-                self.buffer = bytearray(rest)
-                if line.startswith(b'data:'):
-                    self._value(line[5:].strip())
-                if len(line) > MAX_EVENT:
-                    self.invalid = True
-                    break
         if len(self.buffer) > MAX_EVENT:
             self.invalid = True
             self.buffer.clear()
+
+    def _feed_sse(self, data):
+        import re
+
+        if not data:
+            return
+        start = int(self._skip_lf and data.startswith(b'\n'))
+        self._skip_lf = False
+        for boundary in re.compile(br'\r\n|[\r\n]').finditer(data, start):
+            if not self._sse_room(boundary.start() - start + 1):
+                return
+            self.buffer.extend(data[start:boundary.start()])
+            self._skip_lf = boundary.group() == b'\r' and boundary.end() == len(data)
+            self._sse_line()
+            start = boundary.end()
+        if self._sse_room(len(data) - start):
+            self.buffer.extend(data[start:])
+
+    def _sse_room(self, size):
+        # Bound the whole event, normalizing line endings and including ignored
+        # fields, before copying. A large network chunk can contain many events.
+        if self._event_size + size > MAX_EVENT:
+            self.invalid = True
+            self.buffer.clear()
+            self._event_data.clear()
+            return False
+        self._event_size += size
+        return True
+
+    def _sse_line(self):
+        line = bytes(self.buffer)
+        self.buffer.clear()
+        if not line:
+            if self._event_data:
+                self._value(bytes(self._event_data[:-1]))
+            self._event_data.clear()
+            self._event_size = 0
+        elif line == b'data' or line.startswith(b'data:'):
+            value = line[5:]
+            if value.startswith(b' '):
+                value = value[1:]
+            self._event_data.extend(value)
+            self._event_data.append(10)
 
     def _value(self, raw):
         if self.response_kind == 'codex_alpha_search':
@@ -235,9 +290,11 @@ class Completion:
             self.completed = True
         elif kind == 'response.completed':
             response = value.get('response')
-            self.completed |= isinstance(response, dict) and response.get('status') == 'completed'
+            self.completed |= (complete_response(value) if self.streaming else
+                               isinstance(response, dict) and response.get('status') == 'completed')
         elif ((kind == 'message' and value.get('stop_reason'))
-              or (value.get('object') == 'response' and value.get('status') == 'completed')):
+              or (not self.streaming and value.get('object') == 'response'
+                  and value.get('status') == 'completed')):
             self.completed = True
 
     def reflects_sensitive_value(self, value):
@@ -373,14 +430,25 @@ class InferenceRouter:
             await self._http(scope, receive, send, path, headers)
 
     @staticmethod
-    async def _error(scope, send, code, message):
+    async def _error(scope, send, code, message, *, reason=None):
         if scope['type'] == 'websocket':
             await send({'type': 'websocket.close', 'code': 1008})
             return
-        body = json.dumps({'error': {'message': message, 'type': 'local_router_error'}}).encode()
+        error = {'message': message, 'type': 'local_router_error'}
+        if reason is not None:
+            error['code'] = reason
+        body = json.dumps({'error': error}).encode()
         await send({'type': 'http.response.start', 'status': code,
                     'headers': [(b'content-type', b'application/json'), (b'x-should-retry', b'false')]})
         await send({'type': 'http.response.body', 'body': body})
+
+    async def _admission_error(self, scope, send, exc):
+        reasons = {'admission_held', 'turn_held', 'unattributed_response', 'unbound_retry',
+                   'unknown_retry', 'retired_retry', 'operation_active', 'ledger_full'}
+        reason = (exc.code if isinstance(exc, RouterStateError) and exc.code in reasons
+                  else 'route_validation')
+        await self._error(scope, send, 409,
+            f'Billing route refused ({reason}). Nothing was replayed.', reason=reason)
 
     async def _http(self, scope, receive, send, path, headers):
         try:
@@ -400,8 +468,8 @@ class InferenceRouter:
                 fence['turn_scope'] = turn_scope(headers)
                 fence['managed_response'] = True
             lease = self.state.begin(scope['method'], path, retry=anonymous_retry(headers), **fence)
-        except (IntegrationError, RouterStateError, ValueError):
-            await self._error(scope, send, 409, 'Billing route is held or unsupported. Nothing was replayed.')
+        except (IntegrationError, RouterStateError, ValueError) as exc:
+            await self._admission_error(scope, send, exc)
             return
         body = bytearray()
         handing_off = False
@@ -451,6 +519,7 @@ class InferenceRouter:
     async def _forward(self, scope, send, plan, lease, body, lifetime):
         lifetime['started'] = True
         outcome, started = 'rejected', False
+        finished = False
         try:
             # This is an OpenVegas dispatch identity, not provider idempotency
             # or proof that two native retries are the same logical operation.
@@ -525,6 +594,14 @@ class InferenceRouter:
                                        response_kind=getattr(plan, 'response_kind', 'passthrough'))
                 async for chunk in response.aiter_raw():
                     completed.feed(chunk)
+                    if (not finished and 200 <= response.status_code < 300
+                            and completed.streaming and completed.finish()):
+                        # Native clients stop reading at the terminal event, not
+                        # HTTP EOF. Release only this verified dispatch before
+                        # delivering the event that can start the next tool step.
+                        outcome = 'completed'
+                        self.state.finish(lease, outcome)
+                        finished = True
                     await send({'type': 'http.response.body', 'body': chunk, 'more_body': True})
                 await send({'type': 'http.response.body', 'body': b''})
                 if 200 <= response.status_code < 300 and (scope['method'] == 'GET' or completed.finish()):
@@ -547,7 +624,8 @@ class InferenceRouter:
             if outcome == 'ambiguous' and (scope['method'] == 'GET'
                     or getattr(plan, 'response_kind', None) == 'claude_token_count'):
                 outcome = 'rejected'
-            self.state.finish(lease, outcome)
+            if not finished:
+                self.state.finish(lease, outcome)
 
     async def _websocket(self, scope, receive, send, path, headers):
         from websockets.exceptions import InvalidStatus, WebSocketException
@@ -608,15 +686,13 @@ class InferenceRouter:
                         value = json.loads(message)
                         if self.title_origins is not None:
                             slot.verify_response(value, self._seen_responses)
-                        await send({'type': 'websocket.send', 'text' if isinstance(message, str) else 'bytes': message})
-                        if (isinstance(value, dict) and value.get('type') == 'response.completed'
-                                and isinstance(value.get('response'), dict)
-                                and value['response'].get('status') == 'completed'):
+                        if complete_response(value):
                             if slot.active is None:
                                 raise IntegrationError('Native completion has no admitted request.')
                             self.state.finish(slot.active, 'completed')
                             slot.active = None
                             slot.response_hash = None
+                        await send({'type': 'websocket.send', 'text' if isinstance(message, str) else 'bytes': message})
 
                 tasks = [asyncio.create_task(to_upstream()), asyncio.create_task(from_upstream()),
                          asyncio.create_task(slot.close.wait())]

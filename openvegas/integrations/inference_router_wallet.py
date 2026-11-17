@@ -1,8 +1,10 @@
 """Existing Codex wallet protocol without starting a replacement native process."""
 from __future__ import annotations
 
+import inspect
 import re
 import time
+from copy import deepcopy
 from functools import partial
 
 from . import native
@@ -33,7 +35,7 @@ class CodexWalletGrant:
         return self.boundary is None or self.boundary.state in {
             'new', 'quoting', 'quoted', 'rejected', 'closed'}
 
-    async def open(self, model):
+    async def open(self, model, *, confirm_quote=None):
         require(not self.started, 'Wallet preparation cannot be retried.')
         self.started = True
         device = self.broker.credentials.load()
@@ -60,6 +62,11 @@ class CodexWalletGrant:
         if 'v_per_supplier_usd' in pricing:
             require(native._decimal(pricing['v_per_supplier_usd']) == rate * multiplier,
                     'Wallet conversion prices disagree.')
+        if confirm_quote is not None:
+            accepted = confirm_quote(deepcopy(quote))
+            if inspect.isawaitable(accepted):
+                accepted = await accepted
+            require(accepted is True, 'Wallet quote was not confirmed; no grant opened.')
         issued = self.wall_clock()
         grant = await boundary.request('POST', '/native/sessions', token=device, data={
             **fields, 'billing_mode': 'wallet', 'confirmed': True,
