@@ -1,0 +1,131 @@
+name: Verify installed 0.3.20 shop visual candidate
+on:
+  push:
+    branches: ['codex/shop-equipped-install-0320-8c262b6c']
+permissions:
+  contents: read
+  actions: read
+jobs:
+  customer-install:
+    name: Installed native plans / ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: ubuntu-22.04, target: linux-x64}
+          - {runner: ubuntu-22.04-arm, target: linux-arm64}
+          - {runner: macos-15, target: darwin-arm64}
+          - {runner: macos-15-intel, target: darwin-x64}
+          - {runner: windows-2022, target: win32-x64}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 12
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+          sparse-checkout: scripts/ci_runtime_tarballs.py
+          sparse-checkout-cone-mode: false
+      - name: Verify preinstalled Node runtime without a package manager
+        run: node -e "if(Number(process.versions.node.split('.')[0])<20)process.exit(1)"
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v4
+        with:
+          artifact-ids: 14307753179
+          run-id: 44037212011
+          github-token: ${{ github.token }}
+          merge-multiple: true
+          path: packs
+      - name: Verify archive checksums and materialize the exact pair in a clean directory
+        run: python -IB scripts/ci_runtime_tarballs.py unpack
+      - name: Exercise the tarball launcher and verify the installed bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(node -p 'process.platform+"-"+process.arch')" = "$TARGET"
+          node installed/node_modules/openvegas-ai/bin/openvegas.js --version | grep '0\.3\.20'
+          node installed/node_modules/openvegas-ai/bin/openvegas.js --verify-bundle >/dev/null
+      - name: Linux system libraries survive a managed shell launch
+        if: runner.os == 'Linux'
+        shell: bash
+        working-directory: installed
+        run: |
+          set -eu
+          export OV_EXPECT_LIBRARY="$RUNNER_TEMP/openvegas-linker-probe"
+          LD_LIBRARY_PATH="$OV_EXPECT_LIBRARY" node node_modules/openvegas-ai/bin/openvegas.js --_terminal-relay -- /bin/sh -c 'test "$LD_LIBRARY_PATH" = "$OV_EXPECT_LIBRARY" && node --version'
+          env -u LD_LIBRARY_PATH -u LD_LIBRARY_PATH_ORIG node node_modules/openvegas-ai/bin/openvegas.js --_terminal-relay -- /bin/sh -c 'test -z "${LD_LIBRARY_PATH-}" && node --version'
+      - name: Fetch pinned standalone publisher executables without registry access
+        run: python -IB scripts/ci_runtime_tarballs.py hosts
+      - name: Verify both executable versions and both installed native plans
+        shell: python
+        run: |
+          import hashlib, json, os, pathlib, re, shutil, subprocess, tempfile
+          P = pathlib.Path
+          target = os.environ['TARGET']
+          triple = {'linux-x64':'x86_64-unknown-linux-musl','linux-arm64':'aarch64-unknown-linux-musl',
+                    'darwin-arm64':'aarch64-apple-darwin','darwin-x64':'x86_64-apple-darwin','win32-x64':'x86_64-pc-windows-msvc'}[target]
+          node = P(shutil.which('node')).resolve(strict=True)
+          suffix = '.exe' if os.name == 'nt' else ''
+          assert target == subprocess.check_output([str(node),'-p','process.platform+"-"+process.arch'],text=True).strip()
+          root = P.cwd()
+          m = root/'installed/node_modules'
+          customer = m/'openvegas-ai'
+          js = customer/'bin/openvegas.js'
+          def sha(p):
+              with p.open('rb') as f: return hashlib.file_digest(f,'sha256').hexdigest()
+          exes = {host:root/'hosts'/(host+suffix) for host in ('codex','claude')}
+          host_pins = {'linux-x64': {'codex': 'b8a11fedf24b2dfb59a70c9e52b030f9a508dcd49cd2dd0d41956f4c785156b8', 'claude': 'bfb3703ad5380242328459bc62ada4bde8ae7ba57c6e1eeadb9c00e08874c478'}, 'linux-arm64': {'codex': 'f2e6c980c937e734644bed1b4a9a018d3e63a0ccbe71aafc85c86a8c6e4b462a', 'claude': 'f220ca50ea4f3222043ff83cc224a1262e0196e9897acc0871efa94235b0c1fd'}, 'win32-x64': {'codex': '9d563ee4e0441ff9d59d612013e0460ddf8e5709735c2d9f6b98b7ef8ca4eb42', 'claude': '345996b4bdbae21d817f750fae2f34cbf8d81224a5444c78136091d121beb298'}, 'darwin-x64': {'codex': '1361e18268866b7f9f5e8703fabcea0a2a990a439eedcce03940abb4ba9eaaeb', 'claude': 'b513d15117cbf1bb05095dab41963fd394ff40de1fa99dcc6d7d1033bf292e9b'}, 'darwin-arm64': {'codex': '39acf979729dd290f9a24ee38b2914e036c91b65952872e28ae2a6b88a7db7c1', 'claude': 'a9d237949db816a0b7afd88a9a8e1df36b3a597a30f5a41d1c0539eb180a3450'}}[target]
+          assert {k:sha(p) for k,p in exes.items()}==host_pins
+          index = json.loads((customer/'release.json').read_bytes())
+          assert index['source_sha256']=='8c262b6c4dcb856987e821cce53fe96aa3f12dd263c19c5d0860787fabba77bd' and index['version']=='0.3.20'
+          p = index['platforms'][target]
+          assert p['package']=='@lordesteph/openvegas-'+target and p['binary']=='openvegas-'+target+suffix
+          assert sha(m/p['package']/'bin'/p['binary'])==p['sha256']
+          assert sha(js)=='437a0ca08f9a4459c716b1fba541b6a450e659d54f4aca5aa3dee9c9f66f6d40'
+          print('Verified same-run installed binary:',target,p['sha256'],flush=True)
+          with tempfile.TemporaryDirectory() as scratch:
+              home=P(scratch).resolve(); work=home/'work'; work.mkdir()
+              env={k:os.environ[k] for k in ('PATH','SYSTEMROOT','WINDIR','PATHEXT','COMSPEC','SYSTEMDRIVE','PROGRAMDATA','ProgramFiles','ProgramFiles(x86)','ProgramW6432','ALLUSERSPROFILE','CommonProgramFiles','CommonProgramFiles(x86)') if k in os.environ}
+              env.update(HOME=str(home),USERPROFILE=str(home),TMP=str(home),TEMP=str(home),TMPDIR=str(home),CI='true',
+                         OPENVEGAS_LOAD_PROJECT_ENV='0',OPENVEGAS_BACKEND_URL='http://127.0.0.1:1',
+                         DISABLE_TELEMETRY='1',DISABLE_AUTOUPDATER='1',DISABLE_ERROR_REPORTING='1',CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC='1')
+              for k,d in [('CODEX_HOME','.codex'),('CLAUDE_CONFIG_DIR','.claude'),('XDG_CONFIG_HOME','config'),('APPDATA','Roaming'),('LOCALAPPDATA','Local')]:
+                  v=home/d; v.mkdir(); env[k]=str(v)
+              if os.name=='nt':
+                  env.update(HOMEDRIVE=home.drive,HOMEPATH=str(home)[len(home.drive):])
+                  bash=P(env['ProgramFiles'])/'Git/bin/bash.exe'
+                  assert bash.is_file()
+                  env['CLAUDE_CODE_GIT_BASH_PATH']=str(bash)
+              env['PATH']=os.pathsep.join([*(str(p.parent.resolve(strict=True)) for p in exes.values()),env['PATH']])
+              def run(label,argv):
+                  q=subprocess.run(argv,env=env,cwd=work,stdin=subprocess.DEVNULL,capture_output=True,encoding='utf-8',errors='replace',timeout=180)
+                  if q.returncode:
+                      reason=next((x for x in ('plugin command failed','was not found','No host settings were changed','Local integration setup failed') if x in q.stdout+q.stderr),'no fixed diagnostic')
+                      raise SystemExit(f'{label}: exit {q.returncode}: {reason}')
+                  return q.stdout
+              for host,version in [('codex','0.166.0'),('claude','2.1.322')]:
+                  exe=exes[host].resolve(strict=True)
+                  assert P(shutil.which(host,path=env['PATH'])).samefile(exe)
+                  assert sha(exe)==host_pins[host], 'native executable digest mismatch'
+                  out=run(host+' version',[str(exe),'--version'])
+                  assert re.search(r'(?<![\d.])'+re.escape(version)+r'(?![\d.])',out)
+                  print(host,version,'verified native executable',sha(exe),flush=True)
+              rows=run('installed native plans',[str(node),str(js),'--local','go','--host','both','--dry-run']).splitlines()
+              for row in ('codex 0.166.0: mcp_text_only','claude 2.1.322: mod_and_mcp'):
+                  assert rows.count(row)==1, 'Missing expected native plan: '+row
+                  print('Verified installed plan:',row,flush=True)
+          receipt = dict(target=target, sha=os.environ['GITHUB_SHA'], run_id=os.environ['GITHUB_RUN_ID'],
+                         attempt=os.environ['GITHUB_RUN_ATTEMPT'], source_sha256=index['source_sha256'],
+                         tarballs={n:sha(root/'packs'/n) for n in ['openvegas-ai-0.3.20.tgz','lordesteph-openvegas-'+target+'-0.3.20.tgz']},
+                         binary_sha256=p['sha256'], launcher_sha256=sha(js), hosts=host_pins,
+                         npm_install_verified=False, clean_tarball_layout=True, plans={'codex':'mcp_text_only','claude':'mod_and_mcp'}, foreground=False, model_turns=0)
+          (root/'installed-qa.json').write_text(json.dumps(receipt,sort_keys=True)+'\n')
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installed-qa-${{ matrix.target }}
+          path: installed-qa.json
+          if-no-files-found: error
+          retention-days: 7
