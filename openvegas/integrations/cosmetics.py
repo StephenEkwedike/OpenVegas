@@ -34,9 +34,9 @@ def presentation_status(host):
         "message": (
             "Claude terminal Raster requires fresh ownership and a supported Mod; native UX is unverified."
             if host == "claude" else
-            "Purchased/entitled cosmetics remain text controls in Codex. "
-            "For in-session public preview animation, install with ov integration pets --install, "
-            "then select an OpenVegas preview using /pets in a supported graphics terminal. "
+            "These Codex controls return text. A new managed Codex session in a graphics-capable "
+            "terminal uses the public preview artwork for your equipped original emotes. "
+            "For standalone /pets previews, use ov integration pets --install. "
             "The native pet cache is not used for private premium delivery. Native UX is unverified."
         ),
     }

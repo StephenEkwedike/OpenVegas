@@ -12,7 +12,7 @@ from pathlib import Path
 
 P = Path
 TARGETS = {"darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64", "win32-x64"}
-VERSION = "0.3.19"
+VERSION = "0.3.20"
 MAIN = "openvegas-ai"
 MAIN_FILES = ["README.md", "bin/openvegas.js", "package.json", "release.json"]
 def sha(p):
