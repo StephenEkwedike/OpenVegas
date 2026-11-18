@@ -42,12 +42,13 @@ async def original_upstream(executable, env, cwd):
             else 'https://api.openai.com/v1')
 
 
-async def wallet_launch_selection(executable, env, cwd, spec):
+async def wallet_launch_selection(executable, env, cwd, spec, *, wallet_base):
     """Read the effective native model, not account secrets or chat content."""
     from .billing_host import exact_model, session_id
 
     async with host_server(executable, env, cwd=cwd, identity_probe=True) as endpoint:
-        config = await route_config(endpoint, cwd)
+        config = await route_config(endpoint, cwd, expected_provider=None, wallet_base=wallet_base)
+        provider = config.get('model_provider') or 'openai'
         async with policy._reader(endpoint) as call:
             result = await call('account/read', {'refreshToken': False})
             account = result.get('account')
@@ -60,7 +61,7 @@ async def wallet_launch_selection(executable, env, cwd, spec):
                 sid = args[index] if index < len(args) else None
                 require(session_id(sid) is not None, 'An exact conversation is required for wallet resume.')
                 thread = (await call('thread/read', {'threadId': sid, 'includeTurns': False}))['thread']
-                require(thread.get('id') == sid and thread.get('modelProvider') == 'openai'
+                require(thread.get('id') == sid and thread.get('modelProvider') == provider
                         and thread.get('cwd') == cwd, 'Wallet resume selection changed.')
                 model = thread.get('model')
             if not model:
@@ -76,7 +77,7 @@ async def wallet_launch_selection(executable, env, cwd, spec):
                 model = defaults[0]
             require(exact_model(model), 'Native model is unavailable; no wallet grant opened.')
     return (('https://chatgpt.com/backend-api/codex' if kind == 'chatgpt'
-             else 'https://api.openai.com/v1'), model)
+             else 'https://api.openai.com/v1'), model, provider)
 
 
 class ManagedCodexRouter(RuntimeOwner):
@@ -88,6 +89,7 @@ class ManagedCodexRouter(RuntimeOwner):
         self.boundary = None
         self._model = None
         self._router_url = None
+        self._provider = 'openai'
         self._display_task = None
         self._display_revision = 0
         self._prepared = None
@@ -119,7 +121,7 @@ class ManagedCodexRouter(RuntimeOwner):
 
     async def observe_source(self, *, preview=False):
         selected = await observe_selection(self.source_endpoint, self.s.identifier,
-                                           self.cwd, self._router_url)
+                                           self.cwd, self._router_url, expected_provider=self._provider)
         return selected.model
 
     async def run(self, argv):
@@ -130,8 +132,10 @@ class ManagedCodexRouter(RuntimeOwner):
         try:
             wallet_first = getattr(s, 'initial_billing', 'host') == 'v'
             if wallet_first:
-                upstream, self._model = await wallet_launch_selection(
-                    self.executable, self.env, self.cwd, s.launch_spec)
+                upstream, self._model, provider = await wallet_launch_selection(
+                    self.executable, self.env, self.cwd, s.launch_spec,
+                    wallet_base=broker.backend + '/integrations/native/v1')
+                self._provider = 'openvegas_v' if provider == 'openai' else provider
             else:
                 upstream = await original_upstream(self.executable, self.env, self.cwd)
             prepare, revoke = codex_wallet_callbacks(broker, active_model=lambda: self._model,
@@ -147,7 +151,8 @@ class ManagedCodexRouter(RuntimeOwner):
             self.session = RouterSession(ProviderAdapter('codex', upstream,
                 broker.backend + '/integrations/native'), task_boundary=self._boundary,
                 commit_guard=self._assert_commit, prepare_wallet=prepare, revoke_wallet=close_access,
-                status_changed=s.wallet_status_changed, local_auth='peer', request_boundary=True)
+                status_changed=s.wallet_status_changed, local_auth='peer', request_boundary=True,
+                codex_provider_identity=self._provider)
             if wallet_first:
                 from .wallet_startup import prepare_wallet
                 self._initial_wallet = await prepare_wallet(broker, self._model, s.launch_spec.version,
@@ -170,7 +175,8 @@ class ManagedCodexRouter(RuntimeOwner):
                             '--no-daemon', 'app-server', '--listen', endpoint]), server_env, self.cwd,
                         qa_role='managed'))
                     self.session.bind_native(_OWNED_SERVERS[self.source_endpoint])
-                    await route_config(self.source_endpoint, self.cwd, self._router_url)
+                    await route_config(self.source_endpoint, self.cwd, self._router_url,
+                                       expected_provider=self._provider)
                     async with RequestStableTransport(self.source_endpoint, on_notice=s.emit) as transport:
                         self.transport = transport
                         transport.title_origins = self.session.router.title_origins
@@ -192,7 +198,8 @@ class ManagedCodexRouter(RuntimeOwner):
                             if hasattr(self, 'replace_wallet'):
                                 await self.replace_wallet(None)
                             # No native server retirement based on HTTP idle.
-                            await policy.wait_until_idle(self.source_endpoint, s.identifier)
+                            await policy.wait_until_idle(self.source_endpoint, s.identifier,
+                                                         expected_provider=self._provider)
         finally:
             s.live_owner = s.codex_endpoint = None
             self.source_endpoint = None
@@ -233,7 +240,8 @@ class ManagedCodexRouter(RuntimeOwner):
             self.check_owner(ticket, generation)
             await self.transport.freeze(generation, intent=ticket.guard.token)
             self.boundary = CodexRequestBoundary(self.transport, self.source_endpoint,
-                ticket.identifier, expected_url=self._router_url, expected_model=ticket.host_model)
+                ticket.identifier, expected_url=self._router_url, expected_model=ticket.host_model,
+                expected_provider=self._provider)
             self._model = ticket.host_model
             self.require_switch_window()
             from time import monotonic

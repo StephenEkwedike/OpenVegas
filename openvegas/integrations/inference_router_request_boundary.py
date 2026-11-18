@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from dataclasses import dataclass
 from types import MappingProxyType
 
@@ -28,29 +29,48 @@ from .codex_stable_transport import StableTransport
 from .native_owned_process import OwnedProcess
 
 
-async def route_config(endpoint, cwd, expected_url=None):
+def _route(config, expected_url, expected_provider, wallet_base=None):
+    identity = config.get('model_provider') or 'openai'
+    if identity != 'openai':
+        provider = config.get('model_providers', {}).get(identity, {})
+        if (not isinstance(identity, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', identity)
+                or identity in {'ollama', 'lmstudio'}
+                or expected_provider is not None and identity != expected_provider
+                or provider.get('base_url') != (wallet_base or expected_url)
+                or not (wallet_base or expected_url)
+                or provider.get('wire_api') != 'responses'
+                or provider.get('env_key') != 'OPENVEGAS_NATIVE_TOKEN'
+                or provider.get('requires_openai_auth') is not False
+                or any(provider.get(k) for k in ('http_headers', 'env_http_headers',
+                                                'experimental_bearer_token', 'query_params', 'auth'))
+                or expected_url is not None
+                and provider.get('capabilities', {}).get('remote_compaction') != 'unsupported'):
+            raise TransportRefused('Native dedicated wallet route changed.')
+        return
+    if expected_provider not in (None, 'openai'):
+        raise TransportRefused('Native provider differs from the retained route.')
+    base = config.get('openai_base_url')
+    if (expected_url is not None and base != expected_url
+            or expected_url is None and base not in (None, '', 'https://api.openai.com/v1')):
+        raise TransportRefused('Native endpoint differs from the retained route.')
+
+
+async def route_config(endpoint, cwd, expected_url=None, *, expected_provider='openai', wallet_base=None):
     """Inspect only routing; do not replace or relax native security settings."""
     async with policy._reader(endpoint) as call:
         config = (await call('config/read', {'cwd': cwd, 'includeLayers': True}))['config']
-        if config.get('model_provider') not in (None, 'openai'):
-            raise TransportRefused('Native provider differs from the retained route.')
-        base = config.get('openai_base_url')
-        if (expected_url is not None and base != expected_url
-                or expected_url is None and base not in (None, '', 'https://api.openai.com/v1')):
-            raise TransportRefused('Native endpoint differs from the retained route.')
+        _route(config, expected_url, expected_provider, wallet_base)
         return config
 
 
-async def observe_selection(endpoint, thread_id, cwd, expected_url):
+async def observe_selection(endpoint, thread_id, cwd, expected_url, *, expected_provider='openai'):
     async with policy._reader(endpoint) as call:
         thread = (await call('thread/read', {'threadId': thread_id, 'includeTurns': False}))['thread']
-        selected = policy._identity(thread, thread_id, for_intent=True)
+        selected = policy._identity(thread, thread_id, for_intent=True, expected_provider=expected_provider)
         if selected.cwd != cwd:
             raise TransportRefused('Native working directory changed.')
         config = (await call('config/read', {'cwd': cwd, 'includeLayers': True}))['config']
-        if (config.get('model_provider') not in (None, 'openai')
-                or config.get('openai_base_url') != expected_url):
-            raise TransportRefused('Native request route changed.')
+        _route(config, expected_url, expected_provider)
         return selected
 
 
@@ -129,9 +149,11 @@ class _RequestReceipt:
 class CodexRequestBoundary:
     """Prove route/selection under held input, not global process quiescence."""
 
-    def __init__(self, transport, endpoint, thread_id, *, expected_url, expected_model=None):
+    def __init__(self, transport, endpoint, thread_id, *, expected_url, expected_model=None,
+                 expected_provider='openai'):
         self.transport, self.endpoint, self.thread_id = transport, endpoint, thread_id
         self.expected_url, self.expected_model = expected_url, expected_model
+        self.expected_provider = expected_provider
         self.process = _OWNED_SERVERS.get(endpoint)
         self._receipt = None
 
@@ -151,7 +173,8 @@ class CodexRequestBoundary:
         try:
             before = self._stamp()
             cwd = _POLICY_CONTEXT[self.endpoint]['cwd']
-            selected = await observe_selection(self.endpoint, self.thread_id, cwd, self.expected_url)
+            selected = await observe_selection(self.endpoint, self.thread_id, cwd, self.expected_url,
+                                               expected_provider=self.expected_provider)
             if self.expected_model is not None and selected.model != self.expected_model:
                 return False
             if before != self._stamp():

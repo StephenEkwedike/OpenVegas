@@ -307,6 +307,8 @@ def terminal(apply, make_default, restore_default, game_handoff, attach, check_c
             if not attach or not windows_host:
                 raise click.UsageError('Use --attach --host codex|claude.')
             from .windows_billing_host import launch
+            if windows_host == 'claude' and windows_fixture_port is None:
+                raise click.exceptions.Exit(launch(windows_host, managed=True))
             if windows_managed:
                 raise click.exceptions.Exit(launch(windows_host, managed=True))
             raise click.exceptions.Exit(launch(windows_host, fixture_port=windows_fixture_port))

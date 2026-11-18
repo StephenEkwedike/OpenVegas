@@ -201,11 +201,11 @@ async def _reader(endpoint):
         ) from None
 
 
-def _identity(thread, sid, *, for_intent=False):
+def _identity(thread, sid, *, for_intent=False, expected_provider='openai'):
     from .host_adapter import supported_version
     _require(
         thread["id"] == sid
-        and thread["modelProvider"] == "openai"
+        and thread["modelProvider"] == expected_provider
         and supported_version('codex', thread["cliVersion"])
         and thread["ephemeral"] is False
         and thread["parentThreadId"] is None
@@ -242,7 +242,7 @@ def _identity(thread, sid, *, for_intent=False):
     return IdleEvidence(sid, cwd, model)
 
 
-async def _inspect(call, sid, *, for_intent=False):
+async def _inspect(call, sid, *, for_intent=False, expected_provider='openai'):
     _require(isinstance(sid, str) and str(UUID(sid)) == sid, "invalid session ID")
     params = {"threadId": sid}
 
@@ -251,6 +251,7 @@ async def _inspect(call, sid, *, for_intent=False):
             (await call("thread/read", {**params, "includeTurns": False}))["thread"],
             sid,
             for_intent=for_intent,
+            expected_provider=expected_provider,
         )
 
     first = await read()
@@ -269,8 +270,8 @@ async def _inspect(call, sid, *, for_intent=False):
     return first
 
 
-async def _idle(call, sid):
-    return await _inspect(call, sid)
+async def _idle(call, sid, *, expected_provider='openai'):
+    return await _inspect(call, sid, expected_provider=expected_provider)
 
 
 async def observe_intent(endpoint, thread_id):
@@ -640,7 +641,7 @@ async def _retired_root(endpoint, sid, proc):
         _require(_OWNED_SERVERS.get(endpoint) is proc and proc.returncode is None, "owner changed")
 
 
-async def wait_until_idle(endpoint, thread_id=None, *, on_wait=None):
+async def wait_until_idle(endpoint, thread_id=None, *, on_wait=None, expected_provider='openai'):
     """Retirement only; no resume, signals, grant or successor authorization."""
     from .codex_billing_route import _OWNED_SERVERS
 
@@ -682,7 +683,7 @@ async def wait_until_idle(endpoint, thread_id=None, *, on_wait=None):
                         "runtime reloaded during drain",
                     )
                 else:
-                    await _idle(call, thread_id)
+                    await _idle(call, thread_id, expected_provider=expected_provider)
             if inspect_unloaded:
                 await _retired_root(endpoint, thread_id, proc)
             return
