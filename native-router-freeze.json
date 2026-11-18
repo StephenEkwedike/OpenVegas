@@ -1,6 +1,6 @@
 {
   "baseline_build_inputs_sha256": null,
-  "baseline_freeze_sha256": "6bef096a91b10cf0f6a2c6901e91a8f35b45c704c67337b5b14962a294186687",
+  "baseline_freeze_sha256": "36855c161b652331a38e0fb8c891179110feba2d33e0a7040d3a7d1f680a5653",
   "checkout_native_inputs": {
     "openvegas/cli.py": "3e40afb4cc62a4fe9c46198001d0d5f2c02a22ce0714f0df87d16e318418f696",
     "openvegas/integrations/assets/claude-command-ownership.js": "691a73b22195574e8a3194ee347910440f5f3084313d121b9e7b636a40612126",
@@ -44,6 +44,7 @@
     "openvegas/integrations/session_ownership.py": "65d2e00a3c7ce60ba19176aaffee3e6a4247aef82593e17dc8bb8896a30fdff9",
     "openvegas/integrations/setup_progress.py": "c7d5db949494e7b070bf14b0a310ea97534e71b7e63946a9baaeed11ccfc36ed",
     "openvegas/integrations/terminal_relay.py": "9700d6ecd845d61aaed8470d0ae241d475bcc6daadbf0bab7c349413dcb32eef",
+    "openvegas/integrations/terminal_wallet.py": "feecb4402987bcb92fd13cec30d682b36bebd21b7ab9602c5985f8f93991530d",
     "openvegas/integrations/wallet_offer_digest.py": "4591ecd100c2d58d33e8013665d56154444e36032fc8fba27b8ae960c775dd28",
     "openvegas/integrations/wallet_startup.py": "cb49d608e7e465a596b8275815fae5117c24a5dac56c3176f064e679f8bd202c",
     "openvegas/integrations/windows_billing_host.py": "c08c8f1e9884dbfea9128813a1c7ac4aab8af02b38a4a0f1dccbc22f0c8291ec",
@@ -61,12 +62,12 @@
   "frozen": true,
   "inputs": {
     "cli": {
-      "openvegas-0.3.25.dist-info/METADATA": "4ba1314c5e3540edef226c677e2c78fa8132e7e00d1785afe74381a54a552bca",
-      "openvegas-0.3.25.dist-info/RECORD": "828e8199707f2a7d9c4545b6f7e022c94fba7d6782e7fc095f475dbd79b777d3",
-      "openvegas-0.3.25.dist-info/WHEEL": "61532836a2b3111b7ec23519c09df7c41180c27165fb872a6d8913b566b88ad1",
-      "openvegas-0.3.25.dist-info/entry_points.txt": "2af366ec5eccda1438b59e0a1485d8db2d0d556b49820ca053e3aee185a4bbf1",
-      "openvegas-0.3.25.dist-info/top_level.txt": "d721166c5df01379cecbe646bb22b8dc6a651555becdc07ac05321294903d3ed",
-      "openvegas/__init__.py": "c605b21d2a28a2274c658edb7246421885de2b87814c12247856d5ececf3d5e2",
+      "openvegas-0.3.26.dist-info/METADATA": "25590c7aa469ce744495211eba90e6fe1221295f1533c7c577e627f39de3bb86",
+      "openvegas-0.3.26.dist-info/RECORD": "111f65b201d508b8c0f07d097e6fa92c19a396debc7d4264fd7bfd38141d6e5e",
+      "openvegas-0.3.26.dist-info/WHEEL": "61532836a2b3111b7ec23519c09df7c41180c27165fb872a6d8913b566b88ad1",
+      "openvegas-0.3.26.dist-info/entry_points.txt": "2af366ec5eccda1438b59e0a1485d8db2d0d556b49820ca053e3aee185a4bbf1",
+      "openvegas-0.3.26.dist-info/top_level.txt": "d721166c5df01379cecbe646bb22b8dc6a651555becdc07ac05321294903d3ed",
+      "openvegas/__init__.py": "1b3db39ac719c9f7638b795020dca23865c906b488614a1f4a2da6b0ae6322e7",
       "openvegas/agent/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "openvegas/agent/boost.py": "0f32e6a3b8ab05ff4de551be27cc93ddc6f6a94d51c23d0238c59d0cf2e721a8",
       "openvegas/agent/dashboard_cli.py": "5fb46dc1b39dbad4b26a210dedd418bd0df4099bfecabf60d2fa7275da4bdea1",
@@ -310,7 +311,7 @@
       "openvegas/integrations/terminal_profile.py": "e33949ed36431d58bb05f051bc39287efa606a48ec79cbac74a2cd614a180916",
       "openvegas/integrations/terminal_relay.py": "9700d6ecd845d61aaed8470d0ae241d475bcc6daadbf0bab7c349413dcb32eef",
       "openvegas/integrations/terminal_shell.py": "5c5835c3b50a032e73835af39cb6c528cfd3db45897b5f0abbdfd29966fa7453",
-      "openvegas/integrations/terminal_wallet.py": "fd7270c0c13a6a159d76095e67b64e8b729a031bec3a084c8c71fe5a65828de5",
+      "openvegas/integrations/terminal_wallet.py": "feecb4402987bcb92fd13cec30d682b36bebd21b7ab9602c5985f8f93991530d",
       "openvegas/integrations/use.py": "f6eb6ccbd849323c21d2adab36c1d5bb7bd5bc0761dd17e42295df51c368a421",
       "openvegas/integrations/wallet_offer_digest.py": "4591ecd100c2d58d33e8013665d56154444e36032fc8fba27b8ae960c775dd28",
       "openvegas/integrations/wallet_startup.py": "cb49d608e7e465a596b8275815fae5117c24a5dac56c3176f064e679f8bd202c",
@@ -392,7 +393,7 @@
       "openvegas/tv/schema.py": "04fc726c06c893666cccff91c9548a5432b3348b07832879a992159018c780e7",
       "openvegas/wallet/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
       "openvegas/wallet/ledger.py": "4de7fe7b84f5431c311d4f83d6624c37d2178b9d7b4ebe186b60f5737c6ddf11",
-      "pyproject.toml": "12afcb81022594ce6c60dcf1e25cf3db16c9cfe6efe140982c51cdfe7a45dfe4",
+      "pyproject.toml": "79232bfaa113a6145a6699729989395f927b4ec72a4dd32ad2d538bbc72d8d30",
       "requirements.lock": "74cf80310c10efff836d8e29e4165abb225d779c3ec86c16ee23a5c2c4996162",
       "scripts/build_cli_candidate.py": "bc5de76962997d3dfc5a90c84dbca8af524695053d67b9d1074a49c3b23915fb",
       "scripts/frozen_entry.py": "1f39353e7d62f5a12259550cbbd0524adaaa165984d954960a0f3aa37c10a505"
@@ -406,8 +407,8 @@
     "native_terminal_balance_display": "not_run",
     "permission_and_tool_continuity": "not_run"
   },
-  "preparation": "Private standard wallet launch 0.3.25 on public 0.3.24; no upload or publication.",
+  "preparation": "Private blue wallet balance 0.3.26 on public 0.3.25; no upload or publication.",
   "publication_approved": false,
   "published": false,
-  "version": "0.3.25"
+  "version": "0.3.26"
 }

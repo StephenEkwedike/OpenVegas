@@ -384,6 +384,7 @@ class WalletScreen:
     """
     def __init__(self):
         self.active = False
+        self.color = not os.environ.get("NO_COLOR") and os.environ.get("TERM") != "dumb"
         self.rows, self.columns = 24, 80
         self.payload = {"state": "loading", "billing": "host"}
         self.state, self.sequence = "text", bytearray()
@@ -422,8 +423,12 @@ class WalletScreen:
         if not self.active or not self.safe:
             return b""
         label = wallet_label(self.payload, self.columns)
-        return (b"\x1b7\x1b[?6l\x1b[?7l" + f"\x1b[{self.rows};1H\x1b[0m\x1b[2K\x1b[37m".encode()
-                + label.encode() + b"\x1b8" + (b"\x1b[?7h" if self.wrap else b"\x1b[?7l"))
+        if self.color and self.payload.get("state") == "ready":
+            value = "$V " + wallet_value(self.payload["balance"])
+            label = label.replace(value, f"\x1b[94m{value}\x1b[37m", 1)
+        return (b"\x1b7\x1b[?6l\x1b[?7l" + f"\x1b[{self.rows};1H\x1b[0m\x1b[2K".encode()
+                + (b"\x1b[37m" if self.color else b"") + label.encode() + b"\x1b8"
+                + (b"\x1b[?7h" if self.wrap else b"\x1b[?7l"))
 
     def _csi(self, raw):
         body, final = raw[2:-1], raw[-1:]
