@@ -308,8 +308,18 @@ async def effective_model(pipe, cfg):
     raise IntegrationError("Native default model could not be verified; no payer fallback.")
 
 
-async def route(pipe, cwd, expected=None, *, include_model=False, require_login=True):
+async def route(pipe, cwd, expected=None, *, include_model=False, require_login=True,
+                wallet_provider=None, wallet_upstream=None):
     cfg = (await pipe.call("config/read", {"cwd": cwd, "includeLayers": True}))["config"]
+    if wallet_provider is not None:
+        from .inference_router_request_boundary import _route
+
+        require(expected is not None and not require_login and not include_model
+                and wallet_provider not in {"openai", "ollama", "lmstudio"}
+                and wallet_upstream in ORIGINS.values())
+        _route(cfg, expected, wallet_provider)
+        # This is the retained host destination label, not an auth lookup or send.
+        return wallet_upstream
     require(
         cfg.get("model_provider") in (None, "openai")
         and not (cfg.get("model_providers") or {}).get("openai")
@@ -412,13 +422,13 @@ def _drive_key(value):
     return value[0].upper() + value[1:]
 
 
-def _root_identity(thread, sid, cwd):
+def _root_identity(thread, sid, cwd, *, expected_provider="openai"):
     # The shared identity verifier compares strings. The protocol types differ:
     # thread.cwd is AbsolutePathBuf; environment cwd and roots are legacy strings.
     # Preserve its policy checks; compare all three original paths before adapting
     # their spelling. No directory lookup or interpretation of other workspaces.
     if os.name != "nt" and cwd.startswith("/") and not cwd.startswith("//"):
-        return _identity(thread, sid)
+        return _identity(thread, sid, expected_provider=expected_provider)
     with checking(Check.WORKSPACE):
         key = _drive_key(cwd)
         envs = thread["environments"]
@@ -434,7 +444,16 @@ def _root_identity(thread, sid, cwd):
             "environments": [{**env, "cwd": cwd, "runtimeWorkspaceRoots": [cwd]}],
         },
         sid,
+        expected_provider=expected_provider,
     )
+
+
+def wallet_route(session):
+    if not getattr(session, "_native_wallet_launch", False):
+        return {}
+    require(session.state.mode == "v")
+    return {"wallet_provider": session.codex_provider_identity,
+            "wallet_upstream": session.adapter.host_base}
 
 
 async def selection(pipe, owner, params):
@@ -443,7 +462,9 @@ async def selection(pipe, owner, params):
     wallet = getattr(state, "mode", None) == "v"
     to_host = getattr(getattr(state, "pending", None), "target", None) == "host"
     with checking(Check.ROUTE):
-        require(await route(pipe, owner.cwd, owner.session._url, require_login=not wallet or to_host)
+        dedicated = wallet_route(owner.session)
+        require(await route(pipe, owner.cwd, owner.session._url, require_login=not wallet or to_host,
+                            **dedicated)
                 == owner.session.adapter.host_base)
     with checking(Check.INVENTORY):
         loaded = await pipe.call("thread/loaded/list", {"limit": 32})
@@ -452,7 +473,8 @@ async def selection(pipe, owner, params):
         thread = (await pipe.call("thread/read", {"threadId": sid, "includeTurns": False}))[
             "thread"
         ]
-        native = _root_identity(thread, sid, owner.cwd)
+        native = _root_identity(thread, sid, owner.cwd,
+                                expected_provider=dedicated.get("wallet_provider", "openai"))
     # The TUI may have picked a new model for this turn without changing
     # thread/read. Use only explicit, agreeing native turn selections.
     with checking(Check.MODEL):
@@ -580,7 +602,8 @@ async def bridge(ws, pipe, owner, tui):
                 if method in ("thread/start", "thread/resume", "thread/fork"):
                     require(
                         await route(pipe, owner.cwd, owner.session._url,
-                                    require_login=owner.session.state.mode != "v")
+                                    require_login=owner.session.state.mode != "v",
+                                    **wallet_route(owner.session))
                         == owner.session.adapter.host_base
                     )
                 await pipe.send(msg)

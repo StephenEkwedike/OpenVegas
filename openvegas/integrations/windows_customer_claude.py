@@ -370,3 +370,40 @@ async def run(owner, exe, env):
                             await asyncio.to_thread(child.wait)
     finally:
         peer.close()
+
+
+async def run_fixed(exe, env, cwd, *, version, args=()):
+    """Keep Windows Claude native; no two-payer router or permission overlay."""
+    from .broker import Broker
+    from .claude_fixed_wallet import check_args
+    from .claude_wallet_launch import session
+    from .wallet_startup import initial_billing
+
+    async def child(argv, child_env):
+        # Popen retains the Windows process handle; do not use the POSIX reaper.
+        process = subprocess.Popen(argv, env=child_env, cwd=cwd, shell=False)
+        try:
+            while process.poll() is None:
+                await asyncio.sleep(.05)
+            return process.returncode
+        finally:
+            if process.poll() is None:
+                process.kill()
+                await asyncio.to_thread(process.wait)
+
+    normalized = {key.upper(): value for key, value in env.items()}
+    normalized.setdefault('HOME', normalized.get('USERPROFILE', ''))
+    if initial_billing(normalized) == 'host':
+        return await child([exe, *args], env)
+    check_args(args)
+    require(same_workspace(cwd, str(Path.cwd())))
+    broker = Broker()
+    try:
+        return await session(broker, {'executable': exe, 'version': version}, child,
+                             click.echo, None, managed_args=args, source_env=normalized)
+    except IntegrationError:
+        raise
+    except Exception:
+        raise IntegrationError('Claude wallet launch failed. No automatic retry or host fallback.') from None
+    finally:
+        await broker.close()

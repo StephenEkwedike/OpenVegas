@@ -218,6 +218,23 @@ async def _session(host, broker, info, directory, runner, emit, confirm):
 async def launch(host, *, broker=None, runner=None, emit=click.echo, confirm=None):
     _check(all(stream.isatty() for stream in (sys.stdin, sys.stdout, sys.stderr)),
            'A wallet chat requires an interactive local terminal. No grant opened.')
+    if host == 'claude':
+        if broker is None and runner is None:
+            from .claude_fixed_wallet import public_launch
+            return await public_launch(['--wallet'])
+        from .claude_wallet_launch import session
+        info = native.detect(host)
+        owned = broker is None
+        broker = broker or Broker()
+        try:
+            return await session(broker, info, runner or _run_local, emit, confirm)
+        except IntegrationError:
+            raise
+        except Exception:
+            raise IntegrationError('Claude wallet launch failed. No automatic retry or subscription fallback.') from None
+        finally:
+            if owned:
+                await broker.close()
     _check(host == 'codex', 'Fresh Claude wallet launch is unavailable: subscription isolation with '
            'managed policy intact is not verified. No grant opened; host billing is unchanged.')
     info = native.detect(host)

@@ -41,7 +41,10 @@ class CodexWalletGrant:
         device = self.broker.credentials.load()
         require(isinstance(device, str) and device.startswith('ov_device_'),
                 'Sign in to OpenVegas before changing billing.')
-        options = await self.broker.request('GET', '/native/options?host=codex', token=device)
+        options = await self.broker.request(
+            'GET', '/native/options?host=codex&context_owner=native-v1', token=device)
+        require(isinstance(options, dict) and options.get('context_owner') == 'native-v1',
+                'Native context ownership was not acknowledged; no legacy fallback.')
         require(isinstance(options, dict) and options.get('wallet_limit_policy') == 'live_balance',
                 'The backend must support live wallet balance billing.')
         selection = Selection.reviewed(options, model)
@@ -76,8 +79,9 @@ class CodexWalletGrant:
         issued = self.wall_clock()
         grant = await boundary.request('POST', '/native/sessions', token=device, data={
             **fields, **consent, 'billing_mode': 'wallet', 'confirmed': True,
-            'pricing_fingerprint': fingerprint})
+            'pricing_fingerprint': fingerprint, 'context_owner': 'native-v1'})
         require(isinstance(grant, dict) and boundary.state == 'issued'
+                and grant.get('context_owner') == 'native-v1'
                 and grant.get('pricing') == pricing and grant.get('billing_mode') == 'wallet'
                 and isinstance(grant.get('session_id'), str)
                 and native._SAFE_ID.fullmatch(grant['session_id']) is not None
@@ -97,7 +101,8 @@ class CodexWalletGrant:
                 and status.get('status') not in {'closed', 'expired', 'revoked', 'exhausted'}
                 and all(status.get(k) == v for k, v in {
                     'session_id': grant['session_id'], 'host': 'codex', 'model': model,
-                    'billing_mode': 'wallet', 'allowed_models': identifiers}.items()),
+                    'billing_mode': 'wallet', 'allowed_models': identifiers,
+                    'context_owner': 'native-v1'}.items()),
                 'Wallet authorization is not active for this native selection.')
         binding = {'version': self.version, 'session_id': grant['session_id'],
                    'catalog_hash': grant.get('catalog_hash'), 'identifiers': tuple(identifiers)}
@@ -106,7 +111,7 @@ class CodexWalletGrant:
         self.qa_reference = qa_grant_reference(grant['session_id'])
         self.access = WalletAccess(token, issued + grant['expires_in'],
             validate_catalog=partial(_validate_grant_catalog, **binding), grant=self,
-            standard_http='ordinary_scope_revision' not in pricing and 'ws_compaction' not in pricing)
+            standard_http=True, context_owner='native-v1')
         return self.access
 
     async def close(self):

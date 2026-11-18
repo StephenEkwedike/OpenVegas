@@ -32,12 +32,13 @@ class WalletAccess:
     validate_catalog: object = field(default=None, repr=False)
     grant: object = field(default=None, repr=False)
     standard_http: bool = False
+    context_owner: str | None = None
 
 
 class RouterSession:
     def __init__(self, adapter, *, task_boundary=None, prepare_wallet, revoke_wallet,
                  hud=None, client=None, timeout=3.5, commit_guard=None, status_changed=None,
-                 local_auth='path', request_boundary=False):
+                 local_auth='path', request_boundary=False, codex_provider_identity='openvegas_v'):
         self.adapter = adapter
         self.state = RouterState(request_boundary=request_boundary)
         if not request_boundary and task_boundary is None:
@@ -46,6 +47,8 @@ class RouterSession:
         self._url = None
         self._launched = False
         self._closed = False
+        self.codex_provider_identity = codex_provider_identity
+        self._native_wallet_launch = False
         self._revoke = revoke_wallet
         self._timeout = timeout
         if local_auth == 'peer' and adapter.host != 'codex':
@@ -55,6 +58,9 @@ class RouterSession:
         self._peer = native_tcp_peer_auth() if local_auth == 'peer' else None
 
         def commit(ticket, grant):
+            if self._native_wallet_launch and ticket.target == 'host':
+                raise IntegrationError('This dedicated wallet runtime cannot use personal authentication; '
+                                       'start an explicit host session instead.')
             if ticket.target == 'v' and (not isinstance(grant, WalletAccess)
                     or not re.fullmatch(r'ov_native_[A-Za-z0-9_-]{16,128}', grant.token)
                     or not time.time() < grant.expires_at < float('inf')):
@@ -93,6 +99,10 @@ class RouterSession:
 
     def _standard_codex(self):
         return self.adapter.host == 'codex' and self._wallet is not None and self._wallet.standard_http
+
+    def _native_codex(self):
+        return (self.adapter.host == 'codex' and self._wallet is not None
+                and self._wallet.context_owner == 'native-v1')
 
     def __repr__(self):
         return '<RouterSession private-native-route>'
@@ -139,6 +149,9 @@ class RouterSession:
         command = parse_command(text)
         if command is None or command[0] not in ('v', 'host'):
             raise IntegrationError('Not a local billing command.')
+        if self._native_wallet_launch and command[0] == 'host':
+            raise IntegrationError('Start an explicit host session to use personal authentication; '
+                                   'this wallet runtime will not fall back.')
         return await self.controls.switch(command[0])
 
     def status(self):
@@ -166,6 +179,11 @@ class RouterSession:
                 updated, argv = launch_overlay(self.adapter.host, version, url, env, args,
                     local_capability=self.router.capability if self.router.auth_mode == 'header' else None,
                     peer_authenticated=self.router.auth_mode == 'peer')
+                if self._native_codex():
+                    from .wallet_startup import codex_wallet_overlay
+                    updated, argv = codex_wallet_overlay(
+                        url, updated, args, self.codex_provider_identity, self._token())
+                    self._native_wallet_launch = True
                 if self._standard_codex():
                     from .wallet_startup import STANDARD_CODEX_ARGS
                     argv = [*argv, *STANDARD_CODEX_ARGS]

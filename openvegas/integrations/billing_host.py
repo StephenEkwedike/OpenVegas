@@ -161,7 +161,7 @@ class Supervisor:
     def __init__(self, host, executable, args, env, *, emit=click.echo, version='unverified',
                  initial_billing='host'):
         self.host, self.executable, self.args, self.env = host, executable, list(args), dict(env)
-        if initial_billing not in {'host', 'v'} or (host != 'codex' and initial_billing != 'host'):
+        if initial_billing not in {'host', 'v'} or (host not in {'codex', 'claude'} and initial_billing != 'host'):
             raise IntegrationError('Unsupported initial billing; no native session opened.')
         self.initial_billing = initial_billing
         self.emit = emit
@@ -594,6 +594,9 @@ class Supervisor:
         if self.claude_owner is not None:
             try:
                 await asyncio.sleep(delay)
+                if hasattr(self.claude_owner, 'controls'):
+                    await self.claude_owner.controls(game=game, menu=menu)
+                    return
                 action = await controls(self.mode, game=game, menu=menu,
                                         check_v=self.claude_owner.preflight)
                 if action in ('use_v', 'use_host') and await self.claude_owner.arm(action[4:]):
@@ -722,6 +725,15 @@ class Supervisor:
             _codex_management()
             from .inference_router_managed import ManagedCodexRouter
             return await ManagedCodexRouter(self, env).run(client)
+        if self.host == 'claude':
+            from .claude_fixed_wallet import FixedClaude
+            if self.initial_billing == 'v' and (not self.modern_relay or self.generation != 1):
+                raise IntegrationError('Claude wallet launch requires the owned game shell. No host fallback started.')
+            self.claude_owner = FixedClaude(self)
+            try:
+                return await self.claude_owner.run(argv, env)
+            finally:
+                self.claude_owner = None
         claude_router_eligible = (self.host == 'claude' and self.modern_relay
             and self.generation == 1 and self.mode == 'host'
             and self.launch_spec.version == '2.1.322' and os.isatty(0) and os.isatty(1))
@@ -1194,6 +1206,8 @@ def main(host, args):
     if os.name == 'nt':
         from .windows_billing_host import launch
         try:
+            if host == 'claude':
+                return launch(host, args, managed=True)
             return launch(host, args)
         except IntegrationError as exc:
             click.echo(str(exc), err=True)
@@ -1204,9 +1218,18 @@ def main(host, args):
     env = external_child_environment(native.host_environment() or os.environ)
     if host == 'codex' and 'OPENVEGAS_INITIAL_BILLING' in os.environ:
         env['OPENVEGAS_INITIAL_BILLING'] = os.environ['OPENVEGAS_INITIAL_BILLING']
+    if host == 'claude' and 'OPENVEGAS_INITIAL_BILLING' in os.environ:
+        env['OPENVEGAS_INITIAL_BILLING'] = os.environ['OPENVEGAS_INITIAL_BILLING']
     # Noninteractive/admin invocations stay completely outside the supervisor.
     from .host_invocation import passthrough
-    if not os.isatty(0) or passthrough(host, args):
+    if host == 'claude':
+        from .claude_fixed_wallet import administrative
+        if not os.isatty(0) and not administrative(args):
+            raise IntegrationError('Claude wallet launch needs an interactive terminal. No host fallback started.')
+        direct = administrative(args)
+    else:
+        direct = not os.isatty(0) or passthrough(host, args)
+    if direct:
         executable = shutil.which(host)
         if not executable:
             raise IntegrationError('Native executable unavailable.')
@@ -1216,7 +1239,7 @@ def main(host, args):
         raise IntegrationError('Native executable unavailable.')
     try:
         from .wallet_startup import initial_billing
-        payer = initial_billing(env) if host == 'codex' else 'host'
+        payer = initial_billing(env) if host in {'codex', 'claude'} else 'host'
         return asyncio.run(Supervisor(host, info['executable'], args, env,
                                      version=info['version'], initial_billing=payer).run())
     except IntegrationError as exc:

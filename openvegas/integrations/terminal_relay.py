@@ -6,6 +6,7 @@ A game gets a separate PTY, never the host's tty; no input injection or SIGSTOP.
 from __future__ import annotations
 
 import atexit
+import errno
 import fcntl
 import hmac
 import json
@@ -328,8 +329,8 @@ def run(shell):
 
     atexit.register(cleanup)
     previous_winch = signal.signal(signal.SIGWINCH, resize)
-    def stop(*_):
-        raise SystemExit(0)
+    def stop(sig, _frame):
+        raise SystemExit(128 + sig)
     previous_signals = {sig: signal.signal(sig, stop) for sig in (signal.SIGTERM, signal.SIGHUP)}
     try:
         host_pid, host_fd = pty.fork()
@@ -539,7 +540,7 @@ def run(shell):
                         continue
                     data = os.read(0, 65536)
                     if not data:
-                        return
+                        return 1
                     if game_fd is not None:
                         # Escape, paste, and mouse packets belong entirely to the
                         # game; never carry a partial packet back to the host.
@@ -572,10 +573,22 @@ def run(shell):
                     try:
                         limit = min(65536, MAX_BACKLOG - len(backlog)) if game_fd is not None else 65536
                         data = os.read(host_fd, limit)
-                    except OSError:
+                    except OSError as exc:
+                        if exc.errno != errno.EIO:
+                            raise
                         data = b""
                     if not data:
-                        return
+                        # A closed slave is not a successful exit. Give the child
+                        # time to finish; never hang on a process that closed its tty.
+                        deadline = time.monotonic() + 2
+                        while True:
+                            pid, status = os.waitpid(host_pid, os.WNOHANG)
+                            if pid:
+                                rc = os.waitstatus_to_exitcode(status)
+                                return rc if rc >= 0 else 128 - rc
+                            if time.monotonic() >= deadline:
+                                return 1
+                            time.sleep(.01)
                     if game_fd is None:
                         modes.feed(data)
                         write_all(1, wallet.feed(data))
@@ -610,7 +623,7 @@ def main(argv=None):
     if shell and shell[0] == "--":
         shell = shell[1:]
     try:
-        run(shell or ["/bin/zsh", "-l"])
+        raise SystemExit(run(shell or ["/bin/zsh", "-l"]))
     except KeyboardInterrupt:
         # An interrupt sent to the relay process, not a key on the native PTY.
         raise SystemExit(130) from None

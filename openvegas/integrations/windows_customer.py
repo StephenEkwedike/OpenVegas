@@ -115,12 +115,23 @@ class Customer:
         self.refusal = None
         self.busy = False
         if host == "codex":
+            from .inference_router_controls import WalletPreparationRejected
             from .inference_router_wallet import codex_wallet_callbacks
             from .windows_customer_codex import RootAdapter, RootIngress
 
-            callbacks = codex_wallet_callbacks(
+            prepare_codex, revoke_codex = codex_wallet_callbacks(
                 broker, active_model=self.model, version=self.version
             )
+
+            async def prepare_codex_wallet(ticket):
+                if not self.session._native_wallet_launch:
+                    raise WalletPreparationRejected(
+                        "Windows wallet billing requires a dedicated wallet-first launch; "
+                        "no grant opened and no host fallback.")
+                return await prepare_codex(ticket)
+
+            prepare_codex_wallet.retained_grants = prepare_codex.retained_grants
+            callbacks = prepare_codex_wallet, revoke_codex
             adapter = RootAdapter(
                 host, upstream, broker.backend + "/integrations/native", lambda: self.sid
             )
@@ -322,6 +333,9 @@ def environment(env):
 
 
 async def run(host, exe, env, cwd, *, version=None):
+    if host == "claude":
+        from .windows_customer_claude import run_fixed
+        return await run_fixed(exe, env, cwd, version=version)
     initial = "host"
     if host == "codex":
         from .wallet_startup import initial_billing

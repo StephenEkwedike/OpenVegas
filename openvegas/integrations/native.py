@@ -195,14 +195,21 @@ def _check_claude_gateway_discovery(env):
                                'Billing unchanged; no Claude wallet child started.')
 
 
-def child_environment(host, backend, model, max_tokens, token):
+def child_environment(host, backend, model, max_tokens, token, *, source_env=None):
     """Use the original native home; strip stale provider routing and local keys."""
-    env = dict(host_environment() or os.environ)
-    local_connections = {key: os.environ[key] for key in (
+    env = dict(source_env if source_env is not None else host_environment() or os.environ)
+    # Preserve native model/output choices; a wallet grant is not a model map.
+    claude_choices = {key: value for key, value in env.items() if host == 'claude' and (
+        key in {'ANTHROPIC_MODEL', 'ANTHROPIC_DEFAULT_MODEL', 'ANTHROPIC_SMALL_FAST_MODEL',
+                'CLAUDE_CODE_MAX_OUTPUT_TOKENS', 'CLAUDE_CODE_SUBAGENT_MODEL',
+                'CLAUDE_CODE_SUBAGENT_MODEL_FORCE'}
+        or key.startswith('ANTHROPIC_DEFAULT_') and '_MODEL' in key)}
+    connections = os.environ if source_env is None else source_env
+    local_connections = {key: connections[key] for key in (
         'OPENVEGAS_TERMINAL_SOCKET', 'OPENVEGAS_TERMINAL_TOKEN',
         'OPENVEGAS_TERMINAL_OWNER', 'OPENVEGAS_TERMINAL_GENERATION',
         'OPENVEGAS_SWITCH_SOCKET', 'OPENVEGAS_SWITCH_TOKEN',
-    ) if key in os.environ}
+    ) if key in connections}
     prefixes = ('ANTHROPIC_', 'OPENAI_', 'OPENROUTER_', 'OPENVEGAS_', 'AZURE_OPENAI_',
                 'CLAUDE_CODE_OAUTH_', 'CLAUDE_CODE_API_KEY_', 'CLAUDE_CODE_SUBAGENT_',
                 'CLAUDE_CODE_MAX_OUTPUT_')
@@ -215,15 +222,25 @@ def child_environment(host, backend, model, max_tokens, token):
             env.pop(key)
     if host == 'claude':
         _check_claude_gateway_discovery(env)
+        credential_name = env.get('CLAUDE_CODE_HOST_AUTH_ENV_VAR')
+        if credential_name:
+            env.pop(credential_name, None)
+        for key in tuple(env):
+            if (key.startswith(('CLAUDE_CODE_HOST_AUTH_', 'CLAUDE_CODE_OAUTH_',
+                                'CLAUDE_CODE_USER_DELEGATED_SESSION_'))
+                    or key in {'CLAUDE_CODE_HOST_CREDS_FILE', 'CLAUDE_CODE_HOST_GATEWAY_LINEAGE',
+                               'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST', 'CLAUDE_CODE_SDK_HAS_HOST_AUTH_REFRESH',
+                               'CLAUDE_CODE_SESSIONS_OAUTH_TOKEN', 'CLAUDE_BG_AUTH_SNAPSHOT_PATH',
+                               'CLAUDE_CODE_GATEWAY_TOKEN_FILE_DESCRIPTOR',
+                               'CLAUDE_CODE_WEBSOCKET_AUTH_FILE_DESCRIPTOR',
+                               'CCR_AGENT_PROXY_TOKEN_FILE_DESCRIPTOR',
+                               'CLAUDE_SESSION_INGRESS_TOKEN_FILE', 'AGENT_PROXY_AUTH_TOKEN',
+                               '_CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL'}):
+                env.pop(key)
+        env.update(claude_choices)
         env.update(ANTHROPIC_BASE_URL=backend + '/integrations/native',
                    ANTHROPIC_API_KEY='', ANTHROPIC_AUTH_TOKEN=token,
-                   ANTHROPIC_MODEL=model, ANTHROPIC_DEFAULT_MODEL=model,
-                   CLAUDE_CODE_SUBAGENT_MODEL=model, CLAUDE_CODE_MAX_OUTPUT_TOKENS=str(max_tokens))
-        # Pin only the actual family: mapping Fable/Opus to Haiku makes the host
-        # infer unsupported adaptive-thinking capabilities from those aliases.
-        for family in ('HAIKU', 'SONNET', 'OPUS', 'FABLE'):
-            if 'claude-' + family.lower() + '-' in model:
-                env['ANTHROPIC_DEFAULT_' + family + '_MODEL'] = model
+                   CLAUDE_CODE_USE_GATEWAY='1', CLAUDE_CODE_MAX_RETRIES='0')
     env['OPENVEGAS_NATIVE_TOKEN'] = token
     env.update(local_connections)
     return env
@@ -293,7 +310,8 @@ def host_argv(executable, host, backend, model, host_args, *, local_tools_only=F
     }
     # A complete table, not individual leaf merges with a stale provider's auth
     # settings. Dedicated flags take precedence without rewriting user config.
-    table = '{' + ','.join(key + '=' + json.dumps(value) for key, value in provider.items()) + '}'
+    table = ('{' + ','.join(key + '=' + json.dumps(value) for key, value in provider.items())
+             + ',capabilities={remote_compaction="unsupported"}}')
     if not isinstance(provider_identity, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', provider_identity):
         raise IntegrationError('Invalid native provider identity.')
     if provider_identity in {'openai', 'ollama', 'lmstudio'}:
@@ -587,6 +605,10 @@ def native(ctx, host, model, limit_v, max_output_tokens, yes, dry_run, local_too
     Routing/model/config overrides require a new launch and spending consent.
     """
     try:
+        if host == 'claude':
+            raise IntegrationError('Use openvegas claude for native wallet billing, or '
+                                   'openvegas claude --host-billing for explicit nonwallet billing. '
+                                   'The legacy Claude wallet launcher is disabled.')
         if yes and (model is None or limit_v is None):
             raise IntegrationError('--yes requires explicit --model and --limit-v; omitted defaults require interactive consent.')
         if model is None:
@@ -614,6 +636,9 @@ class HostCommand(NativeCommand):
                          + (' On macOS and Linux, no arguments (or --wallet) opens a fresh wallet chat at the verified price.' if host == 'codex' else ''))
 
     def parse_args(self, ctx, args):
+        if self.fixed_host == 'claude':
+            ctx.meta['claude_native_args'] = list(args)
+            return []
         # Choosing a route is not spending consent. The fresh launcher quotes
         # first. Never reinterpret a host argument after the literal delimiter.
         if self.fixed_host == 'codex' and not args and os.name == 'posix':
@@ -627,6 +652,14 @@ class HostCommand(NativeCommand):
         return super().parse_args(ctx, args)
 
     def invoke(self, ctx):
+        if self.fixed_host == 'claude' and 'claude_native_args' in ctx.meta:
+            from .claude_fixed_wallet import public_launch
+            try:
+                ctx.exit(asyncio.run(public_launch(ctx.meta['claude_native_args'])))
+            except IntegrationError as exc:
+                raise click.ClickException(str(exc)) from None
+            except KeyboardInterrupt:
+                ctx.exit(130)
         if ctx.meta.get('fresh_wallet'):
             from .fresh_wallet import command
             try:
