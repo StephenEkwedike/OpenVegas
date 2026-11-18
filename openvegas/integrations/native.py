@@ -611,7 +611,7 @@ class HostCommand(NativeCommand):
         super().__init__(host, callback=native.callback,
                          params=[copy.copy(p) for p in native.params if p.name != 'host'],
                          help=f'Launch {host} with a confirmed OpenVegas $V budget. Native options follow --.'
-                         + (' On macOS and Linux, no arguments (or --wallet) opens a fresh wallet chat after price confirmation.' if host == 'codex' else ''))
+                         + (' On macOS and Linux, no arguments (or --wallet) opens a fresh wallet chat at the verified price.' if host == 'codex' else ''))
 
     def parse_args(self, ctx, args):
         # Choosing a route is not spending consent. The fresh launcher quotes

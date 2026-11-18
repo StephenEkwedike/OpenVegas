@@ -1,9 +1,9 @@
-name: Native 0.3.24 candidates (never publish)
+name: Native 0.3.25 candidates (never publish)
 
 on:
   workflow_dispatch:
   push:
-    branches: ['codex/wallet-consent-0324-24816f87']
+    branches: ['codex/wallet-launch-0325-fc49fc4d']
 
 permissions:
   contents: read
@@ -103,7 +103,7 @@ jobs:
           echo "OPENVEGAS_LINUX_AUDIO=$out" >> "$GITHUB_ENV"
       - name: Export byte-identical pinned public client
         run: |
-          git -c core.autocrlf=false -c core.eol=lf archive --format=zip --output ../release-source.zip HEAD -- openvegas openvegas-0.3.24.dist-info scripts npm-cli pyproject.toml requirements.lock ci-build-requirements.txt native-release-inputs.json native-router-freeze.json .github/workflows/native-public.yml
+          git -c core.autocrlf=false -c core.eol=lf archive --format=zip --output ../release-source.zip HEAD -- openvegas openvegas-0.3.25.dist-info scripts npm-cli pyproject.toml requirements.lock ci-build-requirements.txt native-release-inputs.json native-router-freeze.json .github/workflows/native-public.yml
           python -m zipfile -e ../release-source.zip dist/git-source
           python dist/git-source/scripts/ci_prepare_native_frozen.py dist/git-source dist/frozen
       - name: Install lock-constrained build dependencies
@@ -117,8 +117,8 @@ jobs:
       - name: Build and independently verify frozen binary and Mac profile
         working-directory: dist/frozen/cli
         env:
-          FREEZE_PIN: '6bef096a91b10cf0f6a2c6901e91a8f35b45c704c67337b5b14962a294186687'
-          SOURCE_PIN: '24816f87d46ee477289b42be27aa5d5e28251bb39c11d39fcffd47e1a8c1c253'
+          FREEZE_PIN: '36855c161b652331a38e0fb8c891179110feba2d33e0a7040d3a7d1f680a5653'
+          SOURCE_PIN: 'fc49fc4d689ae98f78c2b91859a954f534e0c4980e8b7d616f73c8c78c204dbf'
           TARGET: ${{ matrix.target }}
         run: python -B ../../git-source/scripts/ci_runtime_binary.py --output "${{ github.workspace }}/dist/native-candidate"
       - uses: actions/upload-artifact@v4
@@ -207,7 +207,7 @@ jobs:
         run: |
           set -euo pipefail
           test "$(node -p 'process.platform+"-"+process.arch')" = "$TARGET"
-          node installed/node_modules/openvegas-ai/bin/openvegas.js --version | grep '0\.3\.24'
+          node installed/node_modules/openvegas-ai/bin/openvegas.js --version | grep '0\.3\.25'
           node installed/node_modules/openvegas-ai/bin/openvegas.js --verify-bundle >/dev/null
       - name: Linux system libraries survive a managed shell launch
         if: runner.os == 'Linux'
@@ -241,7 +241,7 @@ jobs:
           host_pins = {'linux-x64': {'codex': 'b452ca20f838a8855a88a41050ee4a694033fff4ea3ecdad5633e6e0e8d13f2b', 'claude': 'bfb3703ad5380242328459bc62ada4bde8ae7ba57c6e1eeadb9c00e08874c478'}, 'linux-arm64': {'codex': '3bb41c9a80187773e2a59278d4fc355b1a163c31bb5a79581e37d4fe428af047', 'claude': 'f220ca50ea4f3222043ff83cc224a1262e0196e9897acc0871efa94235b0c1fd'}, 'win32-x64': {'codex': 'ce1945eb440b5481ed1233ebaf32b7056ee7e4e452fa62ffe1cbfb26103cdee0', 'claude': '345996b4bdbae21d817f750fae2f34cbf8d81224a5444c78136091d121beb298'}, 'darwin-x64': {'codex': 'e57da7be8695c079d2d1d156dab79708e43ebb6cf7e34527b8b01d6aa942788e', 'claude': 'b513d15117cbf1bb05095dab41963fd394ff40de1fa99dcc6d7d1033bf292e9b'}, 'darwin-arm64': {'codex': '739cda86e15d30a6e2b40cf8dcbbfb988aaf48b305b27065573bb8e9fd41d002', 'claude': 'a9d237949db816a0b7afd88a9a8e1df36b3a597a30f5a41d1c0539eb180a3450'}}[target]
           assert {k:sha(p) for k,p in exes.items()}==host_pins
           index = json.loads((customer/'release.json').read_bytes())
-          assert index['source_sha256']=='24816f87d46ee477289b42be27aa5d5e28251bb39c11d39fcffd47e1a8c1c253' and index['version']=='0.3.24'
+          assert index['source_sha256']=='fc49fc4d689ae98f78c2b91859a954f534e0c4980e8b7d616f73c8c78c204dbf' and index['version']=='0.3.25'
           p = index['platforms'][target]
           assert p['package']=='@lordesteph/openvegas-'+target and p['binary']=='openvegas-'+target+suffix
           assert sha(m/p['package']/'bin'/p['binary'])==p['sha256']
@@ -280,7 +280,7 @@ jobs:
                   print('Verified installed plan:',row,flush=True)
           receipt = dict(target=target, sha=os.environ['GITHUB_SHA'], run_id=os.environ['GITHUB_RUN_ID'],
                          attempt=os.environ['GITHUB_RUN_ATTEMPT'], source_sha256=index['source_sha256'],
-                         tarballs={n:sha(root/'packs'/n) for n in ['openvegas-ai-0.3.24.tgz','lordesteph-openvegas-'+target+'-0.3.24.tgz']},
+                         tarballs={n:sha(root/'packs'/n) for n in ['openvegas-ai-0.3.25.tgz','lordesteph-openvegas-'+target+'-0.3.25.tgz']},
                          binary_sha256=p['sha256'], launcher_sha256=sha(js), hosts=host_pins,
                          npm_install_verified=False, clean_tarball_layout=True, plans={'codex':'mcp_text_only','claude':'mod_and_mcp'}, foreground=False, model_turns=0)
           (root/'installed-qa.json').write_text(json.dumps(receipt,sort_keys=True)+'\n')

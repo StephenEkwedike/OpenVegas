@@ -147,13 +147,16 @@ def go(host, dry_run, yes, allow_file_credential, keep_game_approvals, verbose):
                 click.echo("Public pets were not updated; existing files preserved. Run ov integration pets --install --upgrade for details.")
         new_terminal = _offer_default_terminal()
         click.secho("OpenVegas ready. Wallet: " + format_v(account["balance"]), fg="blue")
+        click.echo("- " + ("Open a new VS Code terminal and run " + " or ".join(hosts) + "."
+                           if new_terminal else "Restart " + " or ".join(hosts) + "."))
+        click.secho("- REQUIRED for game shortcuts: open /hooks in your client and approve the OpenVegas hooks.",
+                    fg="yellow", bold=True)
         if "codex" in hosts:
-            click.echo("For an OpenVegas-funded Codex chat: npx openvegas-ai codex. Review the price before starting.")
-        click.echo(("Open a new VS Code terminal, then run codex or claude. " if new_terminal else
-                    "Restart Claude/Codex. ") +
-                   "Review OpenVegas in /hooks and the host's trust prompt. If declined, hooks stay off; "
-                   "reopen /hooks to review. Other hooks and tools are not auto-approved.")
-        click.echo("Play: Claude /openvegas play | Codex $openvegas play. Pets: /pets.")
+            click.echo("- Codex uses your OpenVegas $V wallet at standard speed by default.")
+            click.echo("- Play in Codex: $openvegas play")
+        if "claude" in hosts:
+            click.echo("- Play in Claude: /openvegas play")
+        click.echo("- Pets: /pets")
         if verbose:
             click.echo("Controls: " + ", ".join(action["name"] for action in action_catalog()) + ".")
             click.echo("Restore game approvals: ov integration game-permissions --restore")
@@ -336,7 +339,8 @@ def terminal(apply, make_default, restore_default, game_handoff, attach, check_c
         from .credentials import backend_url, profile
         env.update(OPENVEGAS_BACKEND_URL=backend_url(),
                    OPENVEGAS_INTEGRATION_PROFILE=str(profile()))
-        click.echo("Same-terminal game handoff active. Run codex or claude here as usual. No new tab, billing change or host replacement.")
+        click.echo("Same-terminal game handoff active.")
+        click.echo("- Run codex or claude here.")
         os.environ.clear()
         os.environ.update(env)
         run([env.get("SHELL", "/bin/zsh"), "-l"])

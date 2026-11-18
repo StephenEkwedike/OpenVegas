@@ -31,6 +31,7 @@ class WalletAccess:
     expires_at: float
     validate_catalog: object = field(default=None, repr=False)
     grant: object = field(default=None, repr=False)
+    standard_http: bool = False
 
 
 class RouterSession:
@@ -87,7 +88,11 @@ class RouterSession:
             status_changed=status_changed)
         self.router = InferenceRouter(self.state, adapter, wallet_token=self._token, client=client,
                                       catalog_validator=self._catalog, auth_mode=local_auth,
-                                      peer_auth=self._peer, admission_wait=timeout if request_boundary else 0)
+                                      peer_auth=self._peer, admission_wait=timeout if request_boundary else 0,
+                                      wallet_http_only=self._standard_codex)
+
+    def _standard_codex(self):
+        return self.adapter.host == 'codex' and self._wallet is not None and self._wallet.standard_http
 
     def __repr__(self):
         return '<RouterSession private-native-route>'
@@ -123,7 +128,11 @@ class RouterSession:
         self._token()
         if self._wallet is None or self._wallet.validate_catalog is None:
             raise IntegrationError('Reviewed native model catalog is unavailable.')
-        return self._wallet.validate_catalog(value)
+        catalog = self._wallet.validate_catalog(value)
+        if self._standard_codex():
+            from .wallet_startup import standard_catalog
+            return standard_catalog(catalog)
+        return catalog
 
     async def command(self, text):
         """Called by the existing authenticated local-command owner, not a model."""
@@ -157,6 +166,9 @@ class RouterSession:
                 updated, argv = launch_overlay(self.adapter.host, version, url, env, args,
                     local_capability=self.router.capability if self.router.auth_mode == 'header' else None,
                     peer_authenticated=self.router.auth_mode == 'peer')
+                if self._standard_codex():
+                    from .wallet_startup import STANDARD_CODEX_ARGS
+                    argv = [*argv, *STANDARD_CODEX_ARGS]
                 self._url = url
                 yield updated, argv
         finally:

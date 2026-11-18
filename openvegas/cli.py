@@ -11104,10 +11104,7 @@ def _integration_install_entry(**options):
     if not options["yes"]:
         options["keep_game_approvals"] = True
     options["yes"] = True
-    result = go.callback(**options)
-    if not options["dry_run"]:
-        click.echo("Review OpenVegas hooks in Claude/Codex with /hooks; installation does not grant hook trust.")
-    return result
+    return go.callback(**options)
 
 
 cli.add_command(click.Command(go.name, callback=_integration_install_entry,

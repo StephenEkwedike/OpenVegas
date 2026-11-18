@@ -295,7 +295,7 @@ def main(argv=None):
     selected = receipt["checkout_native_inputs"]
     assert sources == vf["source_digest"](blobs) == os.environ["SOURCE_PIN"]
     assert operating_system + "-" + architecture == os.environ["TARGET"]
-    assert not args.include_review_packs and version == "0.3.24"
+    assert not args.include_review_packs and version == "0.3.25"
     assert selected["openvegas/integrations/runtime_directory.py"]
     for path, pin in selected.items():
         assert hashlib.sha256(blobs[path]).hexdigest() == pin

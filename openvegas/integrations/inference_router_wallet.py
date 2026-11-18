@@ -35,7 +35,7 @@ class CodexWalletGrant:
         return self.boundary is None or self.boundary.state in {
             'new', 'quoting', 'quoted', 'rejected', 'closed'}
 
-    async def open(self, model, *, confirm_quote=None, review_catalog=None):
+    async def open(self, model, *, confirm_quote=None, bind_catalog=False):
         require(not self.started, 'Wallet preparation cannot be retried.')
         self.started = True
         device = self.broker.credentials.load()
@@ -68,11 +68,11 @@ class CodexWalletGrant:
                 accepted = await accepted
             require(accepted is True, 'Wallet quote was not confirmed; no grant opened.')
         consent = {}
-        if review_catalog is not None:
+        if bind_catalog:
             from .wallet_offer_digest import offer_digest
+            require(any(row.get('model') == model and row.get('pricing') == pricing
+                        for row in options['models']), 'Wallet price changed before startup; no grant opened.')
             consent['consent_catalog_digest'] = offer_digest(options['models'], fields['max_tokens'])
-            require(review_catalog(quote, options, device) is True,
-                    'Wallet quote was not confirmed; no grant opened.')
         issued = self.wall_clock()
         grant = await boundary.request('POST', '/native/sessions', token=device, data={
             **fields, **consent, 'billing_mode': 'wallet', 'confirmed': True,
@@ -105,7 +105,8 @@ class CodexWalletGrant:
         require(catalog is not None, 'Reviewed native model metadata is unavailable; no model substituted.')
         self.qa_reference = qa_grant_reference(grant['session_id'])
         self.access = WalletAccess(token, issued + grant['expires_in'],
-            validate_catalog=partial(_validate_grant_catalog, **binding), grant=self)
+            validate_catalog=partial(_validate_grant_catalog, **binding), grant=self,
+            standard_http='ordinary_scope_revision' not in pricing and 'ws_compaction' not in pricing)
         return self.access
 
     async def close(self):

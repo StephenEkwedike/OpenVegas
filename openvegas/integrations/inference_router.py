@@ -365,7 +365,7 @@ class Completion:
 class InferenceRouter:
     def __init__(self, state, adapter, *, wallet_token=lambda: None,
                  client=None, capability=None, catalog_validator=None, auth_mode='path',
-                 peer_auth=None, admission_wait=0):
+                 peer_auth=None, admission_wait=0, wallet_http_only=lambda: False):
         self.state, self.adapter = state, adapter
         from .inference_router_fixture import configured
         self.fixture = configured(adapter)
@@ -382,6 +382,7 @@ class InferenceRouter:
         self.authority = None
         self.client = client
         self.catalog_validator = catalog_validator
+        self.wallet_http_only = wallet_http_only
         self.sockets = set()
         self.admission_wait = admission_wait
         self.title_origins = None
@@ -640,6 +641,16 @@ class InferenceRouter:
             query = scope.get('query_string', b'').decode('ascii')
             full_path = path + ('?' + query if query else '')
             plan = self.adapter.request_plan('GET', full_path, headers, self.state.mode, self.wallet_token())
+            if self.state.mode == 'v' and self.wallet_http_only():
+                # Codex interprets 426 as same-provider HTTP negotiation. No
+                # response.create was accepted, so there is no attempt to replay.
+                if 'websocket.http.response' not in scope.get('extensions', {}):
+                    await self._error(scope, send, 403, 'HTTP transport required.')
+                    return
+                await send({'type': 'websocket.http.response.start', 'status': 426,
+                            'headers': [(b'cache-control', b'no-store')]})
+                await send({'type': 'websocket.http.response.body', 'body': b''})
+                return
             handshake = self.state.begin('GET', path, retry=retry)
             slot = NativeSocket(self.state.mode, self.state.generation, handshake)
             self.sockets.add(slot)

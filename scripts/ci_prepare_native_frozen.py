@@ -7,18 +7,18 @@ import sys
 from pathlib import Path
 
 source, output = (Path(arg).resolve() for arg in sys.argv[1:])
-expected = '6bef096a91b10cf0f6a2c6901e91a8f35b45c704c67337b5b14962a294186687'
+expected = '36855c161b652331a38e0fb8c891179110feba2d33e0a7040d3a7d1f680a5653'
 raw = (source / 'native-router-freeze.json').read_bytes()
 assert hashlib.sha256(raw).hexdigest() == expected
 receipt = json.loads(raw)
-assert receipt['version'] == '0.3.24'
+assert receipt['version'] == '0.3.25'
 spec = importlib.util.spec_from_file_location('source_verifier', source / 'scripts/verify_native_release_source.py')
 helper = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(helper)
 helper.stage(source, output / 'cli')
 (output / 'cli/release-inputs.json').replace(output / 'public-export-receipt.json')
 for name, digest in receipt['inputs']['cli'].items():
-    if name.startswith('openvegas-0.3.24.dist-info/'):
+    if name.startswith('openvegas-0.3.25.dist-info/'):
         data = helper.read(source, name, digest)
         path = output / 'cli' / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -27,6 +27,6 @@ shutil.copyfile(source / 'native-router-freeze.json', output / 'freeze.json')
 actual = {p.relative_to(output / 'cli').as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
           for p in (output / 'cli').rglob('*') if p.is_file()}
 assert actual == receipt['inputs']['cli']
-assert len(receipt['checkout_native_inputs']) == 52
+assert len(receipt['checkout_native_inputs']) == 53
 print(json.dumps({'frozen': str(output), 'freeze_sha256': expected,
                   'input_files': len(actual), 'version': receipt['version']}))

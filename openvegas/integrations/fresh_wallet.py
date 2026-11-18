@@ -137,22 +137,17 @@ async def _session(host, broker, info, directory, runner, emit, confirm):
     quote = await broker.request('POST', '/native/quote', token=device, data=selection)
     _check(quote == row, 'The direct model, token cap or price changed. Start again.')
     price = quote['pricing']
-    conversion = native._decimal(price['v_per_supplier_usd'])
-    rates = [native._decimal(price[k], allow_zero=True) * conversion for k in
-             ('supplier_input_usd_per_million', 'supplier_output_usd_per_million')]
-    emit(f"Fresh local {host} chat | OpenVegas wallet | {row['model']}. "
-         f"Available now: {balance:f} $V; input/output per million: {rates[0]:f}/{rates[1]:f} $V. "
-         "Each request needs available funds; no purchases or top-ups.")
+    emit(f"Fresh local {host} chat | {row['model']} | $V billing.")
     emit('No chat was resumed. No managed play/switch controls here. Quit to the shell for the lobby '
          'or return to your managed session. Hosted search and subagents are disabled.')
-    try:
-        accepted = confirm('Start this chat using your available $V?', default=False)
-    except click.Abort:
-        emit('Cancelled. No wallet session opened.')
-        return 130
-    if not accepted:
-        emit('Cancelled. No wallet session opened.')
-        return 0
+    if confirm is not None:
+        try:
+            if not confirm('Start this chat using your available $V?', default=False):
+                emit('Cancelled. No wallet session opened.')
+                return 0
+        except click.Abort:
+            emit('Cancelled. No wallet session opened.')
+            return 130
     token = None
     try:
         # If the terminal closes during issuance, finish receiving the handle
@@ -193,6 +188,10 @@ async def _session(host, broker, info, directory, runner, emit, confirm):
             catalog = _filter_catalog(await _bundled_catalog(info['executable'], directory, os.environ), choices)
         else:
             catalog = _validate_grant_catalog(reviewed, **binding, identifiers=list(choices))
+        standard = 'ordinary_scope_revision' not in price and 'ws_compaction' not in price
+        if standard:
+            from .wallet_startup import standard_catalog, STANDARD_CODEX_ARGS
+            catalog = standard_catalog(catalog)
         model_file = Path(directory) / 'models.json'
         with model_file.open('x') as output:
             os.chmod(model_file, 0o600)
@@ -202,7 +201,8 @@ async def _session(host, broker, info, directory, runner, emit, confirm):
         argv = native.host_argv(info['executable'], host, broker.backend, row['model'], [],
                                 local_tools_only=True, provider_identity='openvegas_wallet_' + secrets.token_hex(8),
                                 supports_websockets='ordinary_scope_revision' in price)
-        argv[1:1] = ['--no-daemon', '--disable', 'multi_agent', '--disable', 'multi_agent_v2',
+        argv[1:1] = [*(STANDARD_CODEX_ARGS if standard else ()),
+                     '--no-daemon', '--disable', 'multi_agent', '--disable', 'multi_agent_v2',
                      '-c', 'model_catalog_json=' + json.dumps(str(model_file))]
         if reviewed is not None:
             _validate_grant_catalog(reviewed, **binding, identifiers=list(choices))
@@ -215,7 +215,7 @@ async def _session(host, broker, info, directory, runner, emit, confirm):
     return code if closed else code or 1
 
 
-async def launch(host, *, broker=None, runner=None, emit=click.echo, confirm=click.confirm):
+async def launch(host, *, broker=None, runner=None, emit=click.echo, confirm=None):
     _check(all(stream.isatty() for stream in (sys.stdin, sys.stdout, sys.stderr)),
            'A wallet chat requires an interactive local terminal. No grant opened.')
     _check(host == 'codex', 'Fresh Claude wallet launch is unavailable: subscription isolation with '
